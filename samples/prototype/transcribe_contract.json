@@ -1,0 +1,73 @@
+{
+  "version": "1.0",
+  "source": "justoneapi_collector/transcribe.py",
+  "extensions": [
+    ".aac",
+    ".avi",
+    ".flac",
+    ".flv",
+    ".m4a",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".ts",
+    ".wav",
+    ".webm",
+    ".wmv"
+  ],
+  "output_rule": "输出目录 / 源文件名.txt；输出目录留空时写在源文件同目录",
+  "output_code": [
+    "out_dir = Path(task.out_dir) if task.out_dir else src.parent",
+    "prefix = out_dir / src.stem",
+    "txt = prefix.with_suffix(\".txt\")"
+  ],
+  "columns": [
+    "状态",
+    "文件名",
+    "大小",
+    "所在目录",
+    "转录稿"
+  ],
+  "states": [
+    {
+      "key": "done",
+      "label": "已转录",
+      "tone": "ok"
+    },
+    {
+      "key": "running",
+      "label": "转录中",
+      "tone": "info"
+    },
+    {
+      "key": "pending",
+      "label": "待转录",
+      "tone": "muted"
+    },
+    {
+      "key": "stale",
+      "label": "源文件已更新",
+      "tone": "warn"
+    },
+    {
+      "key": "conflict",
+      "label": "同名冲突",
+      "tone": "danger"
+    }
+  ],
+  "stat_cards": [
+    "全部文件",
+    "已转录",
+    "待转录",
+    "需处理"
+  ],
+  "rule_notes": [
+    "有非空同名 txt、且 txt 不早于源文件 ⇒ 已转录",
+    "txt 比源文件旧 ⇒ 源文件已更新，建议重转",
+    "多个源文件映射到同一个 txt ⇒ 同名冲突，不能只按文件名判断",
+    "输出目录里找不到源的 txt ⇒ 孤立产物，单独统计",
+    "身份用完整路径 + 大小，绝不用文件名当主键"
+  ]
+}

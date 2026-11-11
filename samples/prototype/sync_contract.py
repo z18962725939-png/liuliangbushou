@@ -20,8 +20,10 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from bridge import Bridge  # noqa: E402
+import transcribe_status as ts  # noqa: E402
 
 CONTRACT = HERE / "download_contract.json"
+TC_CONTRACT = HERE / "transcribe_contract.json"
 PAGES = sorted(HERE.glob("流量捕手_*原型.html"))
 
 
@@ -55,25 +57,50 @@ def main() -> int:
     if not PAGES:
         raise SystemExit("没有找到原型页（流量捕手_*原型.html）")
 
+    # 转录页契约：规则由 transcribe_status.contract() 从 transcribe.py 现场校验，
+    # 快照是本机只读扫描在「生成时刻」的真实结果，静态预览与真窗口同源。
+    tc = ts.contract()
+    TC_CONTRACT.write_text(json.dumps(tc, ensure_ascii=False, indent=2), encoding="utf-8")
+    tc_overview = ts.overview()
+
     for page in PAGES:
         html = page.read_text(encoding="utf-8")
-        html, has_contract = replace_block(html, "inline-contract", contract)
-        html, has_rows = replace_block(html, "inline-rows", rows)
-        if not (has_contract and has_rows):
-            print(f"  {page.name}：没有内联契约占位块，跳过（工作台页不需要）")
-            continue
-        # 注入后回读一次，确认 JSON 没被 HTML 解析破坏
-        roundtrip = re.search(
-            r'<script type="application/json" id="inline-contract">(.*?)</script>', html, re.S)
-        assert json.loads(roundtrip.group(1))["version"] == contract["version"], \
-            f"{page.name} 内联契约回读失败"
-        page.write_text(html, encoding="utf-8")
-        print(f"  {page.name}：已同步契约 v{contract['version']} + {len(rows)} 条行数据")
+        if "视频下载" in page.name:
+            html, has_contract = replace_block(html, "inline-contract", contract)
+            html, has_rows = replace_block(html, "inline-rows", rows)
+            if not (has_contract and has_rows):
+                print(f"  {page.name}：缺少内联占位块，跳过")
+                continue
+            roundtrip = re.search(
+                r'<script type="application/json" id="inline-contract">(.*?)</script>',
+                html, re.S)
+            assert json.loads(roundtrip.group(1))["version"] == contract["version"], \
+                f"{page.name} 内联契约回读失败"
+            page.write_text(html, encoding="utf-8")
+            print(f"  {page.name}：已同步下载契约 v{contract['version']} + {len(rows)} 条行数据")
+        elif "转录" in page.name:
+            html, has_tc = replace_block(html, "inline-transcribe-contract", tc)
+            html, has_ov = replace_block(html, "inline-transcribe-overview", tc_overview)
+            if not (has_tc and has_ov):
+                print(f"  {page.name}：缺少转录内联占位块，跳过")
+                continue
+            back = re.search(
+                r'<script type="application/json" id="inline-transcribe-overview">(.*?)</script>',
+                html, re.S)
+            assert json.loads(back.group(1))["total"] == tc_overview["total"], \
+                f"{page.name} 内联状态快照回读失败"
+            page.write_text(html, encoding="utf-8")
+            print(f"  {page.name}：已同步状态契约 v{tc['version']} + "
+                  f"真实扫描 {tc_overview['total']} 个文件快照")
+        else:
+            print(f"  {page.name}：工作台页不需要内联契约，跳过")
 
-    print(f"契约唯一真源：{CONTRACT.name}")
-    print(f"  列名 {len(contract['columns'])} 项 / 平台 {len(labels)} 个 / "
-          f"下载内容 {len(contract['media_types'])} 种 / 行数据 {len(rows)} 条")
-    print("  校验：平台中文名、4 列名、4 下载内容、4 统计卡、内联 JSON 回读全部通过")
+    print(f"契约唯一真源：{CONTRACT.name} / {TC_CONTRACT.name}")
+    print(f"  下载：列名 {len(contract['columns'])} 项 / 平台 {len(labels)} 个 / "
+          f"行数据 {len(rows)} 条")
+    print(f"  转录：扩展名 {len(tc['extensions'])} 种 / 状态 {len(tc['states'])} 类 / "
+          f"真实快照 {tc_overview['total']} 个文件")
+    print("  校验：中文名、列名、状态枚举、内联 JSON 回读全部通过")
     return 0
 
 

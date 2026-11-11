@@ -1,0 +1,120 @@
+{
+  "mode": "pywebview + WebView2 真实窗口 · 转录任务可视化",
+  "dom_ready": true,
+  "js_to_python": {
+    "from_api": true,
+    "columns": [
+      "状态",
+      "文件名",
+      "大小",
+      "所在目录",
+      "转录稿"
+    ],
+    "states": [
+      "已转录",
+      "转录中",
+      "待转录",
+      "源文件已更新",
+      "同名冲突"
+    ],
+    "extensions": 14,
+    "root": "D:\\流量捕手\\下载",
+    "total": 584,
+    "gpu": "NVIDIA GeForce RTX 3060"
+  },
+  "python_to_js": {
+    "demo_badges": {
+      "done": 1,
+      "pending": 2,
+      "stale": 1,
+      "conflict": 1,
+      "running": 1
+    },
+    "mid_percent": 2,
+    "phase": "提取音频",
+    "progress_width": "2%",
+    "log_has_progress": true,
+    "final": {
+      "percent": 100,
+      "phase": "已完成",
+      "file": "访谈_第 03 期.m4a",
+      "elapsed": 3.7,
+      "demo": true,
+      "message": "转写完成：成功 1 条，失败 0 条"
+    }
+  },
+  "checks": [
+    [
+      "网页拿到 Python 的状态契约",
+      true
+    ],
+    [
+      "输出命名规则逐行来自 transcribe.py",
+      true
+    ],
+    [
+      "网页读到本机真实目录与文件总数",
+      true
+    ],
+    [
+      "统计卡数字与真实扫描一致",
+      true
+    ],
+    [
+      "文件表格行数与 Python 返回一致",
+      true
+    ],
+    [
+      "显卡卡片读到 nvidia-smi 真实读数",
+      true
+    ],
+    [
+      "演示状态覆盖 5 类徽标",
+      true
+    ],
+    [
+      "演示数据显式标注、不冒充真实文件",
+      true
+    ],
+    [
+      "Python 进度与阶段推到网页 DOM",
+      true
+    ],
+    [
+      "网页日志记录进度回调",
+      true
+    ],
+    [
+      "任务终态 100% 回传网页",
+      true
+    ],
+    [
+      "按输出目录重新判定生效",
+      true
+    ],
+    [
+      "新页与 Python 令牌同源、换肤生效",
+      true
+    ],
+    [
+      "页面自包含且状态来自唯一真源",
+      true
+    ]
+  ],
+  "token_source": {
+    "web": "#0052D9",
+    "python": "#0052D9",
+    "web_dark": "#C8F751",
+    "python_dark": "#C8F751"
+  },
+  "static": {
+    "inline_contract": true,
+    "inline_overview": true,
+    "tokens_block": true,
+    "no_external_css": true,
+    "hooks": true,
+    "state_badges": true
+  },
+  "ok": true,
+  "page": "transcribe"
+}

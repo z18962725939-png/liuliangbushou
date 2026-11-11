@@ -4,12 +4,15 @@
 - 数据：js_api=Bridge，Python 业务侧只读真实数据 + 实时推进度
 - 网络：不起本地服务、不占端口、不联网、不调用付费接口
 - 用法：
-    python 启动原型.py                              工作台窗口（可交互）
-    python 启动原型.py --page download             视频下载窗口（可交互）
-    python 启动原型.py --selftest                  工作台桥接自检后关窗
-    python 启动原型.py --page download --selftest 下载页全链路自检后关窗
+    python 启动原型.py                                 工作台窗口（可交互）
+    python 启动原型.py --page download                视频下载窗口（可交互）
+    python 启动原型.py --page transcribe              转录任务可视化窗口（可交互）
+    python 启动原型.py --selftest                     工作台桥接自检后关窗
+    python 启动原型.py --page download --selftest     下载页全链路自检后关窗
+    python 启动原型.py --page transcribe --selftest  转录页全链路自检后关窗
 
-自检结果分别写入 _bridge_result.json / _bridge_result_download.json。
+自检结果分别写入 _bridge_result.json / _bridge_result_download.json /
+_bridge_result_transcribe.json。
 """
 from __future__ import annotations
 
@@ -34,6 +37,11 @@ PAGES = {
         "html": HERE / "流量捕手_视频下载原型.html",
         "result": HERE / "_bridge_result_download.json",
         "title": "流量捕手 · 视频下载原型（真实契约 + WebView2 桥接）",
+    },
+    "transcribe": {
+        "html": HERE / "流量捕手_转录任务可视化原型.html",
+        "result": HERE / "_bridge_result_transcribe.json",
+        "title": "流量捕手 · 转录任务可视化原型（真实状态 + WebView2 桥接）",
     },
 }
 
@@ -273,12 +281,184 @@ def self_test_download(window, bridge: Bridge) -> dict:
     return result
 
 
+def self_test_transcribe(window, bridge: Bridge) -> dict:
+    """转录页：状态契约 → 真实目录扫描 → 四态徽标 → 进度推送 → 令牌同源。"""
+    result = base_result("pywebview + WebView2 真实窗口 · 转录任务可视化", window, bridge)
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if read_js(window, "!!(window.__apiContract && window.__overviewFromApi)"):
+            break
+        time.sleep(0.25)
+
+    # ① 状态契约与输出命名规则必须来自 transcribe.py 源码
+    web_c = read_js(window, "window.__apiContract || null")
+    py_c = bridge.get_transcribe_contract()
+    result["js_to_python"] = {
+        "from_api": read_js(window, "!!window.__contractFromApi"),
+        "columns": (web_c or {}).get("columns"),
+        "states": [s["label"] for s in (web_c or {}).get("states", [])],
+        "extensions": len((web_c or {}).get("extensions", [])),
+    }
+    result["checks"].append((
+        "网页拿到 Python 的状态契约",
+        bool(web_c) and (web_c or {}).get("columns") == py_c["columns"]
+        and bool(read_js(window, "!!window.__contractFromApi")),
+    ))
+    code_text = read_js(window, "document.getElementById('code-rules').textContent") or ""
+    result["checks"].append((
+        "输出命名规则逐行来自 transcribe.py",
+        all(line in code_text for line in py_c["output_code"]),
+    ))
+
+    # ② 本机真实目录扫描（只读）
+    web_o = read_js(window, "window.__apiOverview || null")
+    py_o = bridge.get_transcribe_overview()
+    result["js_to_python"]["root"] = (web_o or {}).get("root")
+    result["js_to_python"]["total"] = (web_o or {}).get("total")
+    result["checks"].append((
+        "网页读到本机真实目录与文件总数",
+        bool(web_o) and (web_o or {}).get("root") == py_o["root"]
+        and (web_o or {}).get("total", 0) > 0,
+    ))
+    m1 = read_js(window, "document.getElementById('m1').textContent") or ""
+    m3 = read_js(window, "document.getElementById('m3').textContent") or ""
+    result["checks"].append((
+        "统计卡数字与真实扫描一致",
+        str(py_o["total"]) in m1 and str(py_o["stats"]["pending"]) in m3,
+    ))
+    dom_rows = read_js(window, "document.querySelectorAll('#tbody tr').length") or 0
+    result["checks"].append((
+        "文件表格行数与 Python 返回一致",
+        dom_rows == len((web_o or {}).get("rows", [])),
+    ))
+
+    # ③ 显卡实时卡片（nvidia-smi 只读）
+    gpu_title = read_js(window, "document.getElementById('gpu-title').textContent") or ""
+    gpu_util = read_js(window, "document.getElementById('gpu-util').textContent") or ""
+    result["js_to_python"]["gpu"] = gpu_title
+    result["checks"].append((
+        "显卡卡片读到 nvidia-smi 真实读数",
+        "—" not in gpu_title and "—" not in gpu_util and "%" in gpu_util,
+    ))
+
+    # ④ 切到演示状态：四种状态徽标都要出现，且必须显式标注「演示」
+    read_js(window, "document.getElementById('modeBtn').click();true")
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        if read_js(window, "!!(window.__apiOverview && window.__apiOverview.demo)"):
+            break
+        time.sleep(0.25)
+    badges = {
+        key: read_js(window, f"document.querySelectorAll('.state-{key}').length") or 0
+        for key in ("done", "pending", "stale", "conflict", "running")
+    }
+    demo_label = read_js(window, "document.getElementById('h2').textContent") or ""
+    result["python_to_js"] = {"demo_badges": badges}
+    result["checks"].append((
+        "演示状态覆盖 5 类徽标",
+        all(v >= 1 for v in badges.values()),
+    ))
+    result["checks"].append((
+        "演示数据显式标注、不冒充真实文件",
+        "演示" in demo_label,
+    ))
+
+    # ⑤ Python → JS：阶段 / 进度 / 终态
+    read_js(window, "document.getElementById('runDemo').click();true")
+    mid = None
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        mid = read_js(window, "window.__tcProgress || null")
+        if mid and (mid.get("percent") or 0) > 0:
+            break
+        time.sleep(0.2)
+    width = read_js(window, "document.getElementById('live-bar').style.width") or ""
+    log_text = read_js(window, "document.getElementById('bridge-log').textContent") or ""
+    result["python_to_js"].update({
+        "mid_percent": (mid or {}).get("percent"),
+        "phase": (mid or {}).get("phase"),
+        "progress_width": width,
+        "log_has_progress": "进度回调" in log_text,
+    })
+    result["checks"].append((
+        "Python 进度与阶段推到网页 DOM",
+        bool(width) and "%" in width and bool((mid or {}).get("phase")),
+    ))
+    result["checks"].append(("网页日志记录进度回调", "进度回调" in log_text))
+    done = None
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        done = read_js(window, "window.__tcDone || null")
+        if done:
+            break
+        time.sleep(0.25)
+    result["python_to_js"]["final"] = done
+    result["checks"].append((
+        "任务终态 100% 回传网页",
+        bool(done) and done.get("percent") == 100 and done.get("phase") == "已完成",
+    ))
+
+    # ⑥ 输出目录重新判定：结果里的 out_dir 必须等于用户填的值
+    out_value = py_o["root"].replace("\\", "/")
+    read_js(window,
+            "document.getElementById('outDir').value=" + json.dumps(out_value) + ";"
+            "document.getElementById('rescan').click();true")
+    deadline = time.time() + 10
+    new_out = ""
+    while time.time() < deadline:
+        new_out = read_js(window, "(window.__apiOverview||{}).out_dir || ''") or ""
+        if new_out and new_out.replace("\\", "/") == out_value:
+            break
+        time.sleep(0.25)
+    result["checks"].append((
+        "按输出目录重新判定生效",
+        new_out.replace("\\", "/") == out_value,
+    ))
+
+    # ⑦ 令牌同源 + 换肤
+    local = bridge.get_snapshot()
+    web_brand = read_js(
+        window,
+        "getComputedStyle(document.documentElement).getPropertyValue('--brand').trim()")
+    dark_brand = read_js(
+        window,
+        "document.getElementById('themeBtn').click();"
+        "getComputedStyle(document.documentElement).getPropertyValue('--brand').trim()")
+    result["token_source"] = {
+        "web": web_brand, "python": local["brand_light"],
+        "web_dark": dark_brand, "python_dark": local["brand_dark"],
+    }
+    result["checks"].append((
+        "新页与 Python 令牌同源、换肤生效",
+        str(web_brand).lower() == local["brand_light"].lower()
+        and str(dark_brand).lower() == local["brand_dark"].lower(),
+    ))
+
+    # ⑧ 产物级静态断言
+    html = PAGES["transcribe"]["html"].read_text(encoding="utf-8")
+    result["static"] = {
+        "inline_contract": 'id="inline-transcribe-contract">' in html,
+        "inline_overview": 'id="inline-transcribe-overview">' in html,
+        "tokens_block": '<style id="tokens">' in html,
+        "no_external_css": LINK_TAG not in html,
+        "hooks": all(h in html for h in ("onTranscribeProgress", "onTranscribeDone",
+                                         "get_transcribe_overview")),
+        "state_badges": all(f".state-{k}" in html for k in
+                            ("done", "pending", "stale", "conflict", "running")),
+    }
+    result["checks"].append(("页面自包含且状态来自唯一真源", all(result["static"].values())))
+    result["ok"] = all(passed for _, passed in result["checks"])
+    return result
+
+
 def main() -> int:
     selftest = "--selftest" in sys.argv
-    page_key = "download" if "--page" in sys.argv and (
-        "download" in sys.argv[sys.argv.index("--page") + 1:]
-        or "下载" in sys.argv[sys.argv.index("--page") + 1:]
-    ) else "workbench"
+    tail = sys.argv[sys.argv.index("--page") + 1:] if "--page" in sys.argv else []
+    page_key = "workbench"
+    if any("download" in a or "下载" in a for a in tail):
+        page_key = "download"
+    elif any("transcribe" in a or "转录" in a for a in tail):
+        page_key = "transcribe"
     page = PAGES[page_key]
     bridge = Bridge()
     window = webview.create_window(
@@ -296,7 +476,10 @@ def main() -> int:
         if not selftest:
             return
         try:
-            fn = self_test_download if page_key == "download" else self_test_workbench
+            fn = {
+                "download": self_test_download,
+                "transcribe": self_test_transcribe,
+            }.get(page_key, self_test_workbench)
             result = fn(win, api)
         except Exception as exc:  # 自检脚本本身出错也要留下证据
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
