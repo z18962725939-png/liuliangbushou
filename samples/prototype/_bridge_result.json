@@ -1,5 +1,5 @@
 {
-  "mode": "pywebview + WebView2 真实窗口",
+  "mode": "pywebview + WebView2 真实窗口 · 工作台",
   "dom_ready": true,
   "js_to_python": {
     "js_received": true,
@@ -12,7 +12,6 @@
   "python_to_js": {
     "progress_width": "35%",
     "log_has_running": true,
-    "state": "运行中",
     "final_state": "已完成"
   },
   "checks": [
@@ -45,5 +44,6 @@
     "web": "#0052D9",
     "python": "#0052D9"
   },
-  "ok": true
+  "ok": true,
+  "page": "workbench"
 }

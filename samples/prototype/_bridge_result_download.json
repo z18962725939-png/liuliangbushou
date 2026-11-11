@@ -1,0 +1,112 @@
+{
+  "mode": "pywebview + WebView2 真实窗口 · 视频下载",
+  "dom_ready": true,
+  "js_to_python": {
+    "from_api": true,
+    "columns": [
+      "选择",
+      "平台",
+      "标题",
+      "时长 / 大小"
+    ],
+    "platforms": [
+      "抖音",
+      "小红书",
+      "快手",
+      "视频号"
+    ],
+    "formula": "done + part",
+    "output_dir": "D:\\流量捕手\\下载",
+    "output_files": 500,
+    "rows": 5
+  },
+  "python_to_js": {
+    "mid_percent": 10,
+    "progress_width": "10%",
+    "log_has_progress": true,
+    "final_percent": 100,
+    "done": 5,
+    "failed": 1,
+    "success_card": "4个",
+    "fail_card": "1条",
+    "final_message": "下载完成：成功 4 条，失败 1 条",
+    "fail_badges": 1
+  },
+  "checks": [
+    [
+      "网页拿到 Python 的真实数据契约",
+      true
+    ],
+    [
+      "进度口径来自 Qt 源码",
+      true
+    ],
+    [
+      "网页读到本机 config.json 的下载目录",
+      true
+    ],
+    [
+      "表格行数与 Python 返回一致",
+      true
+    ],
+    [
+      "界面显示平台中文名、不暴露英文内部键",
+      true
+    ],
+    [
+      "Python 进度推到网页 DOM",
+      true
+    ],
+    [
+      "网页日志记录进度回调",
+      true
+    ],
+    [
+      "进度按真实口径推送（含已完成条数 / 字节数）",
+      true
+    ],
+    [
+      "批次终态 100% 回传网页",
+      true
+    ],
+    [
+      "统计卡「已下载」随进度更新",
+      true
+    ],
+    [
+      "失败态徽标与统计卡同步",
+      true
+    ],
+    [
+      "完成文案用源码原话",
+      true
+    ],
+    [
+      "网页与 Python 令牌同源",
+      true
+    ],
+    [
+      "页面自包含且数据来自唯一真源",
+      true
+    ],
+    [
+      "下载页换肤同样来自令牌真源",
+      true
+    ]
+  ],
+  "token_source": {
+    "web": "#0052D9",
+    "python": "#0052D9",
+    "web_dark": "#C8F751",
+    "python_dark": "#C8F751"
+  },
+  "static": {
+    "inline_contract": true,
+    "tokens_block": true,
+    "no_external_css": true,
+    "hooks": true,
+    "columns_from_source": true
+  },
+  "ok": true,
+  "page": "download"
+}

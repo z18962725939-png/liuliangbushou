@@ -16,7 +16,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE / "design_tokens.json"
 CSS_OUT = HERE / "tokens.css"
 PY_OUT = HERE / "tokens.py"
-HTML_OUT = HERE / "流量捕手_工作台原型.html"
+HTML_PAGES = sorted(HERE.glob("流量捕手_*原型.html"))
 LINK_TAG = '<link rel="stylesheet" href="tokens.css">'
 
 
@@ -75,23 +75,25 @@ def render_py(data: dict) -> str:
     )
 
 
-def sync_html(css: str) -> bool:
-    """把令牌样式同步进原型页，让 HTML 自包含（预览面板/离线双击都不丢样式）。
+def sync_html(css: str) -> int:
+    """把令牌样式同步进**每一张**原型页，让 HTML 自包含。
 
     页面本身仍然是派生物：样式块由本函数从唯一真源覆写，手改会被下次生成覆盖。
+    返回成功同步的页面数；新加页面只要带 <style id="tokens"> 占位就会被覆盖。
     """
-    if not HTML_OUT.exists():
-        return False
-    html = HTML_OUT.read_text(encoding="utf-8")
-    block = '<style id="tokens">\n' + css + '</style>'
-    if '<style id="tokens">' in html:
-        html = re.sub(r'<style id="tokens">.*?</style>', lambda _: block, html, flags=re.S)
-    elif LINK_TAG in html:
-        html = html.replace(LINK_TAG, block)
-    else:
-        return False
-    HTML_OUT.write_text(html, encoding="utf-8")
-    return True
+    done = 0
+    for page in HTML_PAGES:
+        html = page.read_text(encoding="utf-8")
+        block = '<style id="tokens">\n' + css + '</style>'
+        if '<style id="tokens">' in html:
+            html = re.sub(r'<style id="tokens">.*?</style>', lambda _: block, html, flags=re.S)
+        elif LINK_TAG in html:
+            html = html.replace(LINK_TAG, block)
+        else:
+            continue
+        page.write_text(html, encoding="utf-8")
+        done += 1
+    return done
 
 
 def main() -> int:
@@ -103,7 +105,7 @@ def main() -> int:
     print(f"令牌唯一真源：{SOURCE.name}（v{data['version']}）")
     print(f"  → {CSS_OUT.name}：浅色 {n} 项 + 深色 {n} 项 + 通用 {len(data['common'])} 项")
     print(f"  → {PY_OUT.name}：Python / Qt 侧同源读取")
-    print(f"  → {HTML_OUT.name}：{'已同步为自包含样式' if sync_html(css) else '未找到（跳过）'}")
+    print(f"  → 原型页：{sync_html(css)}/{len(HTML_PAGES)} 张已同步为自包含样式")
     print("  校验：两套主题键集合一致，变量名与取值合法，生成完成")
     return 0
 

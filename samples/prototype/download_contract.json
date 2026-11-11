@@ -1,0 +1,124 @@
+{
+  "_说明": "自动生成，请勿手改。真源为 Qt 下载页与 media_parser.py，运行 extract_contract.py 重新抽取。",
+  "version": "1.0",
+  "source": {
+    "page": "gui_qt/pages/video_download_page.py",
+    "labels": "justoneapi_collector/media_parser.py"
+  },
+  "columns": [
+    "选择",
+    "平台",
+    "标题",
+    "时长 / 大小"
+  ],
+  "media_types": [
+    {
+      "label": "视频",
+      "value": "video"
+    },
+    {
+      "label": "音频(抽mp3)",
+      "value": "audio"
+    },
+    {
+      "label": "图文(图集)",
+      "value": "image"
+    },
+    {
+      "label": "文案",
+      "value": "text"
+    }
+  ],
+  "stat_cards": [
+    {
+      "label": "待下载",
+      "unit": "条"
+    },
+    {
+      "label": "已下载",
+      "unit": "个"
+    },
+    {
+      "label": "失败",
+      "unit": "条"
+    },
+    {
+      "label": "今日剩余",
+      "unit": "次"
+    }
+  ],
+  "demo_rows": [
+    {
+      "platform": "douyin",
+      "title": "3分钟学会的爆款开头公式",
+      "duration": "00:32"
+    },
+    {
+      "platform": "xiaohongshu",
+      "title": "新手做账号的5个误区",
+      "duration": "00:45"
+    },
+    {
+      "platform": "kuaishou",
+      "title": "实体店引流实操",
+      "duration": "01:12"
+    }
+  ],
+  "platforms": [
+    {
+      "key": "douyin",
+      "label": "抖音"
+    },
+    {
+      "key": "xiaohongshu",
+      "label": "小红书"
+    },
+    {
+      "key": "kuaishou",
+      "label": "快手"
+    },
+    {
+      "key": "weixin_channels",
+      "label": "视频号"
+    }
+  ],
+  "blogger_platforms": [
+    {
+      "label": "抖音",
+      "value": "douyin"
+    },
+    {
+      "label": "快手",
+      "value": "kuaishou"
+    }
+  ],
+  "list_types": [
+    {
+      "label": "作品",
+      "value": "post"
+    },
+    {
+      "label": "喜欢",
+      "value": "favorite"
+    },
+    {
+      "label": "收藏",
+      "value": "collect"
+    }
+  ],
+  "progress": {
+    "formula": "done + part",
+    "throttle_seconds": 0.12,
+    "partial_cap": 0.999,
+    "note": "完成一条记满 1.0，未完成按字节比例加分，全程只增不减"
+  },
+  "done_text": "下载完成：成功 {ok} 条，失败 {fail} 条 —— 原因：{first}",
+  "login_note": "抖音 / 小红书 / 快手 / 视频号 都支持，都不用登录",
+  "states": [
+    "排队中",
+    "下载中",
+    "已完成",
+    "失败",
+    "已停止"
+  ]
+}
