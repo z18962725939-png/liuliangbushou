@@ -1,0 +1,1616 @@
+# -*- coding: utf-8 -*-
+"""本地音视频转文本（内核用 whisper.cpp，纯离线、不上传任何音频）。
+
+为什么选 whisper.cpp 而不是 Python 侧的 torch / faster-whisper：
+  - 走 PyInstaller 打包要把 torch / ctranslate2塞进去，体积按 G 算，
+    而且 CUDA 版本要和用户机器精确匹配，运维人员的机器千差万别，装一次崩一次。
+  - whisper.cpp 官方直接发 Windows 预编译包（CPU 版约 16 MB、
+    CUDA 版约 59 MB / 439 MB），解压即用。
+    ★ 但"CUDA 版只要显卡驱动"这句话**只对 12.4 那个 439 MB 的包成立**
+      （它自带 cuBLAS）。59 MB 的 11.8 包不含 cuBLAS，必须本机装 CUDA
+      Toolkit 才跑得起来 —— 详见下面 CUDA_BUNDLES 的注释。
+所以最终方案是：下载一个绿色包（引擎）+ 下载一个 ggml 模型，然后本地跑。
+
+整个模块只用标准库，方便打包；所有耗时操作都不碰 UI 线程，
+由调用方（GUI）自己开线程并通过回调拿进度。
+
+关键实测数据（2026-10，本机 RTX 3060 12GB）：
+  - GitHub 直连约 26 KB/s，gh-proxy 镜像约 132 KB/s，都太慢；
+  - **8 线程分块并发可到 1.4 MB/s（快 13 倍）**，所以下载器必须是分块并发的。
+  - 模型源 huggingface.co 直连不通，hf-mirror.com 可用。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# ----------------------------------------------------------------------
+#  常量：发布版本、资产名、镜像源
+# ----------------------------------------------------------------------
+
+# v1.8.7 是最后一个带 Windows 预编译资产的正式版（v1.9.x 起官方只源码发布）。
+WHISPER_RELEASE = "v1.8.7"
+_REL_BASE = f"https://github.com/ggml-org/whisper.cpp/releases/download/{WHISPER_RELEASE}"
+
+# 引擎下载源：优先国内 GitHub 镜像（实测比直连快 5 倍以上），多个镜像依次兜底，
+# 某个失效会自动跳过，无需用户手动切换。最末回退 GitHub 直连（国内常极慢/不通）。
+#
+# ★ 2026-10-17 实测评顺：gh-proxy.com 稳定可用（200 + Content-Range 正确）；
+#   ghfast.top 当天对 HEAD 完全不响应 —— 排在第一位等于每次白等 20 秒。
+#   把实测能用的放前面，失效的往后挪（它们仍作为兜底保留）。
+# ★ 2026-11-10 复测（客户反馈「下载卡在 89%」时实测）：
+#   gh-proxy.com  206 可用，单连接约 50~120 KB/s（分块并发才有几百 KB/s）
+#   ghproxy.net   206 可用，但更慢，仅作备源
+#   ghfast.top / mirror.ghproxy.com / github.moeyy.xyz / gh.llkk.cc /
+#   hub.gitmirror.com  全部超时无响应 —— 留在列表里只会让每个源白等探测超时，
+#   而且这些死源会让「换源」看起来在动、实际一个字节都下不到。
+#   GitHub 直连保留作最后兜底（境外网络可用时它反而最快）。
+ENGINE_MIRRORS = [
+    "https://gh-proxy.com/https://github.com/ggml-org/whisper.cpp/releases/download/"
+    + WHISPER_RELEASE,
+    "https://ghproxy.net/https://github.com/ggml-org/whisper.cpp/releases/download/"
+    + WHISPER_RELEASE,
+    _REL_BASE,
+]
+
+# 模型下载源：hf-mirror 国内可用（实测 1.4 MB/s，首选），modelscope 作备选，
+# huggingface 兜底（国内常被墙，放到最后）。拿不到文件大小会自动跳到下一个源。
+MODEL_MIRRORS = [
+    "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main",
+    "https://modelscope.cn/models/timeless/whispercpp/resolve/master",
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main",
+]
+
+# CPU 包用 blas 版（OpenBLAS 加速的 CPU 版），比纯 CPU 版快一截，体积也可接受。
+CPU_ASSET = "whisper-blas-bin-x64.zip"
+CPU_DIR_NAME = "engine_cpu"
+
+CUDA_ASSET_118 = "whisper-cublas-11.8.0-bin-x64.zip"
+CUDA_ASSET_124 = "whisper-cublas-12.4.0-bin-x64.zip"
+CUDA_DIR_NAME = "engine_cuda"
+
+# ★★ 两个 CUDA 包的关键差别（v1.14.6 实测，照着包内文件清单核对出来的）
+#
+#   11.8 包（59 MB）：**不含 cuBLAS**。解压出来只有 cudart64_110 / nvrtc / ggml-cuda，
+#                     cublas64_11.dll 和 cublasLt64_11.dll 得由本机已安装的
+#                     CUDA Toolkit 11.8 提供。普通用户没装 Toolkit，一跑就弹
+#                     「由于找不到 cublas64_11.dll，无法继续执行代码」——
+#                     这是 Windows 加载器弹的系统框，**不是异常**，进程会卡在那里，
+#                     代码里 try/except 一点用都没有。所以只能事前查文件，不能靠捕获。
+#
+#   12.4 包（439 MB）：**自带 cublas64_12.dll(67MB) + cublasLt64_12.dll(313MB) +
+#                     cudart64_12.dll**，装完即用，不需要装任何 CUDA Toolkit。
+#
+# 结论：默认只推 12.4。11.8 保留给「本来就装了 Toolkit 11.8」的老机器手动导入，
+#       绝不能再当默认档推出去（v1.14.5 及以前就是这么错的）。
+CUDA_BUNDLES = {
+    "12.4": {
+        "asset": CUDA_ASSET_124,
+        "size_mb": 439,
+        "self_contained": True,
+        "note": "自带 CUDA 运行库，装完即用，无需另外安装 CUDA Toolkit",
+    },
+    "11.8": {
+        "asset": CUDA_ASSET_118,
+        "size_mb": 59,
+        "self_contained": False,
+        "note": "体积小但**不含 cuBLAS**，必须本机已装 CUDA Toolkit 11.8 才能跑",
+    },
+}
+
+# 默认档：唯一自包含的那个
+DEFAULT_CUDA_BUNDLE = "12.4"
+
+# CUDA 引擎跑起来还需要的运行库（按 cudart 主版本判断该要哪一套）。
+# 只列「动态链接、必须存在」的，缺任何一个都是硬失败。
+_CUDA_RUNTIME = {
+    "12": ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"),
+    "11": ("cudart64_110.dll", "cublas64_11.dll", "cublasLt64_11.dll"),
+}
+
+# 官方发布页给出的 SHA256（GitHub API assets[].digest）。
+#
+# ★★ 为什么非校验不可（2026-10-17 踩出来的）：
+#    分块并发下载时，只要有一个镜像"没按 Range 返回"或者某块写错了位置，
+#    得到的就是一个**体积完全正确、内容却是坏的**文件。下载器当时返回"成功"，
+#    用户解压时才炸（或者更糟：解压出一堆坏 DLL，一跑就弹系统错误框）。
+#    有了哈希才能当场判定、当场换源重下，而不是把坏包装进用户目录。
+ASSET_SHA256 = {
+    "whisper-blas-bin-x64.zip":
+        "8fbc2850a2767d5e83fc399bce2e2480d5d84997450c7fcb1da247fd0f9b295d",
+    "whisper-cublas-11.8.0-bin-x64.zip":
+        "e9193626af0a29e6102212522127333050997f2d34cc7122c6a13cfef66144f2",
+    "whisper-cublas-12.4.0-bin-x64.zip":
+        "ce5e66c7e45985f497e3a81c9d33723f19b3118993b47f53b8351df5cbb20402",
+}
+
+
+def file_sha256(path: Path) -> str:
+    """算文件 SHA256（1 MB 一块读，439 MB 大约 1 秒）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+class _RangeIgnored(Exception):
+    """镜像忽略了 Range 头 —— 分块写入会把已下好的块冲掉，必须退化为单线程。"""
+
+
+# 模型清单。size_mb / vram_gb 用于给用户预期和自动推荐。
+MODELS: dict[str, dict] = {
+    "tiny": {
+        "file": "ggml-tiny.bin", "size_mb": 74, "vram_gb": 1,
+        "desc": "最快，中文准确率一般，适合粗筛",
+    },
+    "base": {
+        "file": "ggml-base.bin", "size_mb": 141, "vram_gb": 1,
+        "desc": "快，中文可用，短音频首选",
+    },
+    "small": {
+        "file": "ggml-small.bin", "size_mb": 465, "vram_gb": 2,
+        "desc": "速度与准确率平衡，中文日常推荐",
+    },
+    "medium": {
+        "file": "ggml-medium.bin", "size_mb": 1463, "vram_gb": 5,
+        "desc": "中文准确率高，适合直播话术精转",
+    },
+    "large-v3-turbo": {
+        "file": "ggml-large-v3-turbo.bin", "size_mb": 1549, "vram_gb": 6,
+        "desc": "接近 large 的准确率，速度快很多（推荐有 8G+ 显存时）",
+    },
+    "large-v3": {
+        "file": "ggml-large-v3.bin", "size_mb": 2952, "vram_gb": 10,
+        "desc": "最高准确率，最慢，需 10G+ 显存",
+    },
+}
+
+DEFAULT_MODEL = "small"
+SUPPORTED_AUDIO_EXT = {
+    ".mp4", ".mov", ".mkv", ".flv", ".avi", ".webm", ".m4a", ".mp3",
+    ".wav", ".aac", ".flac", ".ogg", ".ts", ".wmv",
+}
+
+
+# ----------------------------------------------------------------------
+#  显卡检测
+# ----------------------------------------------------------------------
+
+@dataclass
+class GpuInfo:
+    """一张 NVIDIA 显卡的信息。"""
+    name: str = ""
+    driver: str = ""
+    cuda: str = ""            # 驱动支持的 CUDA 运行时版本，形如 '13.4'
+    mem_mb: int = 0
+    found: bool = False
+    reason: str = ""          # 没找到时的原因（给用户看）
+
+    @property
+    def mem_gb(self) -> float:
+        return round(self.mem_mb / 1024, 1) if self.mem_mb else 0.0
+
+    def cuda_tuple(self) -> tuple[int, ...]:
+        """把 '13.4' 变成 (13, 4)，便于比较大小；解析不了返回 (0,)。"""
+        try:
+            return tuple(int(x) for x in self.cuda.split(".") if x.isdigit()) or (0,)
+        except Exception:                                  # noqa: BLE001
+            return (0,)
+
+    def summary(self) -> str:
+        if not self.found:
+            return self.reason or "未检测到 NVIDIA 显卡"
+        return f"{self.name}｜驱动 {self.driver}｜显存 {self.mem_gb} GB｜支持 CUDA {self.cuda or '未知'}"
+
+
+def nvidia_smi_path() -> str | None:
+    """找到 nvidia-smi，找不到返回 None。"""
+    p = shutil.which("nvidia-smi")
+    if p:
+        return p
+    exe = "nvidia-smi.exe" if os.name == "nt" else "nvidia-smi"
+    for cand in (
+        Path(r"C:\Windows\System32") / exe,
+        Path(r"C:\Program Files\NVIDIA Corporation\NVSMI") / exe,
+        Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / exe,
+    ):
+        try:
+            if cand.exists():
+                return str(cand)
+        except Exception:                                  # noqa: BLE001
+            continue
+    return None
+
+
+def _run(cmd: list[str], timeout: float = 15.0) -> tuple[int, str]:
+    """跑一条命令并返回 (返回码, 输出)。任何异常都吞掉，UI 不该因此崩。"""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except FileNotFoundError:
+        return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    except Exception:                                      # noqa: BLE001
+        return 1, ""
+
+
+def detect_gpu() -> GpuInfo:
+    """检测本机 NVIDIA 显卡。检测不到时返回 found=False 的 GpuInfo。"""
+    smi = nvidia_smi_path()
+    if not smi:
+        return GpuInfo(reason="没找到 nvidia-smi，可能不是 N 卡或没装驱动")
+
+    # 1) 显卡名 / 驱动 / 显存
+    rc, out = _run([
+        smi, "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader",
+    ])
+    if rc != 0 or not out.strip():
+        return GpuInfo(reason="nvidia-smi 执行失败，显卡驱动可能未正确安装")
+
+    line = out.strip().splitlines()[0]
+    parts = [x.strip() for x in line.split(",")]
+    name = parts[0] if parts else ""
+    driver = parts[1] if len(parts) > 1 else ""
+    mem_mb = 0
+    if len(parts) > 2:
+        m = re.search(r"(\d+)", parts[2].replace(" ", ""))
+        if m:
+            mem_mb = int(m.group(1))
+
+    # 2) CUDA 版本：新版驱动输出 'CUDA UMD Version: 13.4'，老版是 'CUDA Version: 12.4'
+    _, head = _run([smi])
+    cuda = ""
+    m = re.search(r"CUDA\s+(?:UMD\s+)?Version:\s*([\d.]+)", head)
+    if m:
+        cuda = m.group(1)
+
+    return GpuInfo(name=name, driver=driver, cuda=cuda, mem_mb=mem_mb, found=True)
+
+
+def pick_cuda_bundle(gpu: GpuInfo) -> tuple[str, str]:
+    """按显卡挑 CUDA 包，返回 (档位key, 说明)。空 key 表示「这台机器上显卡跑不了」。
+
+    规则（v1.14.6 重写）：
+      唯一默认是 12.4 自包含包。理由不是"新"，而是**只有它自带 cuBLAS**：
+      11.8 包虽然有 59 MB 的便宜，但它把 cuBLAS 甩给用户的 CUDA Toolkit 去提供，
+      而装 Toolkit 要 3 GB 且普通客户根本不会 —— 实测就是这么炸的
+      （「找不到 cublas64_11.dll」）。宁可第一次多下 380 MB，也不要装完不能用。
+    """
+    need = (12, 0)
+    if gpu.cuda_tuple() < need:
+        cur = gpu.cuda or "未知"
+        return "", (
+            f"显卡驱动支持的最高 CUDA 是 {cur}，低于 12.4。\n"
+            f"有两个办法：① 更新 NVIDIA 显卡驱动（推荐，几分钟，更新后可用显卡转写）；"
+            f"② 直接用 CPU 转录（任何电脑都能跑，只是慢一些）。"
+        )
+    return (
+        DEFAULT_CUDA_BUNDLE,
+        f"检测到 {gpu.name}，使用 CUDA 12.4 包（439 MB，自带运行库，不需要另外安装 CUDA Toolkit）",
+    )
+
+
+def recommend_model(device: str, gpu: GpuInfo | None) -> str:
+    """按设备条件推荐一个模型 key。"""
+    if device == "cuda" and gpu and gpu.found:
+        g = gpu.mem_gb
+        if g >= 8:
+            return "large-v3-turbo"
+        if g >= 5:
+            return "medium"
+        if g >= 2:
+            return "small"
+        return "base"
+    return "small" if device == "cuda" else "base"
+
+
+# ----------------------------------------------------------------------
+#  目录与就绪状态
+# ----------------------------------------------------------------------
+
+def _app_dir() -> Path:
+    """与 gui.py 的 APP_DATA_DIR 保持一致（统一走 branding，改名不用两头改）。"""
+    from . import branding
+    return branding.app_data_dir()
+
+
+def whisper_home() -> Path:
+    """引擎与模型的存放根目录。
+
+    放在 AppData 而不是程序目录旁：换 exe / 重装程序时引擎和模型不会跟着丢，
+    用户也不用为了 1.5 GB 的模型去挪桌面的文件夹。
+    """
+    return _app_dir() / "whisper"
+
+
+def engine_dir(kind: str) -> Path:
+    return whisper_home() / (CUDA_DIR_NAME if kind == "cuda" else CPU_DIR_NAME)
+
+
+def models_dir() -> Path:
+    return whisper_home() / "models"
+
+
+def model_path(key: str) -> Path:
+    info = MODELS.get(key) or MODELS[DEFAULT_MODEL]
+    return models_dir() / info["file"]
+
+
+def engine_exe(kind: str) -> Path | None:
+    """返回可用引擎的 whisper-cli.exe 路径；没装返回 None。"""
+    d = engine_dir(kind)
+    for name in ("whisper-cli.exe", "main.exe", "whisper-cli", "main"):
+        p = d / "Release" / name
+        if p.exists():
+            return p
+        p2 = d / name
+        if p2.exists():
+            return p2
+    return None
+
+
+def _has_file(d: Path, name: str) -> bool:
+    return (d / "Release" / name).exists() or (d / name).exists()
+
+
+def engine_missing_files(kind: str) -> list[str]:
+    """引擎目录里缺哪些必备文件。
+
+    为什么需要它：whisper-cli.exe 是动态链接 whisper.dll 的。以前只判断
+    "whisper-cli.exe 在不在"，结果某个版本打包漏了 whisper.dll，界面上
+    显示"引擎就绪"，用户一点转写就报一句看不懂的错。现在把 DLL 一起查了，
+    缺了就直接告诉用户"引擎不完整，请重新下载"。
+
+    ★ v1.14.6：显卡档还要查 CUDA 运行库。这是客户报的那条
+      「由于找不到 cublas64_11.dll，无法继续执行代码」的根因 ——
+      11.8 包不带 cuBLAS，exe 在，但一启动就被 Windows 加载器拦下。
+      这种错误弹的是**系统消息框**，不会变成 Python 异常，只能靠事前查文件拦住。
+    """
+    d = engine_dir(kind)
+    if os.name != "nt":
+        return []
+    miss: list[str] = []
+    if not _has_file(d, "whisper.dll"):
+        miss.append("whisper.dll")
+
+    if kind != "cuda":
+        return miss
+
+    # 显卡档：ggml-cuda.dll 是真正的 GPU 后端。缺了它不会报错，
+    # 而是**静默退回 CPU**（用户会以为"显卡模式怎么这么慢"），所以必须查。
+    if not _has_file(d, "ggml-cuda.dll"):
+        miss.append("ggml-cuda.dll")
+
+    # 该要 11 还是 12 那一套运行库：优先按目录里已有的 cudart 判断；
+    # 全新空目录按 12（现在的默认包）判断。
+    ver = "12"
+    if _has_file(d, "cudart64_110.dll") and not _has_file(d, "cudart64_12.dll"):
+        ver = "11"
+    for name in _CUDA_RUNTIME[ver]:
+        if not _has_file(d, name):
+            miss.append(name)
+    return miss
+
+
+def engine_problem(kind: str) -> str:
+    """引擎不能用的原因，说人话；能用返回空串。
+
+    给界面和转写入口共用：界面显示它，转写前拿它判断要不要降级。
+    """
+    miss = engine_missing_files(kind)
+    if not miss:
+        return ""
+    if kind != "cuda":
+        return f"CPU 引擎不完整（缺 {', '.join(miss)}），点「检测显卡并一键安装」重新装一次即可"
+
+    low = [m.lower() for m in miss]
+    if any("cublas" in m for m in low):
+        if any("cublas64_11" in m for m in low):
+            return (
+                "显卡引擎缺 CUDA 运行库（缺 " + "、".join(miss) + "）。\n"
+                "旧版 CUDA 11.8 引擎包不含这些库，需要本机安装 CUDA Toolkit 11.8 才能跑。\n"
+                "解决办法：点「检测显卡并一键安装」，改下自带的 12.4 完整包（439 MB，"
+                "运行库已内置，装完即用）。"
+            )
+        return (
+            "显卡引擎缺 CUDA 运行库（缺 " + "、".join(miss) + "）。\n"
+            "点「检测显卡并一键安装」重新下载一次即可（439 MB，运行库已内置）。"
+        )
+    if any("ggml-cuda" in m for m in low):
+        return (
+            "显卡引擎缺少 GPU 后端（ggml-cuda.dll），现在其实会退回 CPU 跑。\n"
+            "点「检测显卡并一键安装」重新下载显卡引擎。"
+        )
+    return f"显卡引擎不完整（缺 {', '.join(miss)}），点「检测显卡并一键安装」重新下载"
+
+
+def engine_ready(kind: str) -> bool:
+    exe = engine_exe(kind)
+    if exe is None:
+        return False
+    # exe 在但 DLL 不全 → 当没装，交给上层触发重新下载
+    return not engine_missing_files(kind)
+
+
+def model_ready(key: str) -> bool:
+    p = model_path(key)
+    if not p.exists():
+        return False
+    # 下载中断会留下半个文件，用体积粗校验一下（达不到 90% 就当没下完）
+    try:
+        want = (MODELS.get(key) or {}).get("size_mb", 0) * 1024 * 1024
+        return p.stat().st_size >= want * 0.9 if want else p.stat().st_size > 0
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
+def status_text(kind: str, model_key: str) -> str:
+    """给界面用的一句话状态。"""
+    ok_e = engine_ready(kind)
+    ok_m = model_ready(model_key)
+    who = "显卡(CUDA)" if kind == "cuda" else "CPU"
+    if ok_e:
+        e = "已就绪"
+    elif engine_exe(kind) is not None:
+        # exe 在但库不全：要说清"不完整"，不能显示"未安装"——
+        # 用户看到"未安装"会去点安装，看到"不完整"才知道是补文件
+        miss = engine_missing_files(kind)
+        e = f"不完整（缺 {len(miss)} 个运行库：{', '.join(miss[:2])}…）" if len(miss) > 2 \
+            else f"不完整（缺 {', '.join(miss)}）"
+    else:
+        e = "未安装"
+    m = "已就绪" if ok_m else "未下载"
+    return f"引擎[{who}]：{e}　模型[{model_key}]：{m}"
+
+
+# ----------------------------------------------------------------------
+#  分块并发下载器
+# ----------------------------------------------------------------------
+
+class Downloader:
+    """多线程分块下载。
+
+    为什么必须分块：实测单线程从国内镜像拉 whisper.cpp 的包只有约 105 KB/s，
+    一个 465 MB 的模型要 70 多分钟；8 线程分块可以稳定到 1.4 MB/s，
+    同样的模型 5 分钟出头。差别是"能用"和"不能用"。
+
+    失败策略：单块失败重试 2 次，整条 URL 失败则切下一个镜像源。
+    """
+
+    # 每块 2 MB。★ v1.14.6 从 4 MB 调小：实测 439 MB 的包在慢镜像上总有
+    # 一两个 4 MB 块反复拿不全（连接被掐在 3.x MB 处），而同样位置 8 MB
+    # 的 curl 分段却能完整拿到 —— 说明单连接能跑多久很不稳定，
+    # 块小一点就少一个"必须一口气跑完 4 MB"的硬要求。
+    # 代价是连接数翻倍，摊到 8 线程里几乎看不出差别。
+    BLOCK = 2 * 1024 * 1024
+
+    def __init__(self, threads: int = 8, timeout: float = 20.0,
+                 stall_timeout: float = 60.0, probe_timeout: float = 6.0):
+        self.threads = max(1, int(threads))
+        self.timeout = timeout
+        # 一个「块」都没完成的时间超过这个值，就认定这个源挂住了，直接换源。
+        # ★ v1.28.2：以前看的是累计字节，某个块被掐断重试时字节来回变，
+        #   计时器被反复刷新，这个保护等于没有 —— 客户对着 89% 干等十几分钟。
+        self.stall_timeout = stall_timeout
+        # HEAD / Range 探测用短超时：实测 ghfast.top、mirror.ghproxy.com 已经
+        # 完全不响应，20 秒一个个白等过去，光探测就要一分钟以上。
+        self.probe_timeout = probe_timeout
+        self._cancel = threading.Event()
+        self._stalled = False
+        self._lock = threading.Lock()
+        # 本次下载已完成的块序号 —— **进度的唯一真相**。换源续传靠它。
+        self._done_blocks: set[int] = set()
+        # 正在下载、还没完成的块：{块号: 本次已写入字节}。用「覆盖」而非
+        # 「累加」，重试时自动从新值算，不会再出现重复计数。
+        self._inflight: dict[int, int] = {}
+        # 已上报过的最大进度。换源时未完成的块作废，允许小幅回落，但绝不
+        # 让客户看到进度条往回跳（整包退化时由 whole() 主动清零）。
+        self._peak = 0
+        # 最后一次上报的字节数（诊断/兼容用，不再是累加器）
+        self._done = 0
+        self._total = 0
+        # 停滞计时：**跨轮保持**。以前在 _pump 里每轮从零开始，
+        # 而某块反复失败时每轮都会重开 _pump —— 计时器被无限重置，
+        # 客户看到的就是「日志一直刷预计剩余时间，进度永远 89%」。
+        self._stall_last_t = 0.0
+        self._stall_last_blocks = -1
+        self._stall_count = 0
+
+    def cancel(self):
+        self._cancel.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def _progress_bytes(self, total: int) -> int:
+        """权威进度 = 已完成块的完整字节 + 进行中块已写入字节。
+
+        ★ v1.28.2：老实现用 `_done += len(chunk)` 累加，某块被镜像掐断重试时
+          会把半块字节再加一遍 —— 进度虚高；换源按 `_done_blocks` 重算又掉回
+          真实值，客户看到的就是 90%→88%→91%→89% 来回震荡。
+          现在 `_done_blocks` 是唯一真相，重算只会算出同一个值。
+        """
+        done = sum(min(self.BLOCK, max(0, total - i * self.BLOCK))
+                   for i in self._done_blocks if i >= 0)
+        # 已完成块不再计入进行中，避免 add(i) 前后重复计数
+        done += sum(v for k, v in self._inflight.items()
+                    if k >= 0 and k not in self._done_blocks)
+        # 整包退化（不支持 Range）时用虚拟块 -1 记账
+        done += self._inflight.get(-1, 0)
+        return min(max(done, 0), total)
+
+    # -- 单源尝试 ---------------------------------------------------
+
+    def _head(self, url: str) -> int:
+        """拿文件总大小；拿不到返回 0。"""
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=self.probe_timeout) as r:
+                return int(r.headers.get("Content-Length") or 0)
+        except Exception:                                  # noqa: BLE001
+            return 0
+
+    def _supports_range(self, url: str) -> bool:
+        """探测服务端是否支持断点续传。
+
+        有些镜像（以及测试用的简易服务器）会直接忽略 Range 头返回 200 全量，
+        这时如果还按分块去 seek 写，会把同一个文件重复写进不同位置，
+        结果是文件变大且内容全错 —— 必须先问一句再决定用不用分块。
+        """
+        try:
+            req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+            with urllib.request.urlopen(req, timeout=self.probe_timeout) as r:
+                code = getattr(r, "status", None) or r.getcode()
+                return code == 206 or bool(r.headers.get("Content-Range"))
+        except Exception:                                  # noqa: BLE001
+            return False
+
+    def _fetch_range(self, url: str, start: int, end: int, dest, offset: int,
+                     retries: int = 2, block_idx: int | None = None) -> bool:
+        """下载 [start, end] 这一段并写入已打开文件的 offset 处。
+
+        ★ 必须校验响应是不是真的 206：
+          有的镜像"礼貌地忽略" Range 头，直接回 200 + 整个文件。那时
+          `r.read()` 会把 439 MB 全倒进这个 4 MB 的槽位，从 offset 一路
+          覆盖到文件尾 —— 结果是体积正确、内容全坏。以前只看写没写完，
+          所以这种坏文件会被当成下载成功。
+        """
+        want = end - start + 1
+        for attempt in range(retries + 1):
+            if self._cancel.is_set():
+                return False
+            # ★ 每次重试先把本块进度归零。老实现是 `_done += len(chunk)`
+            #   一路累加，断线重试时半块字节被算了两次 —— 进度虚高。
+            if block_idx is not None:
+                with self._lock:
+                    self._inflight[block_idx] = 0
+            try:
+                req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    if start > 0:
+                        code = getattr(r, "status", None) or r.getcode()
+                        crange = (r.headers.get("Content-Range") or "").strip()
+                        if code != 206 or not crange.startswith(f"bytes {start}-"):
+                            raise _RangeIgnored(
+                                f"镜像返回 {code} / Content-Range={crange!r}")
+                    pos = offset
+                    while True:
+                        if self._cancel.is_set():
+                            return False
+                        chunk = r.read(65536)
+                        # 读完再查一次：取消/换源可能就发生在这次阻塞读期间，
+                        # 不查的话已经作废的字节还会被写进 .part 污染续传数据。
+                        if self._cancel.is_set():
+                            return False
+                        if not chunk:
+                            break
+                        with self._lock:
+                            dest.seek(pos)
+                            dest.write(chunk)
+                        pos += len(chunk)
+                        if block_idx is not None:
+                            with self._lock:
+                                # 覆盖式赋值：重试只反映「本次」写到哪儿
+                                self._inflight[block_idx] = pos - offset
+                # ★ 写完不等于写全：镜像可能在传输中提前掐断（连接被限速/重置），
+                #   `r.read()` 正常返回 EOF，循环break，函数"成功"返回，
+                #   可这个块其实只写了一半 —— 文件体积仍是预分配的满额，
+                #   于是得到一个体积正确、内容有洞的坏包。
+                #   必须核对这次到底写了多少字节。
+                got = pos - offset
+                if got != want:
+                    if attempt >= retries:
+                        return False
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                return True
+            except _RangeIgnored:
+                raise
+            except Exception:                              # noqa: BLE001
+                if attempt >= retries:
+                    return False
+                time.sleep(0.6 * (attempt + 1))
+        return False
+
+    # -- 主入口 ------------------------------------------------------
+
+    def download(self, urls: list[str], dest: Path, total_hint: int = 0,
+                 progress=None, expect_sha256: str = "") -> tuple[bool, str]:
+        """依次尝试 urls，成功返回 (True, '')，全失败返回 (False, 原因)。
+
+        progress 回调签名：progress(done_bytes, total_bytes)。
+
+        expect_sha256 非空时，下完要校验；不匹配**不报错退出**，而是删掉
+        重新换下一个源下 —— 传坏数据的往往只是某一个镜像，换源通常就对了。
+        """
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        last_err = ""
+        self._done_blocks = set()
+        self._inflight.clear()
+        self._peak = 0
+        self._done = 0
+        self._stall_last_t = 0.0
+        self._stall_last_blocks = -1
+        self._stall_count = 0
+        resumed = False
+        total = total_hint      # 所有源都探测失败时也可能用到
+
+        for url in urls:
+            if self._cancel.is_set() and not self._stalled:
+                break
+            self._cancel.clear()
+            self._stalled = False
+            # 换一个源就给一次新机会，但同一源内的多轮重试共享同一个计时
+            self._stall_last_t = time.time()
+            self._stall_last_blocks = -1
+            total = self._head(url) or total_hint
+            if total <= 0:
+                last_err = "拿不到文件大小，可能被镜像拦截"
+                continue
+            # 只在本次会话第一次进下载时恢复；换源时不能重复加载
+            if not resumed:
+                resumed = True
+                if self._load_blocks(tmp, total):
+                    self._peak = self._progress_bytes(total)
+                    self._done = self._peak
+
+            ok = self._try_one(url, tmp, total, progress)
+            self._save_blocks(tmp, total)
+            if self._stalled:
+                # 这个源卡住不动了：换下一个源，但**不删 .part** ——
+                # 已经下好的块留在盘上，下一个源只补缺的（块级续传）。
+                last_err = "下载长时间没有进展，已自动切换备用源"
+                self._cancel.clear()
+                self._stalled = False
+                continue
+            if self._cancel.is_set():
+                # ★ 主动停止时保留已下的块：下次点安装从 89% 接着下，
+                #   不是从 0 重来（439 MB 在慢镜像上重来一次就是十几分钟）。
+                return False, "已取消"
+            if ok and expect_sha256:
+                try:
+                    got = file_sha256(tmp)
+                except Exception as e:                     # noqa: BLE001
+                    got = f"<算不出来：{e}>"
+                if got.lower() != expect_sha256.lower():
+                    # 内容坏了，已下的块不可信，清掉重来
+                    last_err = ("下载回来的文件校验不通过（大小对、内容坏），"
+                                "已自动换源重试")
+                    self._cleanup(tmp)
+                    self._drop_blocks(tmp)
+                    self._done_blocks = set()
+                    self._inflight.clear()
+                    self._peak = 0
+                    continue
+            if ok:
+                try:
+                    if tmp.exists():
+                        if dest.exists():
+                            dest.unlink()
+                        tmp.replace(dest)
+                    self._drop_blocks(tmp)
+                    self._done = total
+                    return True, ""
+                except Exception as e:                     # noqa: BLE001
+                    last_err = f"落盘失败：{e}"
+                    continue
+            else:
+                # 这个源没补完，但已下的块仍然有效，换源接着补
+                last_err = f"{url} 下载未完成"
+
+        # ★ 全失败：只要下到过完整块就保留 .part + .blocks 供下次续传。
+        #   一块都没下成（源全挂）才清理，避免留垃圾文件。
+        if self._done_blocks:
+            done_mb = self._progress_bytes(total if total else 0) / 1048576
+            return False, (f"{last_err}。已下载约 {done_mb:.0f} MB 已保存，"
+                           "下次点「一键安装」会从这里接着下，不用从头开始；"
+                           "也可以点「改用 CPU 转写」直接用随软件自带的引擎。")
+        self._cleanup(tmp)
+        self._drop_blocks(tmp)
+        return False, last_err or "全部下载源都失败了"
+
+    def _try_one(self, url: str, tmp: Path, total: int, progress) -> bool:
+        """对一个源做分块并发下载。支持「块级续传」。
+
+        ★ 块级续传为什么必须有（2026-10-17 实测）：
+          某一块反复失败时，老逻辑是整包换个源从头重下。439 MB 在慢镜像上
+          要 5 分钟，换源重下等于把这 5 分钟白扔 —— 实际表现是文件时间戳
+          一直在更新、永远下不完（用户看到的就是"卡在 98%"）。
+          现在把下好的块记在 self._done_blocks 里，换源只补缺的那几块。
+        """
+        try:
+            # 只有「本次下载已经下过块」才复用已有 .part；
+            # 上次会话残留的 .part 内容不可信（不知道哪块是好的），一律重下。
+            reuse = bool(self._done_blocks) and tmp.exists() and tmp.stat().st_size == total
+            with open(tmp, "r+b" if reuse else "wb") as f:
+                if not reuse:
+                    self._done_blocks = set()
+                    f.truncate(total)      # 预分配，省掉最后合并几 GB 的拷贝
+                # 换源续传：进度接着上次的走，不能掉回 0（用户会以为前功尽弃）。
+                # ★ 换源时把「进行中」的块作废：上一个源写到一半的字节不算数，
+                #   只保留真正写完整的块。_peak 保证界面不往回跳。
+                self._total = total
+                self._inflight.clear()
+                self._done = self._progress_bytes(total)
+                self._peak = max(self._peak, self._done)
+                ranges: list[tuple[int, int]] = []
+                pos = 0
+                while pos < total:
+                    end = min(pos + self.BLOCK, total) - 1
+                    ranges.append((pos, end))
+                    pos = end + 1
+
+                todo = [(i, s, e) for i, (s, e) in enumerate(ranges)
+                        if i not in self._done_blocks]
+                if not todo:
+                    return True
+
+                # 目标很小（比如 4 MB 的 CPU 包）就别开 8 个线程了，反而慢；
+                # 服务端不支持 Range 时也只能老实单线程顺序下载。
+                can_split = self._supports_range(url)
+                n = (
+                    self.threads
+                    if can_split and total > 16 * 1024 * 1024 and len(todo) > 1
+                    else 1
+                )
+
+                def whole():
+                    """整包顺序下（没有 Range 支持，或 Range 被证明不可信时）。"""
+                    f.seek(0)
+                    f.truncate(0)
+                    f.truncate(total)
+                    # 退化成整包重下是真的从 0 开始：允许进度回落，但要说清楚，
+                    # 别让客户以为「刚才 89% 白下了」却没有任何提示。
+                    self._done_blocks = set()
+                    self._inflight.clear()
+                    self._peak = 0
+                    self._done = 0
+                    if progress:
+                        progress(0, total)
+                    if not self._fetch_range(url, 0, total - 1, f, 0, block_idx=-1):
+                        return False
+                    self._done_blocks = set(range(len(ranges)))
+                    self._inflight.pop(-1, None)
+                    self._done = total
+                    if progress:
+                        progress(total, total)
+                    return True
+
+                if n == 1:
+                    if not can_split:
+                        return whole()
+                    for i, s, e in todo:
+                        try:
+                            if not self._fetch_range(url, s, e, f, s, block_idx=i):
+                                return False
+                        except _RangeIgnored:
+                            return whole()
+                        with self._lock:
+                            self._done_blocks.add(i)
+                            self._inflight.pop(i, None)
+                            cur = max(self._peak, self._progress_bytes(total))
+                        self._peak = cur
+                        self._done = cur
+                        if progress:
+                            progress(cur, total)
+                    if progress:
+                        progress(total, total)
+                    self._done = total
+                    return True
+
+                # 分多轮：每轮并发拉，失败的块留到下一轮。备用源常常慢好几倍，
+                # 绝不能「一块失败就整个文件换源重下」。
+                #
+                # ★ 总时限：没有它的话，某个镜像对特定区间一直喂不全数据时，
+                #   程序会在那里转 10 分钟以上（用户看到的是"卡在 99% 不动"）。
+                #   到点就交回去换源，块级进度不丢，换源接着补。
+                deadline = time.time() + 600
+                pending: list[tuple[int, int, int]] = list(todo)
+                for _round in range(4):
+                    if not pending or self._cancel.is_set():
+                        break
+                    if time.time() > deadline:
+                        break
+                    failed: list[tuple[int, int, int]] = []
+                    lock = threading.Lock()
+                    range_bad = {"hit": False}
+
+                    def worker():
+                        while True:
+                            with lock:
+                                if not pending:
+                                    return
+                                i, s, e = pending.pop(0)
+                            try:
+                                got = self._fetch_range(url, s, e, f, s, block_idx=i)
+                            except _RangeIgnored:
+                                # 这个源不转发 Range：已经写进去的块全不可信
+                                range_bad["hit"] = True
+                                with self._lock:
+                                    self._inflight.pop(i, None)
+                                return
+                            with self._lock:
+                                # 无论成功失败，进行中的临时记账都要清掉：
+                                # 成功 → 由 _done_blocks 计整块；失败 → 等下一轮重试
+                                self._inflight.pop(i, None)
+                                if got:
+                                    self._done_blocks.add(i)
+                            if not got:
+                                with lock:
+                                    failed.append((i, s, e))
+                            if self._cancel.is_set():
+                                return
+
+                    ts = [threading.Thread(target=worker, daemon=True) for _ in range(n)]
+                    for t in ts:
+                        t.start()
+                    # ★ v1.28.2：无条件跑 _pump。以前写成 `if progress:`，
+                    #   没传进度回调的调用方就完全失去停滞检测与取消能力，
+                    #   卡在 r.read() 里只能等 socket 超时（隐性契约，坑过人）。
+                    self._pump(progress, total, ts)
+                    # ★ v1.28.2：_pump 判定停滞/取消后，别再傻等卡在 r.read()
+                    #   里的线程。以前 join(timeout*8) 最长干等 160 秒，客户点
+                    #   「停止」后界面还会纹丝不动好几分钟。
+                    #   线程是 daemon，且 _fetch_range 每次读到数据都会查 _cancel，
+                    #   直接交回 download() 换源即可，不用等它们收尾。
+                    if self._cancel.is_set() or self._stalled:
+                        return False
+                    for t in ts:
+                        t.join(timeout=self.timeout * 8)
+                    if any(t.is_alive() for t in ts):
+                        return False
+                    if range_bad["hit"]:
+                        return whole()
+                    if not failed:
+                        if progress:
+                            progress(total, total)
+                        return True
+                    pending = failed
+                    if _round < 3:
+                        time.sleep(1.0)      # 让镜像喘口气，下一轮更容易过
+                return False
+        except Exception:                                  # noqa: BLE001
+            return False
+
+    def _pump(self, progress, total: int, threads=None):
+        """下载过程中定时上报进度（在调用线程里跑，避免开额外线程）。
+
+        ★ v1.28.2 两条硬规矩：
+          1. 上报值只增不减（_peak 单调保护），客户绝不会看到 90%→88%。
+          2. 停滞检测只看「已完成块数」。以前看累计字节，某块反复被掐断
+             时字节一会儿涨一会儿退，last_t 被无限刷新，60 秒保护形同虚设。
+        """
+        if self._stall_last_t <= 0:
+            self._stall_last_t = time.time()
+        while True:
+            time.sleep(0.35)
+            with self._lock:
+                done = self._progress_bytes(total)
+                nblocks = len(self._done_blocks)
+            done = max(done, self._peak)
+            self._peak = max(self._peak, done)
+            self._done = done
+            if progress:
+                try:
+                    progress(done, total)
+                except Exception:                          # noqa: BLE001
+                    return
+            if self._cancel.is_set():
+                return
+            if done >= total:
+                return
+            if threads is not None and not any(t.is_alive() for t in threads):
+                return     # 线程都退出了（多半是失败），别再空转
+
+            # 停滞检测：连续 stall_timeout 秒**没有新的块完成**，判定源挂了。
+            # 字节在同一块里反复重试不算进展 —— 这正是客户卡 89% 的成因。
+            now = time.time()
+            if nblocks != self._stall_last_blocks:
+                self._stall_last_blocks = nblocks
+                self._stall_last_t = now
+            elif self.stall_timeout and (now - self._stall_last_t) > self.stall_timeout:
+                self._stalled = True
+                self._stall_count += 1
+                self._cancel.set()
+                return
+
+    @staticmethod
+    def _cleanup(p: Path):
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    # -- 跨会话块级续传 ---------------------------------------------
+    @staticmethod
+    def _blocks_file(tmp: Path) -> Path:
+        return tmp.with_name(tmp.name + ".blocks")
+
+    def _save_blocks(self, tmp: Path, total: int):
+        """把已完成块号落盘，供下次启动接着下（只补缺的块）。
+
+        ★ v1.28.2：以前下载失败一律 `_cleanup(tmp)` 删掉整个 .part，
+          客户下了 392 MB 的 439 MB 包，点「停止」或换源失败后下次又从 0
+          开始 —— 慢镜像下等于永远下不完。
+        """
+        if not self._done_blocks:
+            return
+        bf = self._blocks_file(tmp)
+        try:
+            payload = f"{total}\n" + ",".join(str(i) for i in sorted(self._done_blocks))
+            staged = bf.with_suffix(bf.suffix + ".tmp")
+            staged.write_text(payload, encoding="utf-8")
+            staged.replace(bf)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def _load_blocks(self, tmp: Path, total: int) -> bool:
+        """恢复上次没下完的进度。.part 体积对不上就一律不信。"""
+        bf = self._blocks_file(tmp)
+        try:
+            if not bf.exists() or not tmp.exists():
+                return False
+            if tmp.stat().st_size != total:
+                return False
+            lines = bf.read_text(encoding="utf-8").strip().splitlines()
+            if len(lines) < 2 or int(lines[0]) != total:
+                return False
+            blocks = {int(x) for x in lines[1].split(",") if x.strip().isdigit()}
+            nblocks = (total + self.BLOCK - 1) // self.BLOCK
+            blocks = {i for i in blocks if 0 <= i < nblocks}
+            if not blocks:
+                return False
+            self._done_blocks = blocks
+            return True
+        except Exception:                                  # noqa: BLE001
+            return False
+
+    def _drop_blocks(self, tmp: Path):
+        try:
+            bf = self._blocks_file(tmp)
+            if bf.exists():
+                bf.unlink()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+
+def _urls_for(base_list: list[str], name: str) -> list[str]:
+    return [b.rstrip("/") + "/" + name for b in base_list]
+
+
+# ----------------------------------------------------------------------
+#  安装：引擎 / 模型
+# ----------------------------------------------------------------------
+
+def _progress_wrapper(progress, log, slow_after: float = 25.0):
+    """包一层进度回调：长时间没动静时主动说句话。
+
+    下载几百 MB 的模型时，进度条几秒不动用户就会以为程序死了。
+    与其让他去猜，不如明确告诉他"还在下载，只是慢"。
+    """
+    state = {"pct": -1, "t": time.time(), "warned": False,
+             "t0": time.time(), "reported": 0.0,
+             "last_done": 0, "last_t": time.time()}
+
+    def wrapped(done, total):
+        # ★ 进度只增不减：下载器内部换源/重试时算出短暂回落，也不该让
+        #   客户看到 90%→88%（v1.28.2 客户截图里的原症状）。
+        done = max(0, min(int(done), int(total) if total else int(done)))
+        pct = int(done * 100 / total) if total else 0
+        now = time.time()
+        if pct != state["pct"]:
+            state["pct"] = pct
+            state["t"] = now
+        elif not state["warned"] and (now - state["t"]) > slow_after:
+            state["warned"] = True
+            if log:
+                log("下载比较慢，可以不用等：点「停止」，把「设备」切到「CPU 转录」"
+                    "就能直接开始转写（引擎随软件自带、不联网，结果一样只是慢一些）。"
+                    "想继续用显卡，也可以用迅雷/Motrix 下好包再点「导入本地引擎包」。")
+
+        # 每 20 秒报一次速度和预计剩余时间。
+        # ★ v1.28.2：老实现用「累计下载量 / 从零开始的总耗时」算平均速度，
+        #   分母一直涨、分子一震荡，于是出现 1.5→1.0→1.2→0.8 分钟反复横跳。
+        #   改成最近一个采样窗口的实测速度，数字才可信。
+        if log and done > 0 and (now - state["reported"]) > 20:
+            span = max(0.1, now - state["last_t"])
+            speed = max(0.0, (done - state["last_done"]) / span)
+            left = (total - done) / speed if speed > 0 else 0
+            state["reported"] = now
+            state["last_done"] = done
+            state["last_t"] = now
+            if speed > 0:
+                log(
+                    f"已下载 {pct}%（{done / 1048576:.0f}/{total / 1048576:.0f} MB），"
+                    f"当前约 {speed / 1024:.0f} KB/s，按此速度还需 {left / 60:.1f} 分钟"
+                )
+            else:
+                log(f"已下载 {pct}%（{done / 1048576:.0f}/{total / 1048576:.0f} MB），"
+                    "这一段暂时没有新增数据，程序会自动换源重试")
+        if progress:
+            progress(done, total)
+
+    return wrapped
+
+
+def _clear_engine_dir(kind: str) -> None:
+    """装新引擎前把旧目录清掉。
+
+    为什么必须清：11.8 包和 12.4 包的文件**同名不同版本**（ggml-cuda.dll、
+    whisper.dll 都叫同一个名字）。直接覆盖解压会让新旧混在一起，
+    出现"改了没生效"或新的 cublas 配旧的后端这种更难看的问题。
+    只清引擎目录，不动模型（1.5 GB 的模型不用重下）。
+    """
+    d = engine_dir(kind)
+    try:
+        if d.exists():
+            shutil.rmtree(str(d), ignore_errors=True)
+    except Exception:                                      # noqa: BLE001
+        pass
+
+
+def install_engine(kind: str, progress=None, log=None,
+                   on_downloader=None) -> tuple[bool, str]:
+    """下载并解压 whisper.cpp 引擎。已就绪则直接返回 True。
+
+    progress(done, total)；log(text) 用于给界面刷文字。
+    on_downloader(dl) 可选：把下载器交给界面，让「停止」能真正取消下载。
+    ★ v1.28.2：以前下载 439 MB 时界面没有任何出口，客户只能对着 89%
+      干等甚至强杀进程 —— 现在必须能把 downloader 交出去。
+    """
+    if engine_ready(kind):
+        return True, "引擎已就绪，无需重复安装"
+
+    asset = CPU_ASSET
+    if kind == "cuda":
+        gpu = detect_gpu()
+        key, why = pick_cuda_bundle(gpu)
+        if not key:
+            # 驱动太旧：不能装作"下载失败"，要把人话原因带回去
+            if log:
+                log(why)
+            return False, why
+        asset = CUDA_BUNDLES[key]["asset"]
+        if log:
+            log(why)
+
+    d = engine_dir(kind)
+    # 旧目录可能是半个包、或上一版不带 cuBLAS 的 11.8，先清再解压
+    if d.exists() and not engine_ready(kind):
+        if log:
+            log("清理旧的引擎文件…")
+        _clear_engine_dir(kind)
+    d.mkdir(parents=True, exist_ok=True)
+    zip_path = whisper_home() / (asset or "engine.zip")
+
+    if log:
+        log(f"开始下载引擎包：{asset}")
+    dl = Downloader()
+    if on_downloader:
+        try:
+            on_downloader(dl)
+        except Exception:                                  # noqa: BLE001
+            pass
+    ok, err = dl.download(
+        _urls_for(ENGINE_MIRRORS, asset), zip_path,
+        progress=_progress_wrapper(progress, log),
+        expect_sha256=ASSET_SHA256.get(asset, ""),
+    )
+    if not ok:
+        if log:
+            if dl.cancelled:
+                log("已停止下载。这个显卡引擎只影响速度，不影响能不能转写："
+                    "把「设备」切到「CPU 转录」即可直接开始，随包自带、不用联网。")
+            else:
+                log(f"下载失败：{err}")
+        if dl.cancelled:
+            return False, "已停止下载显卡引擎。可切到「CPU 转录」直接使用，无需等待下载。"
+        return False, f"引擎下载失败：{err}"
+
+    if log:
+        log("下载完成，正在解压…")
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(d)
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"解压失败：{e}"
+    finally:
+        try:
+            if zip_path.exists():
+                zip_path.unlink()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    exe = engine_exe(kind)
+    if not exe:
+        return False, "解压后没找到 whisper-cli.exe，引擎包可能不完整"
+    # ★ 解压完必须复验：包齐全 ≠ 能跑，缺 cublas 时 exe 也在，但一启动就弹系统框
+    problem = engine_problem(kind)
+    if problem:
+        return False, problem
+    if log:
+        log(f"引擎安装完成并已校验可用：{exe}")
+    return True, str(exe)
+
+
+def install_model(key: str, progress=None, log=None) -> tuple[bool, str]:
+    """下载 ggml 模型。已就绪则直接返回 True。"""
+    info = MODELS.get(key)
+    if not info:
+        return False, f"未知模型：{key}"
+    dest = models_dir() / info["file"]
+    if model_ready(key):
+        return True, str(dest)
+
+    if log:
+        log(f"开始下载模型：{info['file']}（约 {info['size_mb']} MB）")
+    dl = Downloader()
+    ok, err = dl.download(
+        _urls_for(MODEL_MIRRORS, info["file"]), dest,
+        total_hint=info["size_mb"] * 1024 * 1024,
+        progress=_progress_wrapper(progress, log),
+    )
+    if not ok:
+        if log:
+            log(f"模型下载失败：{err}")
+        return False, f"模型下载失败：{err}"
+    # 模型没有官方哈希可对，只能复核体积；坏包在转写时会输出乱码，
+    # 与其让客户对着一堆乱码猜，不如在这里拦下来重下。
+    if not model_ready(key):
+        return False, (f"模型文件不完整（{dest.name} 体积只有 "
+                       f"{dest.stat().st_size / 1048576:.0f} MB，"
+                       f"应为约 {info['size_mb']} MB），请重新下载")
+    if log:
+        log(f"模型就绪：{dest}")
+    return True, str(dest)
+
+
+def _bundle_root() -> Path:
+    """打包运行时的资源根目录（PyInstaller 会把资源解压到 _MEIPASS）。"""
+    try:
+        return Path(sys._MEIPASS)                          # noqa: SLF001
+    except Exception:                                      # noqa: BLE001
+        return Path(__file__).resolve().parent
+
+
+def bundled_cpu_engine() -> Path | None:
+    """安装包里自带的 CPU 引擎目录；没有就返回 None。"""
+    cands = [
+        _bundle_root() / "whisper_cpu",
+        Path(__file__).resolve().parent.parent / "assets" / "whisper_cpu",
+    ]
+    for c in cands:
+        try:
+            if (c / "Release" / "whisper-cli.exe").exists() or (c / "Release" / "main.exe").exists():
+                return c
+        except Exception:                                  # noqa: BLE001
+            continue
+    return None
+
+
+def bootstrap_engine(kind: str = "cpu") -> bool:
+    """首次运行时把随包自带的 CPU 引擎释放到用户目录 —— 不联网也能转写。
+
+    只内置 CPU 引擎：它只有约 2 MB，而 CUDA 引擎动辄几十上百 MB，
+    塞进安装包不划算，那个仍然按用户显卡按需下载。
+    """
+    if kind != "cpu":
+        return False
+    if engine_ready("cpu"):
+        return True
+    src = bundled_cpu_engine()
+    if src is None:
+        return False
+    try:
+        dst = engine_dir("cpu")
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in src.rglob("*"):
+            if f.is_file():
+                target = dst / f.relative_to(src)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(f), str(target))
+    except Exception:                                      # noqa: BLE001
+        return False
+    return engine_ready("cpu")
+
+
+def import_engine_zip(zip_path: Path, kind: str) -> tuple[bool, str]:
+    """从本地 zip 导入引擎。
+
+    给网络不好（或公司网络屏蔽 GitHub）的用户留的口子：
+    他可以用迅雷 / Motrix 之类下载工具先把包下下来，再从这里导入，
+    不用在程序里干等一条慢速链路。
+
+    ★ v1.14.6：导入同样要复验。用户很容易下到 11.8 那个 59 MB 的小包
+      （搜索"whisper cublas 下载"第一个往往就是它），导进去照样跑不起来。
+      这里直接告诉他"这个包不含 cuBLAS，请改用 12.4 那个 439 MB 的"。
+    """
+    try:
+        d = engine_dir(kind)
+        if d.exists():
+            _clear_engine_dir(kind)
+        d.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(d)
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"解压失败：{e}"
+    exe = engine_exe(kind)
+    if not exe:
+        return False, "压缩包里没找到 whisper-cli.exe，确认下载的是 Windows x64 包"
+    problem = engine_problem(kind)
+    if problem:
+        return False, problem
+    return True, str(exe)
+
+
+def import_model_file(src: Path, key: str) -> tuple[bool, str]:
+    """导入本地已下载好的 ggml 模型文件。"""
+    info = MODELS.get(key)
+    if not info:
+        return False, f"未知模型：{key}"
+    dest = models_dir() / info["file"]
+    try:
+        models_dir().mkdir(parents=True, exist_ok=True)
+        if Path(src).resolve() != dest.resolve():
+            shutil.copy2(str(src), str(dest))
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"复制失败：{e}"
+    if not model_ready(key):
+        return False, (
+            f"导入后体积校验未通过（{human_size(dest.stat().st_size)}，"
+            f"期望约 {info['size_mb']} MB），文件可能不完整"
+        )
+    return True, str(dest)
+
+
+# ----------------------------------------------------------------------
+#  转写执行
+# ----------------------------------------------------------------------
+
+@dataclass
+class TranscribeTask:
+    src: Path
+    model: str = DEFAULT_MODEL
+    device: str = "cpu"            # 'cpu' | 'cuda'
+    lang: str = "zh"               # 'zh' 中文，'auto' 自动
+    out_dir: Path | None = None
+    want_srt: bool = False
+    translate: bool = False
+    threads: int = 0               # CPU 线程数，0 = 自动
+
+
+@dataclass
+class TranscribeResult:
+    ok: bool
+    src: Path
+    txt: Path | None = None
+    srt: Path | None = None
+    msg: str = ""
+    seconds: float = 0.0
+
+
+_PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)\s*%")
+
+
+def _explain_rc(rc: int, device: str) -> str:
+    """把 whisper-cli 的退出码翻译成人话。
+
+    Windows 上进程"闪一下就没了"多半是加载器失败（缺 DLL / 位数不对），
+    这类退出码是 0xC0000xxx，直接显示成 "-1073741515" 用户完全看不懂。
+    """
+    # 32 位有符号表示（subprocess 返回的就是这个）
+    codes = {
+        -1073741515: "缺少系统运行库（DLL 找不到）",
+        -1073741511: "DLL 版本不匹配（入口点找不到）",
+        -1073741701: "程序与系统位数不符（32/64 位混用）",
+        -1073741819: "程序崩溃（访问冲突）",
+    }
+    why = codes.get(rc)
+    if why is None and rc > 0x7FFFFFFF:
+        why = codes.get(rc - 0x100000000)
+    who = "显卡引擎" if device == "cuda" else "CPU 引擎"
+    if why:
+        return (
+            f"{who}启动失败：{why}（退出码 {rc}）。\n"
+            f"常见原因是显卡引擎的运行库不完整。点「检测显卡并一键安装」重新装一次；"
+            f"如果还不行，先用 CPU 模式转写。"
+        )
+    return f"{who}退出码 {rc}，未产出文本"
+
+
+class Transcriber:
+    """把音视频转成 txt（可选 srt）。
+
+    流程：ffmpeg 抽 16 kHz 单声道 wav → whisper-cli 转写 → 输出 txt/srt。
+    每一步都能被 cancel() 打断，界面点「停止」不会卡住。
+    """
+
+    def __init__(self, ffmpeg: str | None = None, work_dir: Path | None = None):
+        self.ffmpeg = ffmpeg
+        self.work_dir = work_dir or (whisper_home() / "tmp")
+        self._proc: subprocess.Popen | None = None
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.terminate()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    # -- 1) 抽音频 --------------------------------------------------
+
+    def extract_wav(self, src: Path, log=None) -> tuple[bool, Path | str]:
+        if not self.ffmpeg:
+            return False, "没有可用的 ffmpeg，无法抽取音频（可在设置里指定 ffmpeg.exe）"
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        wav = self.work_dir / (src.stem[:60] + ".wav")
+        cmd = [
+            self.ffmpeg, "-y", "-i", str(src),
+            "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+            str(wav),
+        ]
+        if log:
+            log("抽取音频轨（16 kHz 单声道）…")
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=1800,
+                encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "抽取音频超时（文件过大或 ffmpeg 卡住）"
+        except Exception as e:                             # noqa: BLE001
+            return False, f"抽取音频失败：{e}"
+
+        if proc.returncode != 0 or not wav.exists():
+            tail = ((proc.stderr or "")[-300:]).strip()
+            return False, f"ffmpeg 抽音频失败：{tail or '未知原因'}"
+        return True, wav
+
+    # -- 2) 调 whisper-cli ------------------------------------------
+
+    def run(self, task: TranscribeTask, progress=None, log=None) -> TranscribeResult:
+        """执行转写。progress(percent 0-100)，log(一行文本)。"""
+        t0 = time.time()
+        src = Path(task.src)
+        if not src.exists():
+            return TranscribeResult(False, src, msg="源文件不存在")
+
+        device = task.device
+
+        # ★ v1.14.6：显卡档先做体检，而且必须在取 exe 之前。
+        #   这是「找不到 cublas64_11.dll」那个系统错误框的正解 ——
+        #   那个框是 Windows 加载器弹的，进程会卡在那儿等用户点「确定」，
+        #   try/except 和 subprocess 超时都拦不住，只能在启动之前查文件。
+        #   用不上显卡就不硬撑：CPU 引擎能用就改 CPU 继续跑，
+        #   客户要的是文案，不是「必须用显卡跑」。
+        degraded = ""
+        if device == "cuda":
+            why = engine_problem("cuda") if engine_exe("cuda") else "显卡(CUDA)引擎还没安装"
+            if why:
+                # 客户可能从没打开过「音视频转文本」页，CPU 引擎还没从安装包里
+                # 释放出来。这里按需释放一次（随包自带约 2 MB，不联网），
+                # 否则降级会因为没有 CPU 引擎而落空，退回到「引擎没装」。
+                bootstrap_engine("cpu")
+                cpu_exe = engine_exe("cpu")
+                cpu_ok = cpu_exe is not None and not engine_problem("cpu")
+                if not cpu_ok:
+                    if engine_exe("cpu") is None:
+                        return TranscribeResult(
+                            False, src, msg="转写引擎还没安装，请先点「一键安装」")
+                    return TranscribeResult(
+                        False, src, msg="CPU 引擎也不完整，请先点「一键安装」重新安装")
+                degraded = why
+                if log:
+                    log(why)
+                    log("→ 已自动改用 CPU 引擎继续转写（结果完全一样，只是慢一些）")
+                device, exe = "cpu", cpu_exe
+            else:
+                exe = engine_exe("cuda")
+        else:
+            if not engine_exe("cpu"):
+                bootstrap_engine("cpu")          # 同上：按需释放随包自带的 CPU 引擎
+            exe = engine_exe(device)
+            if not exe:
+                return TranscribeResult(
+                    False, src, msg="CPU 引擎还没安装，请先点「一键安装」")
+
+        mpath = model_path(task.model)
+        if not mpath.exists():
+            return TranscribeResult(False, src, msg=f"模型 {task.model} 还没下载")
+
+        out_dir = Path(task.out_dir) if task.out_dir else src.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prefix = out_dir / src.stem
+
+        # 音频 → wav
+        ok, wav = self.extract_wav(src, log=log)
+        if not ok:
+            return TranscribeResult(False, src, msg=str(wav))
+        wav = Path(wav)                                    # type: ignore[arg-type]
+
+        cmd = [
+            str(exe),
+            "-m", str(mpath),
+            "-f", str(wav),
+            "-l", task.lang or "auto",
+            "-of", str(prefix),
+            "-pp",
+            "-otxt",
+        ]
+        if task.want_srt:
+            cmd.append("-osrt")
+        if task.translate:
+            cmd.append("-tr")
+        if device == "cpu":
+            n = task.threads or max(1, (os.cpu_count() or 4))
+            cmd += ["-t", str(n)]
+
+        if log:
+            if device == "cuda":
+                log("开始转写…（显卡模式首次运行要初始化 CUDA，约需十几秒）")
+            else:
+                log("开始转写…（CPU 模式）")
+
+        try:
+            self._proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as e:                             # noqa: BLE001
+            return TranscribeResult(False, src, msg=f"启动 whisper-cli 失败：{e}")
+
+        # 逐行实时读输出：一边解析进度一边避免管道缓冲区塞满（读就不会堵）
+        try:
+            for line in self._proc.stdout or []:           # type: ignore[union-attr]
+                if self._cancel.is_set():
+                    break
+                line = line.rstrip()
+                if not line:
+                    continue
+                m = _PROGRESS_RE.search(line)
+                if m and progress:
+                    try:
+                        progress(int(m.group(1)))
+                    except Exception:                      # noqa: BLE001
+                        pass
+                elif log and len(line) < 200:
+                    log(line)
+            self._proc.wait(timeout=7200)
+            rc = self._proc.returncode
+        except subprocess.TimeoutExpired:
+            self.cancel()
+            return TranscribeResult(False, src, msg="转写超时（超过 2 小时）已中止")
+        finally:
+            try:
+                if self._proc and self._proc.stdout:
+                    self._proc.stdout.close()
+            except Exception:                              # noqa: BLE001
+                pass
+            self._proc = None
+
+        # 清掉临时 wav，别让 1 小时的录音占着几个 G
+        try:
+            if wav.exists():
+                wav.unlink()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+        if self._cancel.is_set():
+            return TranscribeResult(False, src, msg="已取消")
+
+        txt = prefix.with_suffix(".txt")
+        srt = prefix.with_suffix(".srt")
+        if rc != 0 and not txt.exists():
+            return TranscribeResult(False, src, msg=_explain_rc(rc, device))
+        if not txt.exists():
+            return TranscribeResult(False, src, msg="转写结束但没有生成 txt 文件")
+
+        return TranscribeResult(
+            ok=True, src=src, txt=txt,
+            srt=srt if (task.want_srt and srt.exists()) else None,
+            msg=("完成（显卡引擎不可用，本次用 CPU 转写）" if degraded else "完成"),
+            seconds=round(time.time() - t0, 1),
+        )
+
+
+# ----------------------------------------------------------------------
+#  小工具
+# ----------------------------------------------------------------------
+
+def list_media_files(dirs: list[Path], exts: set[str] | None = None) -> list[Path]:
+    """扫描目录里的音视频文件（不递归太深，避免把整个磁盘走一遍）。"""
+    exts = exts or SUPPORTED_AUDIO_EXT
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in dirs:
+        try:
+            if not d.exists():
+                continue
+        except Exception:                                  # noqa: BLE001
+            continue
+        try:
+            for p in sorted(d.rglob("*")):
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in exts:
+                    continue
+                key = str(p).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(p)
+        except Exception:                                  # noqa: BLE001
+            continue
+    return out
+
+
+def human_size(n: float) -> str:
+    """把字节数说成人话。"""
+    try:
+        n = float(n)
+    except Exception:                                      # noqa: BLE001
+        return "-"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B",) else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def speed_hint(device: str, model: str) -> str:
+    """给用户一个大致的速度预期，避免他不知道该等多久。"""
+    gpu_fast = device == "cuda"
+    table = {
+        "tiny": (25, 60), "base": (15, 40), "small": (8, 20),
+        "medium": (3, 8), "large-v3-turbo": (4, 10), "large-v3": (1.5, 4),
+    }
+    lo, hi = table.get(model, (5, 10))
+    if not gpu_fast:
+        lo, hi = max(0.3, lo * 0.08), max(0.8, hi * 0.1)
+    unit = "倍速" if gpu_fast else "倍速（CPU 慢很多）"
+    return f"预计 {lo:g}–{hi:g} {unit}：10 分钟音频约需 {max(1, round(10 / hi * 60))}–{max(1, round(10 / lo * 60))} 秒"

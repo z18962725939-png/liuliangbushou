@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>流量捕手 · 运营实时看板</title>
+<style>
+  :root{
+    --canvas:#0F1115; --surface:#181B21; --surface-2:#12151B;
+    --border:#2A2F3A; --border-strong:#3A4150;
+    --text-1:#E5E7EB; --text-2:#9CA3AF; --text-3:#6B7280;
+    --primary:#6366F1; --primary-dim:#4F46E5;
+    --success:#22C55E; --warning:#FBBF24; --danger:#F87171; --info:#60A5FA;
+    --douyin:#FE2C55;
+    --r-sm:8px; --r-md:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--canvas);color:var(--text-1);
+    font:13px/1.6 "Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{font-family:"JetBrains Mono",Consolas,ui-monospace,monospace}
+  button{font:inherit;color:inherit;cursor:pointer}
+
+  /* ── 顶栏 ───────────────────────────────────────────── */
+  header{
+    display:flex;align-items:center;gap:16px;padding:14px 24px;
+    border-bottom:1px solid var(--border);background:var(--surface);
+    position:sticky;top:0;z-index:10;
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;letter-spacing:.2px}
+  .logo{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--primary),var(--douyin))}
+  .brand small{font-weight:400;font-size:12px;color:var(--text-3);letter-spacing:0}
+  .spacer{flex:1}
+  .status{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;
+    background:var(--surface-2);border:1px solid var(--border);font-size:12px;color:var(--text-2)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);flex:none}
+  .status[data-state=live] .dot{background:var(--success);box-shadow:0 0 0 3px rgba(34,197,94,.18)}
+  .status[data-state=live]{color:var(--text-1)}
+  .status[data-state=retry] .dot{background:var(--warning);animation:blink 1s infinite}
+  .status[data-state=down] .dot{background:var(--danger)}
+  @keyframes blink{50%{opacity:.25}}
+
+  .btn{
+    height:32px;padding:0 13px;border-radius:var(--r-sm);border:1px solid var(--border);
+    background:var(--surface-2);color:var(--text-1);display:inline-flex;align-items:center;gap:6px;
+    transition:border-color .15s,background .15s;
+  }
+  .btn:hover{border-color:var(--border-strong);background:#1b1f27}
+  .btn.primary{background:var(--primary-dim);border-color:var(--primary-dim);color:#fff}
+  .btn.primary:hover{background:var(--primary)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn[aria-pressed=true]{border-color:var(--primary);color:#c7d2fe;background:rgba(99,102,241,.14)}
+
+  /* ── 指标条 ─────────────────────────────────────────── */
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);
+    border-bottom:1px solid var(--border)}
+  .metric{background:var(--surface-2);padding:13px 24px}
+  .metric .k{font-size:12px;color:var(--text-2);margin-bottom:2px}
+  .metric .v{font-size:22px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums}
+  .metric .v.warn{color:var(--warning)}
+  .metric .v.ok{color:var(--success)}
+
+  /* ── 主体 ───────────────────────────────────────────── */
+  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:0;height:calc(100vh - 155px)}
+  .panel{display:flex;flex-direction:column;min-height:0}
+  .panel + .panel{border-left:1px solid var(--border)}
+  .panel-hd{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--border)}
+  .panel-hd h2{margin:0;font-size:13px;font-weight:600}
+  .panel-hd .count{font-size:12px;color:var(--text-3)}
+  .filters{display:flex;gap:6px;margin-left:auto}
+  .chip{height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--border);
+    background:transparent;color:var(--text-2);font-size:12px}
+  .chip[aria-pressed=true]{background:rgba(99,102,241,.16);border-color:var(--primary);color:#c7d2fe}
+
+  .stream{flex:1;overflow-y:auto;padding:8px 12px 24px}
+  .ev{display:flex;gap:11px;padding:10px 9px;border-radius:var(--r-sm);border:1px solid transparent;
+    animation:in .18s ease-out}
+  .ev + .ev{border-top:1px solid rgba(42,47,58,.55)}
+  .ev:hover{background:var(--surface)}
+  .ev.fresh{background:rgba(99,102,241,.10);border-color:rgba(99,102,241,.35)}
+  @keyframes in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .ev .t{flex:none;width:62px;font-size:11px;color:var(--text-3);padding-top:1px;font-variant-numeric:tabular-nums}
+  .ev .body{min-width:0;flex:1}
+  .ev .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .badge{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid;line-height:1.7;white-space:nowrap}
+  .b-msg{color:#93c5fd;border-color:rgba(96,165,250,.35);background:rgba(96,165,250,.10)}
+  .b-order{color:#fda4af;border-color:rgba(254,44,85,.35);background:rgba(254,44,85,.10)}
+  .b-issued{color:#86efac;border-color:rgba(34,197,94,.35);background:rgba(34,197,94,.10)}
+  .b-failed{color:#fca5a5;border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.10)}
+  .ev .main{color:var(--text-1);word-break:break-word}
+  .ev .sub{color:var(--text-3);font-size:12px;margin-top:2px;word-break:break-word}
+  .ev .arrow{color:var(--text-3);flex:none;padding-top:2px}
+
+  .empty{padding:56px 20px;text-align:center;color:var(--text-3)}
+  .empty svg{opacity:.45;margin-bottom:12px}
+
+  /* ── 订单列 ─────────────────────────────────────────── */
+  .orders{flex:1;overflow-y:auto;padding:10px 12px 24px}
+  .order{border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);
+    padding:11px 13px;margin-bottom:9px}
+  .order .row1{display:flex;align-items:center;gap:8px}
+  .order .machine{font-size:12px;color:var(--text-1);word-break:break-all;flex:1}
+  .order .meta{display:flex;gap:12px;margin-top:6px;font-size:11px;color:var(--text-3);flex-wrap:wrap}
+  .tag{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid;white-space:nowrap}
+  .t-pending{color:var(--warning);border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.1)}
+  .t-issued{color:var(--success);border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.1)}
+  .t-failed{color:var(--danger);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.1)}
+  .paid{color:var(--success)}
+  .unpaid{color:var(--text-3)}
+
+  /* ── 登录遮罩 ───────────────────────────────────────── */
+  .mask{position:fixed;inset:0;background:rgba(9,11,15,.94);backdrop-filter:blur(3px);
+    display:grid;place-items:center;z-index:50}
+  .mask[hidden]{display:none}
+  .login{width:360px;background:var(--surface);border:1px solid var(--border);
+    border-radius:16px;padding:26px 26px 22px;box-shadow:0 20px 60px rgba(0,0,0,.55)}
+  .login h1{margin:0 0 4px;font-size:16px;font-weight:600}
+  .login p{margin:0 0 18px;font-size:12px;color:var(--text-2);line-height:1.6}
+  .login label{display:block;font-size:12px;color:var(--text-2);margin-bottom:6px}
+  .login input{width:100%;height:36px;padding:0 12px;border-radius:var(--r-sm);
+    border:1px solid var(--border);background:var(--surface-2);color:var(--text-1);font:inherit}
+  .login input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(99,102,241,.18)}
+  .login .err{color:var(--danger);font-size:12px;min-height:18px;margin-top:8px}
+  .login button{width:100%;height:36px;margin-top:6px;border-radius:var(--r-sm);border:0;
+    background:var(--primary-dim);color:#fff;font-weight:500}
+  .login button:hover{background:var(--primary)}
+  .login .hint{margin-top:14px;font-size:11px;color:var(--text-3);line-height:1.6}
+
+  .banner{display:none;padding:8px 24px;background:rgba(251,191,36,.12);
+    border-bottom:1px solid rgba(251,191,36,.3);color:var(--warning);font-size:12px}
+  .banner[data-show=true]{display:block}
+
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#2f3542;border-radius:9px;border:2px solid var(--canvas)}
+  ::-webkit-scrollbar-thumb:hover{background:#3d4452}
+  @media (max-width:1080px){
+    main{grid-template-columns:1fr;height:auto}
+    .panel + .panel{border-left:0;border-top:1px solid var(--border)}
+    .metrics{grid-template-columns:repeat(2,1fr)}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo"></div>
+    流量捕手 <small>运营实时看板</small>
+  </div>
+  <div class="spacer"></div>
+  <div class="status" id="status" data-state="retry" title="实时连接状态">
+    <span class="dot"></span><span id="statusText">正在连接…</span>
+  </div>
+  <button class="btn" id="notifyBtn" aria-pressed="false" title="新授权请求时弹出桌面通知">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+    桌面通知
+  </button>
+  <button class="btn" id="refreshBtn" title="重新拉取订单快照">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>
+    刷新
+  </button>
+  <button class="btn" id="logoutBtn" title="退出看板登录">退出</button>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<section class="metrics">
+  <div class="metric"><div class="k">在线看板</div><div class="v" id="mOnline">0</div></div>
+  <div class="metric"><div class="k">今日授权请求</div><div class="v" id="mTotal">0</div></div>
+  <div class="metric"><div class="k">今日已发码</div><div class="v ok" id="mIssued">0</div></div>
+  <div class="metric"><div class="k">待处理</div><div class="v warn" id="mPending">0</div></div>
+</section>
+
+<main>
+  <section class="panel">
+    <div class="panel-hd">
+      <h2>实时事件</h2>
+      <span class="count" id="evCount">0 条</span>
+      <div class="filters" id="filters">
+        <button class="chip" data-filter="all" aria-pressed="true">全部</button>
+        <button class="chip" data-filter="msg" aria-pressed="false">客户消息</button>
+        <button class="chip" data-filter="order" aria-pressed="false">授权请求</button>
+        <button class="chip" data-filter="code" aria-pressed="false">发码</button>
+      </div>
+    </div>
+    <div class="stream" id="stream">
+      <div class="empty" id="empty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <div>等待事件…</div>
+        <div style="font-size:12px;margin-top:4px">客户发消息、提交机器码、运营放行时会实时出现在这里</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd">
+      <h2>最近授权订单</h2>
+      <span class="count" id="orderCount">—</span>
+    </div>
+    <div class="orders" id="orders"></div>
+  </section>
+</main>
+
+<div class="mask" id="mask" hidden>
+  <form class="login" id="loginForm" autocomplete="off">
+    <h1>访问受限</h1>
+    <p>请输入看板口令。口令只用于换取 8 小时的登录凭据，不会保存在浏览器里。</p>
+    <label for="token">看板口令</label>
+    <input id="token" type="password" inputmode="text" placeholder="DASHBOARD_TOKEN" autocomplete="current-password" required>
+    <div class="err" id="loginErr"></div>
+    <button type="submit" id="loginBtn">进入看板</button>
+    <div class="hint">口令即机器人 .env 里的 <span class="mono">DASHBOARD_TOKEN</span>，至少 16 位。忘记就改 .env 重启。</div>
+  </form>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MAX_EVENTS = 200;
+  var seen = Object.create(null);      // 已渲染的事件 id，防断线补推时重复
+  var items = [];                      // 事件数组，newest 在前
+  var filter = "all";
+  var es = null;
+  var retryDelay = 1200;
+  var retryTimer = null;
+  var notifyOn = false;
+  var stopping = false;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var streamEl = $("stream"), ordersEl = $("orders");
+  var emptyEl = $("empty"), statusEl = $("status"), statusText = $("statusText");
+  var bannerEl = $("banner");
+
+  // ── 工具 ────────────────────────────────────────────────
+  function hhmmss(ts) {
+    var d = new Date(ts || Date.now());
+    var p = function (n) { return n < 10 ? "0" + n : "" + n; };
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+  function ago(ts) {
+    var s = Math.max(0, Math.round((Date.now() - (ts || 0)) / 1000));
+    if (s < 60) return s + " 秒前";
+    if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+    if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+    return Math.floor(s / 86400) + " 天前";
+  }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  // ── 事件渲染 ────────────────────────────────────────────
+  var KIND = {
+    "message.received": { badge: "客户消息", cls: "b-msg", group: "msg" },
+    "order.created":    { badge: "授权请求", cls: "b-order", group: "order" },
+    "license.issued":   { badge: "已发码",   cls: "b-issued", group: "code" },
+    "license.failed":   { badge: "发码失败", cls: "b-failed", group: "code" }
+  };
+
+  function describe(ev) {
+    var d = ev.data || {};
+    switch (ev.type) {
+      case "message.received":
+        return {
+          main: d.preview || "(空消息)",
+          sub: "客户 " + (d.from || "未知") + (d.kind === "machine" ? " · 疑似提交机器码" : "") + (d.paid ? " · 疑似已付款" : "")
+        };
+      case "order.created":
+        return {
+          main: "机器码 " + (d.machine || "-"),
+          sub: (d.paid ? "客户称已付款" : "⚠ 未识别到付款信息，建议先确认再放行") + " · 订单 " + (d.id || "").slice(0, 8)
+        };
+      case "license.issued":
+        return { main: "授权码已发给 " + (d.machine || "-"), sub: (d.plan || "") + " · " + (d.days || "-") + " 天 · 自动发送成功" };
+      case "license.failed":
+        return { main: "发码失败：" + (d.machine || "-"), sub: (d.error || "未知原因") + " · 需要手动补发" };
+      default:
+        return { main: ev.type, sub: JSON.stringify(d).slice(0, 160) };
+    }
+  }
+
+  function renderEvent(ev, fresh) {
+    if (seen[ev.id]) return;
+    seen[ev.id] = 1;
+
+    var meta = KIND[ev.type] || { badge: ev.type, cls: "b-msg", group: "all" };
+    var info = describe(ev);
+
+    var row = el("div", "ev" + (fresh ? " fresh" : ""));
+    row.dataset.group = meta.group;
+
+    row.appendChild(el("div", "t mono", hhmmss(ev.ts)));
+
+    var body = el("div", "body");
+    var top = el("div", "top");
+    top.appendChild(el("span", "badge " + meta.cls, meta.badge));
+    body.appendChild(top);
+    body.appendChild(el("div", "main", info.main));
+    if (info.sub) body.appendChild(el("div", "sub", info.sub));
+    row.appendChild(body);
+
+    items.unshift({ ev: ev, node: row, group: meta.group });
+    if (items.length > MAX_EVENTS) {
+      var dead = items.pop();
+      delete seen[dead.ev.id];
+      if (dead.node.parentNode) dead.node.parentNode.removeChild(dead.node);
+    }
+
+    // 插到「第一条已有事件」之前；没有事件时追加（empty 占位随后隐藏）
+    var firstEvent = streamEl.querySelector(".ev");
+    streamEl.insertBefore(row, firstEvent || null);
+    emptyEl.style.display = "none";
+
+    if (fresh) {
+      setTimeout(function () { row.classList.remove("fresh"); }, 2600);
+      if (notifyOn && ev.type === "order.created") notify(ev);
+    }
+    applyFilter();
+    $("evCount").textContent = items.length + " 条";
+  }
+
+  function applyFilter() {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var show = filter === "all" || it.group === filter;
+      it.node.style.display = show ? "" : "none";
+    }
+  }
+
+  function notify(ev) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    var d = ev.data || {};
+    try {
+      new Notification("新的授权请求", {
+        body: "机器码 " + (d.machine || "") + (d.paid ? "（客户称已付款）" : "（未确认付款）"),
+        tag: "llb-" + (d.id || Date.now())
+      });
+    } catch (e) { /* 某些环境不支持 */ }
+  }
+
+  // ── 连接状态 ────────────────────────────────────────────
+  function setStatus(state, text) {
+    statusEl.dataset.state = state;
+    statusText.textContent = text;
+  }
+  function showBanner(msg) {
+    if (!msg) { bannerEl.dataset.show = "false"; return; }
+    bannerEl.textContent = msg;
+    bannerEl.dataset.show = "true";
+  }
+
+  // ── SSE ────────────────────────────────────────────────
+  function connect() {
+    if (stopping) return;
+    if (es) { try { es.close(); } catch (e) {} }
+    clearTimeout(retryTimer);
+    setStatus("retry", "正在连接…");
+    showBanner("");
+
+    es = new EventSource("/events");
+
+    es.addEventListener("open", function () {
+      retryDelay = 1200;
+      setStatus("live", "实时已连接");
+      showBanner("");
+    });
+
+    es.addEventListener("ready", function (e) {
+      retryDelay = 1200;
+      setStatus("live", "实时已连接");
+      var d = {};
+      try { d = JSON.parse(e.data).data || {}; } catch (err) {}
+      if (typeof d.subscribers === "number") $("mOnline").textContent = d.subscribers;
+      if (d.replayed) showBanner("已补齐断线期间的 " + d.replayed + " 条事件");
+    });
+
+    es.addEventListener("presence.changed", function (e) {
+      try {
+        var d = JSON.parse(e.data).data || {};
+        if (typeof d.subscribers === "number") $("mOnline").textContent = d.subscribers;
+      } catch (err) {}
+    });
+
+    ["message.received", "order.created", "license.issued", "license.failed"].forEach(function (type) {
+      es.addEventListener(type, function (e) {
+        var ev;
+        try { ev = JSON.parse(e.data); } catch (err) { return; }
+        renderEvent(ev, true);
+        if (ev.type === "order.created" || ev.type === "license.issued") loadOrders();
+      });
+    });
+
+    es.addEventListener("error", function () {
+      if (es && es.readyState === EventSource.CLOSED) {
+        // 服务端返回非 200（多半是登录过期）或连接被彻底拒绝
+        setStatus("down", "连接已断开");
+        scheduleRetry();
+      } else {
+        setStatus("retry", "网络抖动，重连中…");
+        showBanner("实时连接中断，正在自动重连。断线期间的事件会在恢复后补齐。");
+      }
+    });
+  }
+
+  function scheduleRetry() {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(async function () {
+      if (stopping) return;
+      var state = await probeSession();
+      if (state === "noauth" || state === "disabled") { showLogin(); return; }
+      // offline 也继续连：可能是看板自身网络抖动，SSE 恢复后会自动补事件
+      retryDelay = Math.min(retryDelay * 1.7, 30000);
+      connect();
+    }, retryDelay);
+  }
+
+  // ── 会话 ───────────────────────────────────────────────
+  // 返回值区分「没登录」和「连不上」，否则一断网就弹登录框，很烦人
+  async function probeSession() {
+    try {
+      var r = await fetch("/session", { credentials: "same-origin", cache: "no-store" });
+      var j = await r.json();
+      if (j.reason === "not_configured") return "disabled";
+      return j.ok ? "ok" : "noauth";
+    } catch (e) {
+      return "offline";
+    }
+  }
+
+  function showLogin(msg, disableForm) {
+    stopping = true;
+    if (es) { try { es.close(); } catch (e) {} }
+    $("mask").hidden = false;
+    $("loginErr").textContent = msg || "";
+    $("loginBtn").disabled = !!disableForm;
+    $("token").disabled = !!disableForm;
+    setTimeout(function () { if (!disableForm) $("token").focus(); }, 60);
+  }
+
+  function hideLogin() {
+    $("mask").hidden = true;
+    $("loginErr").textContent = "";
+    stopping = false;
+  }
+
+  $("loginForm").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var token = $("token").value.trim();
+    if (!token) return;
+    $("loginBtn").disabled = true;
+    $("loginErr").textContent = "";
+    try {
+      var r = await fetch("/dashboard/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ token: token })
+      });
+      if (r.ok) {
+        $("token").value = "";   // 口令不留在页面上
+        hideLogin();
+        connect();
+        loadOrders();
+      } else {
+        var j = {};
+        try { j = await r.json(); } catch (err) {}
+        $("loginErr").textContent = j.errmsg || "登录失败，请检查口令";
+      }
+    } catch (err) {
+      $("loginErr").textContent = "网络错误，无法连接机器人服务";
+    } finally {
+      $("loginBtn").disabled = false;
+    }
+  });
+
+  // ── 订单快照 ────────────────────────────────────────────
+  var loadingOrders = false;
+  async function loadOrders() {
+    if (loadingOrders) return;
+    loadingOrders = true;
+    try {
+      var r = await fetch("/orders?limit=30", { credentials: "same-origin", cache: "no-store" });
+      if (r.status === 401) { showLogin(); return; }
+      if (!r.ok) return;
+      var d = await r.json();
+      renderOrders(d.orders || []);
+      $("mTotal").textContent = d.today ? d.today.total : "—";
+      $("mIssued").textContent = d.today ? d.today.issued : "—";
+      $("mPending").textContent = d.today ? d.today.pending : "—";
+    } catch (e) {
+      /* 网络问题时保留旧快照，不清屏 */
+    } finally {
+      loadingOrders = false;
+    }
+  }
+
+  function renderOrders(list) {
+    ordersEl.textContent = "";
+    $("orderCount").textContent = list.length ? list.length + " 单" : "暂无订单";
+    if (!list.length) {
+      var e = el("div", "empty", "还没有授权订单");
+      e.style.padding = "40px 12px";
+      ordersEl.appendChild(e);
+      return;
+    }
+    list.forEach(function (o) {
+      var card = el("div", "order");
+
+      var row1 = el("div", "row1");
+      row1.appendChild(el("div", "machine mono", o.machine || "-"));
+      var tag = el("span", "tag t-" + (o.status === "issued" ? "issued" : o.status === "failed" ? "failed" : "pending"));
+      tag.textContent = o.status === "issued" ? "已发码" : o.status === "failed" ? "发送失败" : "待处理";
+      row1.appendChild(tag);
+      card.appendChild(row1);
+
+      var meta = el("div", "meta");
+      meta.appendChild(el("span", o.paid ? "paid" : "unpaid", o.paid ? "客户称已付款" : "未识别付款"));
+      meta.appendChild(el("span", null, o.from || "—"));
+      meta.appendChild(el("span", null, ago(o.createdAt)));
+      card.appendChild(meta);
+
+      ordersEl.appendChild(card);
+    });
+  }
+
+  // ── 交互 ───────────────────────────────────────────────
+  $("filters").addEventListener("click", function (e) {
+    var btn = e.target.closest(".chip");
+    if (!btn) return;
+    filter = btn.dataset.filter;
+    Array.prototype.forEach.call(this.querySelectorAll(".chip"), function (c) {
+      c.setAttribute("aria-pressed", c === btn ? "true" : "false");
+    });
+    applyFilter();
+  });
+
+  $("notifyBtn").addEventListener("click", async function () {
+    if (!("Notification" in window)) {
+      this.textContent = "浏览器不支持通知";
+      this.disabled = true;
+      return;
+    }
+    if (Notification.permission === "granted") {
+      notifyOn = !notifyOn;
+    } else {
+      var p = await Notification.requestPermission();
+      notifyOn = p === "granted";
+    }
+    this.setAttribute("aria-pressed", notifyOn ? "true" : "false");
+  });
+
+  $("refreshBtn").addEventListener("click", function () {
+    loadOrders();
+  });
+
+  $("logoutBtn").addEventListener("click", async function () {
+    try { await fetch("/dashboard/logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+    stopping = true;
+    if (es) { try { es.close(); } catch (e) {} }
+    showLogin("已退出登录");
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) loadOrders();
+  });
+
+  // 每分钟刷新一次"多久以前"的相对时间
+  setInterval(function () { if (!document.hidden) loadOrders(); }, 60000);
+
+  // ── 启动 ───────────────────────────────────────────────
+  (async function boot() {
+    var state = await probeSession();
+    if (state === "disabled") {
+      showLogin("看板未启用：请先在机器人 .env 里设置 DASHBOARD_TOKEN（≥16 位）并重启。", true);
+      return;
+    }
+    if (state === "noauth") { showLogin(); return; }
+    if (state === "offline") showBanner("暂时连不上机器人服务，正在自动重试…");
+    hideLogin();
+    connect();
+    loadOrders();
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,836 @@
+/* 流量捕手 · 深色主题 (QSS)
+   ---------------------------------------------------------------------------
+   ★ 2026-10-17 品牌改版
+   页面底直接用官网 hero 的 #0B0E14 —— 客户从官网（深墨 + 柠檬）进到软件，
+   切到深色就是同一块画布，这是最短的品牌闭环。
+
+   角色分工与浅色主题互补（两套主题都要保证"选中态一眼可见"）：
+     柠檬 #C8F751 = 深色主题的结构色｜导航选中、主按钮、进度条、图表主线
+        → 深底上它是唯一的亮色，识别度最高
+     中性灰阶      = 大面积文字与容器，避免整页发亮刺眼
+
+   浅色主题里柠檬是"点睛"（只用几处），深色主题里柠檬可以大方用 ——
+   因为背景本身在压着它，不会失控。
+   --------------------------------------------------------------------------- */
+* {
+    font-family: "__APP_FONT__", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    outline: none;
+}
+
+QWidget {
+    background: #0B0E14;
+    color: #E6E9EF;
+    font-size: 13px;
+    /* ★ 2026-10-18：选区色。
+       Qt 默认给的是系统蓝（#0078D4 那一档），跟整套配色毫无关系 ——
+       impeccable 的 craft-floor 把「你没有画的那部分」列成最便宜的破绽：
+       选区、插入符、滚动条、焦点框，全都是浏览器/系统的默认皮肤。
+       这里用柠檬的深压版做底、柠檬的浅版做字，跟主题是同一支线。 */
+    selection-background-color: #33421A;
+    selection-color: #E9F6C7;
+}
+/* 输入类控件单独写一遍：selection-* 在 Qt 里靠继承传递，
+   但 QLineEdit / QTextEdit 系列有自己的绘制路径，落一遍才保险。 */
+QLineEdit, QPlainTextEdit, QTextEdit, QTextBrowser {
+    selection-background-color: #33421A;
+    selection-color: #E9F6C7;
+}
+
+/* ★★ 叶控件必须透明（与浅色主题同因，见 light.qss 里的说明）
+   不透明的话每个 QLabel 都自带一块 #0B0E14，落在 #141821 的卡片上就是深色
+   叠深色的方块 —— 客户反馈的「阴影不一样」在深色下是反过来的「色块」。 */
+QLabel, QCheckBox, QRadioButton {
+    background: transparent;
+}
+
+/* 四级表面（2026-10-17 二次改版，借 Linear 的做法）
+   深色界面的层级**不能靠阴影**（深底上阴影几乎看不见，只会糊成一团），
+   只能靠「面比面亮一档」+ hairline 勾边。整套只用这四个值，别再造新色：
+     canvas  #090C11  页面底
+     s1      #12171F  面板 / 卡片（抬 1 档）
+     s2      #1A212B  悬停 / 内嵌槽（再抬 1 档）
+     s3      #232B37  按下 / 选中底
+   ★ 2026-10-17 三次改版：面板与画布的差值从 5 个亮度点拉到 9 个。
+     上一版实拍整屏「糊成一块深灰」—— 客户说的"没质感"有一半来自这里：
+     面比底只亮一点点时，眼睛分不出哪是一块面板，只看见一片色。
+   画布保持官网 hero 的墨色，只把"面"抬起来，品牌色不变。 */
+QFrame#Card {
+    background: #12171F;
+    border: 1px solid #232B36;
+    border-radius: 16px;
+}
+
+/* 面板与列表：苹果式 inset 分组的深色版本（见 light.qss 的说明）
+   ★ 2026-10-18：这里原来是 #151B24 → #10151C 的极轻渐变，按 tasteskill
+     家规（渐变一律不用：背景、按钮、文字都不用）拿掉了。深色的"厚度"靠
+     画布 / 面 / 边三级色阶表达，不靠渐变。 */
+QFrame#Panel {
+    background: #131922;
+    border: 1px solid #232B36;
+    border-radius: 18px;
+}
+QFrame#PanelFlat {
+    background: #12171F;
+    border: 1px solid #232B36;
+    border-radius: 18px;
+}
+QFrame#HSep, QFrame#VLine {
+    background: #232B36;
+    border: none;
+}
+QPushButton#ToolPill {
+    background: transparent;
+    border: 1px solid #232B36;
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 12px;
+    color: #98A2B0;
+}
+QPushButton#ToolPill:focus {
+    border: 1px solid #C8F751;
+    color: #EDF0F4;
+}
+QPushButton#ToolPill:hover {
+    background: #1A212B;
+    border-color: #2E3846;
+    color: #EDF0F4;
+}
+QPushButton#ToolPill:pressed {
+    background: #232B37;
+}
+
+QFrame#NavBar {
+    background: #0E1218;
+    border: none;
+}
+
+QFrame#ContentArea {
+    background: #0B0E14;
+    border: none;
+}
+
+/* ——— 字号六档（与浅色主题同一套，见 light.qss 里的说明）——— */
+QLabel#H1 {
+    font-size: 20px;
+    font-weight: 700;
+    color: #F2F4F8;
+}
+QLabel#H2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #F2F4F8;
+}
+QLabel#Body {
+    font-size: 13px;
+    color: #E6E9EF;
+}
+QLabel#Caption {
+    font-size: 12px;
+    color: #9AA4B2;
+}
+QLabel#Meta {
+    /* 11 → 12px：圆体在小字号下圆弧会被压掉（见 light.qss 说明） */
+    font-size: 12px;
+    color: #7A8390;
+}
+QLabel#StatValue {
+    font-family: "__APP_FONT__", "Microsoft YaHei UI", sans-serif;
+    font-size: 26px;
+    font-weight: 600;
+    color: #F2F4F8;
+}
+QLabel#Badge {
+    font-size: 12px;
+    font-weight: 600;
+    color: #0B0E14;
+    background: #C8F751;
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+/* 跟手数值胶囊（刻度尺右边的「≈ 138 字」）：深色下用 surface-2 抬一档 */
+QLabel#LiveChip {
+    font-size: 12px;
+    font-weight: 600;
+    color: #F2F4F8;
+    background: #1A212B;
+    border-radius: 999px;
+    padding: 3px 10px;
+}
+
+QPushButton {
+    background: #141821;
+    border: 1px solid #313845;
+    border-radius: 8px;
+    padding: 6px 14px;
+    color: #E6E9EF;
+    min-height: 20px;
+}
+QPushButton:focus {
+    border: 1px solid #C8F751;
+    color: #C8F751;
+}
+QPushButton:hover {
+    border: 1px solid #C8F751;
+    color: #C8F751;
+}
+QPushButton:pressed {
+    background: #1B2029;
+}
+QPushButton:disabled {
+    color: #5A6270;
+    border: 1px solid #242A36;
+    background: #141821;
+}
+
+/* 主操作：柠檬底 + 墨字（深底上这是全场最亮的一块，不用修饰就够突出） */
+QPushButton#Primary {
+    background: #C8F751;
+    color: #0B0E14;
+    border: 1px solid #C8F751;
+    font-weight: 600;
+}
+QPushButton#Primary:focus {
+    border: 1px solid #0B0E14;
+}
+QPushButton#Primary:hover {
+    background: #D4FB6B;
+    border: 1px solid #D4FB6B;
+    color: #0B0E14;
+}
+QPushButton#Primary:pressed {
+    background: #BDEA3C;
+    border: 1px solid #BDEA3C;
+}
+QPushButton#Primary:disabled {
+    /* ★ 2026-10-17 三次改版：禁用态原来是"暗橄榄绿"（#3E4726），
+       在深色下看着像一颗"坏掉的品牌按钮"——既有颜色又按不动。
+       禁用就该**退出品牌色**：用中性面 + 淡字，一眼看出"还没轮到我"。 */
+    background: #1A212B;
+    color: #5D6673;
+    border: 1px solid #232B36;
+}
+/* 平台登录按钮：中性胶囊（与浅色一致，深色下用 surface-2 抬一档） */
+QPushButton#PlatformChip {
+    background: #1A212B;
+    color: #C7CEDA;
+    border: 1px solid #232B36;
+    border-radius: 999px;
+    padding: 5px 12px;
+    min-height: 18px;
+}
+QPushButton#PlatformChip:focus {
+    border: 1px solid #C8F751;
+    color: #EDF0F4;
+}
+QPushButton#PlatformChip:hover {
+    background: #232B37;
+    color: #EDF0F4;
+    border: 1px solid #2E3846;
+}
+QPushButton#PlatformChip:pressed {
+    background: #26303D;
+}
+QPushButton#PlatformChip:disabled {
+    background: #12171F;
+    color: #55606F;
+    border: 1px solid #1A212B;
+}
+/* 空态里的按钮：次级描边，悬停才露一点柠檬边。 */
+QPushButton#EmptyAction {
+    background: transparent;
+    color: #EDF0F4;
+    border: 1px solid #2E3846;
+    border-radius: 999px;
+    font-weight: 600;
+    padding: 6px 16px;
+}
+QPushButton#EmptyAction:focus {
+    border: 1px solid #C8F751;
+    background: #1A212B;
+}
+QPushButton#EmptyAction:hover {
+    background: #1A212B;
+    border: 1px solid #C8F751;
+}
+QPushButton#EmptyAction:pressed {
+    background: #232B37;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ 侧栏分组标题（2026-10-17 P2：可折叠）
+   深色下「标签感」靠灰度差拉开：正文图标 #9AA4B2，hover 提亮到白。
+   箭头同样由 main_window 画上去，吃当前主题色。
+   --------------------------------------------------------------------------- */
+QPushButton#NavGroup {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 9px 3px;
+    color: #9AA4B2;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    text-align: left;
+}
+QPushButton#NavGroup:hover {
+    color: #F2F4F8;
+}
+QFrame#NavGroupBody, QWidget#NavGroupBody {
+    background: transparent;
+    border: none;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ 命令面板 CmdPalette（2026-10-17 P2：Ctrl+K 功能搜索）
+   深色下整块用官网 hero 墨色 + hairline 边框压在界面之上；
+   输入框用比卡片浅一档的 #141821 做出「凹进去」的感觉。
+   --------------------------------------------------------------------------- */
+QDialog#CmdPalette {
+    background: transparent;
+}
+QFrame#CmdPanel {
+    background: #0E1218;
+    border: 1px solid #2A3140;
+    border-radius: 12px;
+}
+QLineEdit#CmdInput {
+    background: #141821;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 9px 12px;
+    font-size: 12px;
+    color: #E6E9EF;
+    selection-background-color: #33471A;
+}
+QLineEdit#CmdInput:focus {
+    border: 1px solid #C8F751;
+}
+QListWidget#CmdList {
+    background: transparent;
+    border: none;
+    outline: 0;
+    padding: 2px 0;
+}
+QListWidget#CmdList::item {
+    border-radius: 8px;
+    margin: 1px 0;
+}
+QListWidget#CmdList::item:selected {
+    background: #1B2410;
+}
+QLabel#CmdItemTitle {
+    font-size: 13px;
+    color: #E6E9EF;
+    background: transparent;
+}
+QLabel#CmdItemGroup {
+    font-size: 12px;
+    color: #6B7480;
+    background: transparent;
+}
+QLabel#CmdFoot {
+    font-size: 12px;
+    color: #6B7480;
+    padding: 2px 4px 0;
+    background: transparent;
+}
+
+/* 导航项：左侧预留竖条位（深色主题下柠檬底已经够醒目，竖条留白即可） */
+QPushButton#NavItem {
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: #9AA4B2;
+    text-align: left;
+    spacing: 8px;
+}
+QPushButton#NavItem:hover {
+    background: #1A1F28;
+    color: #F2F4F8;
+}
+/* 选中态（2026-10-17 二次改版：从「整条柠檬实心」改成「淡填充 + 柠檬指示条」）
+   整条实心柠檬的问题：侧栏像被荧光笔划了一道，亮得刺眼，反而看不出内容区
+   的重点在哪。苹果 / Linear / Raycast 的深色侧栏选中都是"轻轻染一层"，
+   靠左侧一道细条 + 文字提亮来定位。柠檬在这里仍然是唯一的彩色信号。 */
+QPushButton#NavItem:checked {
+    background: #18202A;
+    border-left: 3px solid #C8F751;
+    color: #EDF0F4;
+    font-weight: 600;
+}
+QPushButton#NavItem:checked:hover {
+    background: #1D2631;
+    color: #EDF0F4;
+}
+
+QLineEdit {
+    background: #141821;
+    border: 1px solid #313845;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: #E6E9EF;
+}
+QLineEdit:focus {
+    border: 1px solid #C8F751;
+}
+QLineEdit:disabled {
+    background: #0E1218;
+    color: #5A6270;
+}
+
+/* 多行输入框：以前只给 #LogPanel 写过样式，普通 QPlainTextEdit
+   （视频下载的「批量导入链接」、评论截流的链接框…）退回系统白底，
+   而全局文字色是浅灰 —— 深色主题下就是「白底白字」，一个字看不见。
+   2026-10-17 截图核对进度条时顺带发现。 */
+QPlainTextEdit, QTextEdit {
+    background: #141821;
+    border: 1px solid #313845;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: #E6E9EF;
+}
+QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid #C8F751;
+}
+
+QTableWidget {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 8px;
+    gridline-color: #1E2430;
+    selection-background-color: #2C3720;
+}
+QHeaderView::section {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #232B36;
+    padding: 9px 10px;
+    color: #6A7280;
+    font-size: 12px;
+    font-weight: 600;
+}
+/* 注：表头对齐不在这里设（QSS 的 text-align 对 QHeaderView::section 无效），
+   实际在 main_window._tune_tables() 里调 setDefaultAlignment()。 */
+QTableWidget::item:selected {
+    color: #F2F4F8;
+}
+/* 单元格左右内边距跟表头保持一致（都是 10px），否则表头比正文往右缩进 */
+QTableWidget::item, QListView::item, QTreeWidget::item {
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+QProgressBar {
+    border: none;
+    background: #242A36;
+    border-radius: 3px;
+    min-height: 6px;
+    max-height: 6px;
+    text: none;
+}
+QProgressBar::chunk {
+    background: #C8F751;
+    border-radius: 3px;
+}
+
+QComboBox {
+    background: #141821;
+    border: 1px solid #313845;
+    border-radius: 8px;
+    /* 右侧留出箭头的位置，否则长文案会一直排到箭头底下 */
+    padding: 5px 28px 5px 10px;
+    color: #E6E9EF;
+}
+QComboBox:focus {
+    border: 1px solid #C8F751;
+}
+/* 下拉箭头：深色主题必须单独喂一张浅灰的图 —— 浅色那张 #5B6472
+   压在 #141821 上基本看不见（见 tools/gen_check_icon.py 的说明）。 */
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+}
+QComboBox::down-arrow {
+    image: url("__ARROW_DOWN_DARK__");
+    width: 12px;
+    height: 12px;
+}
+QComboBox QAbstractItemView {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 10px;
+    padding: 4px;
+    outline: none;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 26px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    color: #E6E9EF;
+}
+QComboBox QAbstractItemView::item:hover {
+    background: #242A36;
+    color: #C8F751;
+}
+QComboBox QAbstractItemView::item:selected {
+    background: #2C3720;
+    color: #C8F751;
+}
+
+/* —— 复选框 ——
+   必须显式提供勾图：QSS 自定义 indicator 背景后，Qt 不再用系统主题画勾，
+   勾选后只剩纯色方块。
+   ★ 深色主题的勾选底是柠檬（高亮黄绿），白勾落在上面几乎看不见 ——
+     所以用 check_dark.png（墨色勾），不能复用浅色那份白的。 */
+QCheckBox {
+    spacing: 6px;
+    /* ★ 2026-10-26：原来只设了 spacing，文字色靠调色板继承 —— 在折叠面板
+       （DisclosurePanel）这种深一档的表面里就掉到几乎看不清。显式给一个
+       正文灰，跟 QLabel#Body 同档，别让它比背景亮不了多少。 */
+    color: #C8CFDA;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #454E5E;
+    border-radius: 4px;
+    background: #141821;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid #C8F751;
+}
+QCheckBox::indicator:checked {
+    background: #C8F751;
+    border: 1px solid #C8F751;
+    image: url("__CHECK_ICON_DARK__");
+}
+QCheckBox::indicator:checked:hover {
+    background: #D4FB6B;
+    border: 1px solid #D4FB6B;
+}
+
+/* 表格行内勾选框（视频下载页「选择」列用的是 item 的 checkState） */
+QTableWidget::indicator,
+QTableView::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #454E5E;
+    border-radius: 4px;
+    background: #141821;
+}
+QTableWidget::indicator:checked,
+QTableView::indicator:checked {
+    background: #C8F751;
+    border: 1px solid #C8F751;
+    image: url("__CHECK_ICON_DARK__");
+}
+
+/* 页面滚动容器：不要自己的边框和底色，让页面背景直接透出来 */
+QScrollArea#PageScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#PageScroll > QWidget > QWidget {
+    background: transparent;
+}
+
+QScrollBar:vertical {
+    width: 10px;
+    background: transparent;
+}
+QScrollBar::handle:vertical {
+    background: #313845;
+    border-radius: 5px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #454E5E;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar:horizontal {
+    height: 10px;
+    background: transparent;
+}
+QScrollBar::handle:horizontal {
+    background: #313845;
+    border-radius: 5px;
+    min-width: 30px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: #454E5E;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+QTabWidget::pane {
+    border: none;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ 弹出菜单（2026-10-17 新增，浅色主题同款；补齐最后的「系统原生」接缝）
+   --------------------------------------------------------------------------- */
+QMenu {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 10px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 7px 26px 7px 12px;
+    border-radius: 6px;
+    background: transparent;
+    color: #E6E9EF;
+    font-size: 13px;
+}
+QMenu::item:selected {
+    background: #2C3720;
+    color: #C8F751;
+}
+QMenu::item:disabled {
+    color: #5A6270;
+    background: transparent;
+}
+QMenu::separator {
+    height: 1px;
+    background: #242A36;
+    margin: 5px 8px;
+}
+QMenu::indicator {
+    width: 16px;
+    height: 16px;
+    padding-left: 4px;
+}
+QMenu::right-arrow {
+    padding-right: 8px;
+}
+
+QMenuBar {
+    background: transparent;
+}
+QMenuBar::item {
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: transparent;
+}
+QMenuBar::item:selected {
+    background: #1A1F28;
+}
+
+QToolTip {
+    background: #1A1F28;
+    color: #E6E9EF;
+    border: 1px solid #313845;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+QPlainTextEdit#LogPanel {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 8px;
+    padding: 8px;
+    color: #B9C0CC;
+    font-family: "Cascadia Code", "Consolas", "Microsoft YaHei UI", monospace;
+    font-size: 12px;
+}
+
+QListWidget {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 8px;
+    padding: 4px;
+    color: #E6E9EF;
+}
+QListWidget::item {
+    padding: 6px 8px;
+    border-radius: 6px;
+}
+QListWidget::item:hover {
+    background: #1A1F28;
+}
+QListWidget::item:selected {
+    background: #2C3720;
+    color: #C8F751;
+}
+
+/* —— 页面顶部引导条 ——
+   与浅色同步去掉柠檬底：它常驻每一页顶部，一块荧光绿会让整屏看着"一直在报警"。
+   深色下用 surface-1 加 hairline 就够分层，文字走亮灰。 */
+QFrame#GuideBanner {
+    background: #141A21;
+    border: 1px solid #232B36;
+    border-radius: 12px;
+}
+QLabel#GuideTitle {
+    color: #EDF0F4;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.6;
+}
+QLabel#GuideStep {
+    color: #C3CAD6;
+    font-size: 12px;
+    line-height: 1.65;
+}
+QLabel#GuideTip {
+    color: #9AA4B2;
+    font-size: 12px;
+    line-height: 1.65;
+}
+QPushButton#GhostLink {
+    background: transparent;
+    border: none;
+    color: #C8F751;
+    padding: 4px 6px;
+    min-height: 18px;
+    font-weight: 600;
+}
+QPushButton#GhostLink:hover {
+    color: #D4FB6B;
+    text-decoration: underline;
+}
+QPushButton#GhostIcon {
+    background: transparent;
+    border: none;
+    color: #5A6270;
+    font-size: 13px;
+    padding: 0;
+}
+QPushButton#GhostIcon:hover {
+    color: #F2F4F8;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ 空态引导 EmptyHint（2026-10-17 新增，同 light.qss）
+   深色下「淡柠檬」要压成墨绿油亮感更弱的深橄榄，否则那块圆底会像贴纸。
+   --------------------------------------------------------------------------- */
+QFrame#EmptyHint {
+    background: transparent;
+    border: none;
+}
+QLabel#EmptyGlyph {
+    background: #1B2410;
+    border-radius: 20px;
+}
+QLabel#EmptyTitle {
+    font-size: 16px;
+    font-weight: 600;
+    color: #E6E9EF;
+    background: transparent;
+}
+QLabel#EmptyBody {
+    font-size: 13px;
+    color: #9AA4B2;
+    background: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ 提示条 AlertBar（2026-10-17 新增，同 light.qss）
+   深色下三档语义的底色都要压暗，只用边框和标题字提亮出语义。
+   --------------------------------------------------------------------------- */
+QFrame#AlertBar {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 10px;
+}
+QFrame#AlertBar[level="warn"] {
+    background: #2A2110;
+    border: 1px solid #4A3A12;
+}
+QFrame#AlertBar[level="danger"] {
+    background: #2A1618;
+    border: 1px solid #4A2226;
+}
+QFrame#AlertBar[level="info"] {
+    background: #1B2410;
+    border: 1px solid #33471A;
+}
+QLabel#AlertTitle {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.55;
+}
+QLabel#AlertBody {
+    font-size: 12px;
+    line-height: 1.6;
+}
+QPushButton#AlertAction {
+    background: #141821;
+    border: 1px solid #313845;
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #E6E9EF;
+}
+QPushButton#AlertAction:focus {
+    border: 1px solid #C8F751;
+}
+QPushButton#AlertAction:hover {
+    border: 1px solid #C8F751;
+    color: #C8F751;
+}
+
+/* —— 破坏性按钮：深色卡面 + 红字红边，与主操作（柠檬实心）分层 —— */
+QPushButton#Danger {
+    background: #141821;
+    border: 1px solid #5C2626;
+    border-radius: 8px;
+    color: #F08080;
+    padding: 6px 14px;
+    min-height: 20px;
+}
+QPushButton#Danger:focus {
+    border: 1px solid #F08080;
+}
+QPushButton#Danger:hover {
+    background: #2A1618;
+    border: 1px solid #C42B2B;
+    color: #F5A5A5;
+}
+QPushButton#Danger:pressed {
+    background: #3A1E20;
+}
+QPushButton#Danger:disabled {
+    color: #5A6270;
+    border: 1px solid #242A36;
+    background: #141821;
+}
+
+/* —— 「使用教程」对话框 —— */
+QDialog#GuideDialog {
+    background: #0B0E14;
+}
+QLabel#TutorialTitle {
+    color: #F2F4F8;
+    font-size: 20px;
+    font-weight: 700;
+}
+QLabel#TutorialSub {
+    color: #9AA4B2;
+    font-size: 12px;
+}
+QListWidget#TutorialNav {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 8px;
+    padding: 4px;
+    color: #E6E9EF;
+}
+QTextBrowser#TutorialBody {
+    background: #141821;
+    border: 1px solid #242A36;
+    border-radius: 8px;
+    padding: 8px;
+    color: #C3CAD6;
+    font-size: 13px;
+}

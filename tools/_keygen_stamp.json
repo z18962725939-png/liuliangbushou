@@ -1,0 +1,27 @@
+{
+  "features": [
+    "collect",
+    "keyword",
+    "batch",
+    "download",
+    "live",
+    "transcribe",
+    "export",
+    "analyze",
+    "comment",
+    "report",
+    "geo",
+    "script",
+    "drama",
+    "drama_parse"
+  ],
+  "backfill": {
+    "keyword": "auto",
+    "comment": "auto",
+    "geo": "deny",
+    "script": "auto",
+    "drama": "auto",
+    "drama_parse": "auto"
+  },
+  "built_at": "2026-11-10 22:19:10"
+}

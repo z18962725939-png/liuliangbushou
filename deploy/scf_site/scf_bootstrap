@@ -1,0 +1,6 @@
+#!/bin/bash
+# SCF Web 函数启动脚本：拉起 index.py 里的 HTTP 服务（默认监听 9000 端口）。
+# 注意：本文件在 zip 包里必须带可执行权限，否则函数启动失败（Windows 打包时已特殊处理）。
+export PYTHONUNBUFFERED=1
+cd "$(dirname "$0")"
+exec python3 index.py

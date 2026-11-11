@@ -1,0 +1,15 @@
+{
+  "name": "liuliangbushou-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "流量捕手 · 企业微信客服机器人（自动回复 + 半自动发码）",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test/selftest_wecom.mjs && node test/selftest_flow.mjs",
+    "test:license": "node test/selftest.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,514 @@
+"""抖音直播流解析（webcast 接口 + a_bogus 签名）。
+
+★ 2026-10-31 工程重建：本文件的 import 头部在重建中丢失，按文件里实际用到的
+  模块反推补回（json / re / httpx / urllib.parse / dataclass）。
+★ 2026-11-06 修复「人在直播、工具显示未开播」：重建时连整套 a_bogus 签名
+  函数（_rc4_encrypt / _SM3 / _result_encrypt / _generate_random_str /
+  _generate_rc4_bb_str / _ab_sign 等 12 个）一起丢了，只剩一个调用它们的
+  _ab_sign 空壳 ⇒ resolve_by_web_rid 必抛 NameError，链接方式添加的监控
+  目标状态检查全废。已用工程自带 _douyin_live_recorder_src/src/ab_sign.py
+  恢复为独立模块 justoneapi_collector/ab_sign.py（入口常量与 2026-10-13
+  权威 pyc 的字节码符号逐项核对一致），此处只做一行别名导入。
+"""
+import json
+import re
+import urllib.parse
+from dataclasses import dataclass
+
+import httpx
+
+from .ab_sign import ab_sign as _ab_sign
+
+
+# ======================================================================
+#  Douyin live stream resolver
+# ======================================================================
+
+# A working ttwid cookie (from DouyinLiveRecorder). May need periodic refresh.
+_DEFAULT_TTWID = (
+    "ttwid=1%7C2iDIYVmjzMcpZ20fcaFde0VghXAA3NaNXE_SLR68IyE%7C1761045455"
+    "%7Cab35197d5cfb21df6cbb2fa7ef1c9262206b062c315b9d04da746d0b37dfbc7d"
+)
+
+_DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/116.0.5845.97 Safari/537.36 "
+    "Core/1.116.567.400 QQBrowser/19.7.6764.400"
+)
+
+
+@dataclass
+class DouyinLiveStreamInfo:
+    """Result of a Douyin live stream resolution attempt."""
+    is_live: bool
+    anchor_name: str
+    room_id: str
+    sec_uid: str
+    hls_pull_urls: dict[str, str]   # quality -> m3u8 URL
+    flv_pull_urls: dict[str, str]   # quality -> flv URL
+    raw_status: int                  # original status code (2=live, 4=ended)
+    error: str = ""
+    # ★ 短链/主页链接跟随重定向后得到的**真 web_rid**。room_id 是另一套
+    #   ID，拿它拼 live.douyin.com/<room_id> 打不开，状态会永远查不到。
+    #   追加在末尾并给默认值，不影响既有位置参数构造。
+    web_rid: str = ""
+
+
+class DouyinLiveStreamResolver:
+    """
+    Resolve Douyin live stream URLs (m3u8/flv) via internal webcast APIs.
+
+    No external API token needed — calls Douyin's internal endpoints directly
+    with the a_bogus signature.
+    """
+
+    WEB_API = "https://live.douyin.com/webcast/room/web/enter/"
+    APP_API = "https://webcast.amemv.com/webcast/room/reflow/info/"
+
+    def __init__(self, timeout: float = 15.0, ttwid: str | None = None,
+                 cookie: str = ""):
+        self.timeout = timeout
+        # 完整登录 Cookie（来自内置浏览器扫码登录）优先；
+        # 没有时退化为只用 ttwid —— 后者也能用，只是更容易被风控拦。
+        self.cookie = (cookie or "").strip()
+        self.ttwid = ttwid or _DEFAULT_TTWID
+        if self.cookie:
+            m = re.search(r"ttwid=([^;,\s]+)", self.cookie)
+            if m:
+                self.ttwid = "ttwid=" + m.group(1)
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            follow_redirects=True,
+        )
+
+    @property
+    def cookie_header(self) -> str:
+        """实际发给抖音的 Cookie 头。"""
+        return self.cookie or self.ttwid
+
+    def set_cookie(self, cookie: str):
+        """运行时更新 Cookie（扫码登录完成后调用，无需重建实例）。"""
+        self.cookie = (cookie or "").strip()
+        if self.cookie:
+            m = re.search(r"ttwid=([^;,\s]+)", self.cookie)
+            if m:
+                self.ttwid = "ttwid=" + m.group(1)
+
+    def close(self):
+        self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _refresh_ttwid(self) -> bool:
+        """
+        从 live.douyin.com 首页的 Set-Cookie 响应头提取一个新的 ttwid，
+        用于缓解因 ttwid 过期导致的签名/鉴权失败。返回是否成功刷新。
+        """
+        try:
+            resp = self._client.get(
+                "https://live.douyin.com/",
+                headers={"User-Agent": _DEFAULT_UA},
+                timeout=httpx.Timeout(10.0, connect=8.0),
+            )
+            sc = resp.headers.get("set-cookie", "") or ""
+            m = re.search(r"ttwid=([^;,\s]+)", sc)
+            if m:
+                self.ttwid = "ttwid=" + m.group(1)
+                # 若当前带的是完整登录 Cookie，把里面的旧 ttwid 一并换掉，
+                # 否则刷新出来的新 ttwid 发不出去（cookie_header 优先用 self.cookie）
+                if self.cookie and "ttwid=" in self.cookie:
+                    self.cookie = re.sub(r"ttwid=[^;]*", self.ttwid, self.cookie, count=1)
+                return True
+        except Exception:
+            pass
+        return False
+
+    # -- Web API (by web_rid / live.douyin.com URL path) ---------------
+
+    def resolve_by_web_rid(self, web_rid: str) -> DouyinLiveStreamInfo:
+        """
+        Resolve stream URLs via the web API.
+
+        Args:
+            web_rid: The room path component, e.g. "745964462470"
+                     from https://live.douyin.com/745964462470
+        """
+        headers = {
+            "cookie": self.cookie_header,
+            "referer": f"https://live.douyin.com/{web_rid}",
+            "user-agent": _DEFAULT_UA,
+        }
+        params = {
+            "aid": "6383",
+            "app_name": "douyin_web",
+            "live_id": "1",
+            "device_platform": "web",
+            "language": "zh-CN",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "116.0.0.0",
+            "web_rid": web_rid,
+            "msToken": "",
+        }
+        query = urllib.parse.urlencode(params)
+        a_bogus = _ab_sign(query, _DEFAULT_UA)
+        api_url = f"{self.WEB_API}?{query}&a_bogus={a_bogus}"
+
+        def _do() -> dict:
+            try:
+                resp = self._client.get(api_url, headers=headers)
+                # 抖音风控：接口不返回 JSON 而返回登录/验证 HTML 页
+                if "json" not in (resp.headers.get("content-type", "") or "") \
+                        and "<html" in resp.text[:256].lower():
+                    return {"__err__": "抖音风控拦截：接口返回了 HTML 验证页（非 JSON）"}
+                return resp.json()
+            except Exception as e:
+                return {"__err__": f"HTTP error: {e}"}
+
+        data = _do()
+        if "__err__" in data:
+            # ttwid 可能过期，刷新后重试一次
+            if self._refresh_ttwid():
+                headers["cookie"] = self.cookie_header
+                data = _do()
+            if "__err__" in data:
+                return DouyinLiveStreamInfo(
+                    False, "", web_rid, "", {}, {}, 0, data["__err__"]
+                )
+
+        return self._parse_web_response(data, web_rid)
+
+    def _parse_web_response(self, data: dict, web_rid: str) -> DouyinLiveStreamInfo:
+        try:
+            inner = data["data"]["data"][0]
+            anchor_name = data["data"]["user"]["nickname"]
+        except (KeyError, IndexError, TypeError):
+            return DouyinLiveStreamInfo(False, "", web_rid, "", {}, {}, 0, "no room data")
+
+        status = int(inner.get("status", 0) or 0)
+        is_live = (status == 2)
+        stream_url = inner.get("stream_url", {}) or {}
+        hls_map = stream_url.get("hls_pull_url_map", {}) or {}
+        flv_map = stream_url.get("flv_pull_url", {}) or {}
+
+        # Extract origin stream if available (highest quality)
+        self._extract_origin_stream(stream_url, hls_map, flv_map)
+
+        return DouyinLiveStreamInfo(
+            is_live=is_live,
+            anchor_name=anchor_name,
+            room_id=str(inner.get("id_str", "") or inner.get("id", "") or ""),
+            sec_uid=str(data["data"]["user"].get("sec_uid", "")),
+            hls_pull_urls=hls_map,
+            flv_pull_urls=flv_map,
+            raw_status=status,
+        )
+
+    def _extract_origin_stream(self, stream_url: dict,
+                                hls_map: dict, flv_map: dict) -> None:
+        """Extract the 'origin' (highest quality) stream and add it to the maps."""
+        live_core = stream_url.get("live_core_sdk_data", {}) or {}
+        pull_datas = stream_url.get("pull_datas", {})
+        if not live_core:
+            return
+        try:
+            if pull_datas:
+                key = list(pull_datas.keys())[0]
+                json_str = pull_datas[key]["stream_data"]
+            else:
+                json_str = live_core["pull_data"]["stream_data"]
+            parsed = json.loads(json_str)
+            if "origin" in parsed.get("data", {}):
+                origin = parsed["data"]["origin"]["main"]
+                origin_data = json.loads(live_core["pull_data"]["stream_data"])
+                sdk_params = json.loads(origin_data["data"]["origin"]["main"].get("sdk_params", "{}"))
+                codec = sdk_params.get("VCodec", "")
+                if origin.get("hls"):
+                    hls_map["ORIGIN"] = origin["hls"] + "&codec=" + codec
+                if origin.get("flv"):
+                    flv_map["ORIGIN"] = origin["flv"] + "&codec=" + codec
+        except Exception:
+            pass
+
+    # -- App API (by room_id + sec_uid) --------------------------------
+
+    def resolve_by_app(self, room_id: str, sec_uid: str) -> DouyinLiveStreamInfo:
+        """
+        Resolve stream URLs via the app API.
+
+        Args:
+            room_id:  Numeric room ID (from user-profile-v3's room_id field)
+            sec_uid:  The blogger's sec_uid
+        """
+        if not room_id or room_id == "0":
+            return DouyinLiveStreamInfo(
+                False, "", room_id, sec_uid, {}, {}, 0, "no room_id"
+            )
+
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0"
+        )
+        params = {
+            "verifyFp": "verify_hwj52020_7szNlAB7_pxNY_48Vh_ALKF_GA1Uf3yteoOY",
+            "type_id": "0",
+            "live_id": "1",
+            "room_id": room_id,
+            "sec_user_id": sec_uid,
+            "version_code": "99.99.99",
+            "app_id": "1128",
+        }
+        query = urllib.parse.urlencode(params)
+        a_bogus = _ab_sign(query, ua)
+        api_url = f"{self.APP_API}?{query}&a_bogus={a_bogus}"
+
+        headers = {
+            "User-Agent": ua,
+            "Accept-Language": "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2",
+            "Referer": "https://live.douyin.com/",
+            "Cookie": self.cookie_header,
+        }
+
+        def _do() -> dict:
+            try:
+                resp = self._client.get(api_url, headers=headers)
+                # 抖音风控：接口不返回 JSON 而返回登录/验证 HTML 页
+                if "json" not in (resp.headers.get("content-type", "") or "") \
+                        and "<html" in resp.text[:256].lower():
+                    return {"__err__": "抖音风控拦截：接口返回了 HTML 验证页（非 JSON）"}
+                return resp.json()
+            except Exception as e:
+                return {"__err__": f"HTTP error: {e}"}
+
+        data = _do()
+        if "__err__" in data:
+            # ttwid 可能过期，刷新后重试一次
+            if self._refresh_ttwid():
+                headers["Cookie"] = self.cookie_header
+                data = _do()
+            if "__err__" in data:
+                return DouyinLiveStreamInfo(
+                    False, "", room_id, sec_uid, {}, {}, 0, data["__err__"]
+                )
+
+        return self._parse_app_response(data, room_id, sec_uid)
+
+    def _parse_app_response(self, data: dict, room_id: str, sec_uid: str) -> DouyinLiveStreamInfo:
+        try:
+            room = data["data"]["room"]
+            anchor_name = room["owner"]["nickname"]
+        except (KeyError, TypeError):
+            return DouyinLiveStreamInfo(False, "", room_id, sec_uid, "", {}, {}, 0, "no room data")
+
+        status = int(room.get("status", 0) or 0)
+        is_live = (status == 2)
+        stream_url = room.get("stream_url", {}) or {}
+        hls_map = stream_url.get("hls_pull_url_map", {}) or {}
+        flv_map = stream_url.get("flv_pull_url", {}) or {}
+
+        self._extract_origin_stream(stream_url, hls_map, flv_map)
+
+        return DouyinLiveStreamInfo(
+            is_live=is_live,
+            anchor_name=anchor_name,
+            room_id=str(room.get("id_str", "") or room.get("id", "") or room_id),
+            sec_uid=sec_uid,
+            hls_pull_urls=hls_map,
+            flv_pull_urls=flv_map,
+            raw_status=status,
+        )
+
+    # -- Convenience: pick best URL ------------------------------------
+
+    @staticmethod
+    def pick_best_url(info: DouyinLiveStreamInfo, prefer: str = "flv") -> str | None:
+        """
+        Pick the best available stream URL.
+        Preference order: ORIGIN > _hd > _sd > _ld > any
+        """
+        if prefer == "flv" and info.flv_pull_urls:
+            return DouyinLiveStreamResolver._pick_from_map(info.flv_pull_urls)
+        if prefer == "hls" and info.hls_pull_urls:
+            return DouyinLiveStreamResolver._pick_from_map(info.hls_pull_urls)
+        # Fallback: try the other format
+        if info.flv_pull_urls:
+            return DouyinLiveStreamResolver._pick_from_map(info.flv_pull_urls)
+        if info.hls_pull_urls:
+            return DouyinLiveStreamResolver._pick_from_map(info.hls_pull_urls)
+        return None
+
+    @staticmethod
+    def _pick_from_map(url_map: dict) -> str | None:
+        if not url_map:
+            return None
+        for key in ("ORIGIN", "origin", "_FULL_HD1", "_HD1", "_SD1", "_LD1"):
+            for k, v in url_map.items():
+                if key in k:
+                    return v
+        # Return the first available
+        return next(iter(url_map.values()))
+
+    # -- HTML fallback (anti risk-control last line of defense) ----------
+    # 来自 DouyinLiveRecorder 的 get_douyin_stream_data：当 web/reflow 接口被
+    # 风控返回 HTML 验证页时，直接从直播间页面 roomStore 解析 room + 流地址。
+    # 这是对抗抖音风控的最后一道兜底，纯正则解析，无需 JS 引擎。
+
+    def _parse_html_response(self, html_text: str, web_rid: str) -> DouyinLiveStreamInfo:
+        try:
+            m = re.search(r'"roomStore":(.*?),"linkmicStore"', html_text, re.DOTALL)
+            if not m:
+                # 兼容另一种页面结构（__pacemaker_source_data__ 内联）
+                m = re.search(r'"roomStore":(.*?)\}\}\}\s*</script', html_text, re.DOTALL)
+            if not m:
+                return DouyinLiveStreamInfo(
+                    False, "", web_rid, "", {}, {}, 0, "HTML 中未找到 roomStore"
+                )
+            room_store = m.group(1)
+            anchor_m = re.search(r'"nickname":"(.*?)","avatar_thumb', room_store, re.DOTALL)
+            anchor_name = anchor_m.group(1) if anchor_m else ""
+            # 截断到合法 JSON（仿上游：截到 has_commerce_goods 前并补括号）
+            room_store = room_store.split(',"has_commerce_goods"')[0] + '}}}'
+            data = json.loads(room_store)
+            room = data["roomInfo"]["room"]
+            status = int(room.get("status", 0) or 0)
+            is_live = (status == 2)
+            stream_url = room.get("stream_url", {}) or {}
+            hls_map = stream_url.get("hls_pull_url_map", {}) or {}
+            flv_map = stream_url.get("flv_pull_url", {}) or {}
+            self._extract_origin_stream(stream_url, hls_map, flv_map)
+            return DouyinLiveStreamInfo(
+                is_live=is_live,
+                anchor_name=anchor_name,
+                room_id=web_rid,
+                sec_uid="",
+                hls_pull_urls=hls_map,
+                flv_pull_urls=flv_map,
+                raw_status=status,
+            )
+        except Exception as e:
+            return DouyinLiveStreamInfo(
+                False, "", web_rid, "", {}, {}, 0, f"HTML 解析失败: {e}"
+            )
+
+    def resolve_by_html(self, web_rid: str, html_text: str | None = None) -> DouyinLiveStreamInfo:
+        """
+        从直播间 HTML 页面兜底解析流地址。
+
+        Args:
+            web_rid:   直播间路径，如 "745964462470"（来自 live.douyin.com/745964462470）
+            html_text: 可选，直接传入已抓取的 HTML；为 None 时自动请求页面
+        """
+        if html_text is None:
+            try:
+                resp = self._client.get(
+                    f"https://live.douyin.com/{web_rid}",
+                    headers={
+                        "user-agent": _DEFAULT_UA,
+                        "cookie": self.cookie_header,
+                        "referer": "https://live.douyin.com/",
+                    },
+                    timeout=httpx.Timeout(12.0, connect=8.0),
+                )
+                html_text = resp.text
+            except Exception as e:
+                return DouyinLiveStreamInfo(
+                    False, "", web_rid, "", {}, {}, 0, f"HTML 抓取失败: {e}"
+                )
+        return self._parse_html_response(html_text, web_rid)
+
+    def _with_html_fallback(self, web_rid: str,
+                            info: DouyinLiveStreamInfo) -> DouyinLiveStreamInfo:
+        """HTML 兜底只用来**补流地址**，不许覆盖 webcast 已确认的开播状态。
+
+        ★ 2026-11-06 客户「账号正在直播、工具显示未开播」根因之一：
+          旧逻辑是「webcast 没有流地址就无条件返回 HTML 结果」。抖音页面
+          改版后 HTML 经常找不到 roomStore，返回 is_live=False / status=0，
+          于是把 webcast 明明判定为 status=2（在播）的房间硬生生冲成未开播。
+          开播状态以 webcast 的 raw_status 为准；HTML 只补流地址与昵称。
+        """
+        web_ok = (info.raw_status != 0) or bool(info.is_live)
+        has_stream = bool(info.flv_pull_urls or info.hls_pull_urls)
+        if web_ok and has_stream:
+            return info
+        try:
+            alt = self.resolve_by_html(web_rid)
+        except Exception as e:                        # noqa: BLE001
+            if web_ok:
+                info.error = (info.error + "；" if info.error else "") + f"HTML 兜底异常: {e}"
+                return info
+            return DouyinLiveStreamInfo(
+                False, "", web_rid, "", {}, {}, 0, f"HTML 兜底异常: {e}")
+
+        if not web_ok:
+            # webcast 没拿到状态 —— 只有 HTML 自己解析出状态才采信
+            return alt
+        # webcast 有状态：status / is_live / room_id / 昵称一律以它为准
+        if alt.flv_pull_urls or alt.hls_pull_urls:
+            info.flv_pull_urls = info.flv_pull_urls or alt.flv_pull_urls
+            info.hls_pull_urls = info.hls_pull_urls or alt.hls_pull_urls
+            info.error = ""
+        else:
+            info.error = (info.error + "；" if info.error else "") + (
+                alt.error or "未取到流地址")
+        if not info.anchor_name and alt.anchor_name:
+            info.anchor_name = alt.anchor_name
+        return info
+
+    def resolve_auto(self, url_or_rid: str) -> DouyinLiveStreamInfo:
+        """
+        统一入口：自动识别输入类型并解析直播流。
+
+        支持：
+          1. 直播间 URL（https://live.douyin.com/xxxx）
+          2. 纯 web_rid（如 745964462470）
+          3. 抖音短链 / 主页 URL（v.douyin.com/xxx、www.douyin.com/user/xxx 等）
+             —— 跟随重定向，从最终 URL 提取 web_rid 再解析
+
+        解析顺序（对抗风控）：web enter（接口，状态最准） -> HTML 兜底（只补流地址）
+        """
+        s = (url_or_rid or "").strip()
+        if not s:
+            return DouyinLiveStreamInfo(False, "", "", "", {}, {}, 0, "输入为空")
+
+        # 1. 直播间 URL
+        m = re.search(r"live\.douyin\.com/([^?/\s#]+)", s)
+        if m:
+            web_rid = m.group(1)
+            info = self._with_html_fallback(web_rid, self.resolve_by_web_rid(web_rid))
+            info.web_rid = web_rid
+            return info
+
+        # 2. 纯 web_rid（数字或长串、不含斜杠和点）
+        if re.match(r"^[A-Za-z0-9_-]{6,}$", s) and "/" not in s and "." not in s:
+            info = self._with_html_fallback(s, self.resolve_by_web_rid(s))
+            info.web_rid = s
+            return info
+
+        # 3. 短链 / 主页 URL —— 跟随重定向，从最终 URL 提取 live.douyin.com 路径
+        try:
+            resp = self._client.get(
+                s,
+                headers={"user-agent": _DEFAULT_UA},
+                timeout=httpx.Timeout(12.0, connect=8.0),
+            )
+            final_url = str(resp.url)
+            m2 = re.search(r"live\.douyin\.com/([^?/\s#]+)", final_url)
+            if m2:
+                web_rid = m2.group(1)
+                info = self._with_html_fallback(
+                    web_rid, self.resolve_by_web_rid(web_rid))
+                info.web_rid = web_rid
+                return info
+        except Exception as e:
+            return DouyinLiveStreamInfo(
+                False, "", "", "", {}, {}, 0, f"短链/主页解析失败: {e}"
+            )
+
+        return DouyinLiveStreamInfo(
+            False, "", "", "", {}, {}, 0, "无法识别的输入格式（请粘贴直播间 URL 或 web_rid）"
+        )

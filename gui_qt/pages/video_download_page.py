@@ -1,0 +1,1510 @@
+"""视频下载页（PySide6 高保真实现）。
+
+UI 完全重写；业务逻辑复用 justoneapi_collector.video_downloader.VideoDownloader。
+
+关键行为（修复「点解析毫无反应」）：
+  - 解析 / 下载都在**后台线程**执行，不阻塞界面；
+  - 未配置 API Token（仍在用占位客户端）时，点解析会**明确弹窗提示**去设置页填写，
+    而不是把失败原因悄悄写进页面底部状态栏；
+  - 解析成功会把视频**填入下方列表**，并默认勾选，可直接「下载选中」。
+"""
+import os
+import re
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QMessageBox,
+                               QPlainTextEdit, QPushButton,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from justoneapi_collector import quota
+from justoneapi_collector.video_downloader import VideoDownloader
+from justoneapi_collector.video_link_import import (find_links_in_text,
+                                                    read_links_from_file,
+                                                    read_links_from_txt,
+                                                    resolve_links)
+
+from ._base import (NullClient, Worker, _feature_ok, confirm_destructive,
+                    connection_diagnosis, danger_button, ensure_visible, guide_banner)
+
+# ★ 2026-10-31 重建补回：下面这些 import 在源码反向重建时丢失，
+#   页面一打开就 NameError（按 pyflakes 的 undefined name 定位）。
+from gui_qt.widgets.progress import FlowProgressBar
+from gui_qt.widgets.stat import MetricStrip
+from ._base import connect_guarded, paid_notice
+
+
+# ★ v1.14.2：占位客户端统一到 _base.NullClient。它带一个「永远失败」的
+#   request()，所以免费档万一撞到付费路径，拿到的是 success=False，
+#   而不是 AttributeError（客户之前看到的是「API异常(AttributeError)」）。
+#   这里保留 _MockClient 这个名字，页面内其余判断与自检脚本不必跟着改。
+_MockClient = NullClient
+
+
+def _free_tier_active() -> bool:
+    """当前是否为免费档（非授权、非试用）。仅用于文案/诊断。
+
+    ★ 门禁**不要**用这个函数：试用期（state=trial）同样没有 Token，
+      按它判断会把试用机也拦死（v1.14.1 就是这么错的）。门禁要用
+      「下载这条链路允不允许」，见 `VideoDownloadPage._download_channel_ok`。
+    """
+    try:
+        from justoneapi_collector.licensing import is_free_tier
+        return bool(is_free_tier())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fmt_duration(ms) -> str:
+    """毫秒 → mm:ss / hh:mm:ss；无效值返回占位符。"""
+    try:
+        ms = int(ms or 0)
+    except (TypeError, ValueError):
+        ms = 0
+    if ms <= 0:
+        return "—"
+    total = ms // 1000
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _resolve_task(worker, downloader, url):
+    """后台解析任务（在 Worker 线程中运行）。"""
+    worker.emit_log("开始解析链接…")
+    info, reason = downloader.resolve_share_link_with_reason(url)
+    return (info, reason)
+
+
+def _fmt_size(n) -> str:
+    """字节数 → 人话（12.3 MB）。进度文案里用，避免让客户自己数 0。"""
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        n = 0.0
+    if n <= 0:
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GB"
+
+
+def _download_task(worker, downloader, videos, media_type="video"):
+    """后台批量下载任务（在 Worker 线程中运行）。media_type: video/audio/image/text。
+
+    ★ v1.14.4：接 on_chunk 拿**实时字节进度**。
+      以前只按「第几条下完」上报，一条 50 MB 的视频要下十几秒，进度条
+      原地不动，客户分不清是在下还是卡死了。现在总进度按
+      Σ已下字节 / Σ总字节 算，文案带上「3/10 条 · 12.3 MB / 48.1 MB」。
+
+      节流是必须的：on_chunk 每 64 KB 回调一次，一个 50 MB 文件就是 800 次，
+      不节流会把 GUI 线程的信号队列淹掉，界面反而更卡。
+    """
+    import threading
+    import time
+
+    total = max(len(videos), 1)
+    lock = threading.Lock()
+    # bytes: 作品 key -> [已下字节, 总字节]，只用来显示「12.3 MB / 48.1 MB」
+    # frac : 未完成作品的字节完成比例（0~0.999），完成时删掉、改为整条计 1
+    state = {"done": 0, "bytes": {}, "frac": {}}
+    last_emit = [0.0]
+
+    def _key(v):
+        return str(getattr(v, "video_id", "") or id(v))
+
+    def _label(v):
+        return (getattr(v, "desc", "") or getattr(v, "video_id", ""))[:24]
+
+    def _snapshot():
+        """(已完成条数, 总百分比, 已下字节, 总字节)。
+
+        ★ 百分比必须统一成一个口径：`(已完成条数 + 未完成条目的字节比例) / 总条数`。
+          早先版本用「Σ已下 / Σ总量」，第 1 条下到 99% 时按条数算又是 50%，
+          进度条会当着客户的面往回跳一大截（探针实测从 99% 掉到 50%）。
+          现在完成一条就记满 1.0，未完成的按字节比例加分，全程只增不减。
+        """
+        with lock:
+            done = state["done"]
+            part = sum(state["frac"].values())
+            d_sum = sum(v[0] for v in state["bytes"].values())
+            t_sum = sum(v[1] for v in state["bytes"].values())
+        pct = min(100.0, (done + part) * 100.0 / total)
+        return done, pct, d_sum, t_sum
+
+    def on_chunk(video, downloaded, size):
+        d = int(downloaded or 0)
+        t = int(size or 0)
+        with lock:
+            state["bytes"][_key(video)] = [d, t]
+            # 留 0.1% 的余量：文件落盘、校验往往还要一会儿，
+            # 提前显示 100% 会让客户以为已经能播了
+            state["frac"][_key(video)] = min(0.999, d / t) if t > 0 else 0.0
+        now = time.time()
+        if now - last_emit[0] < 0.12:      # 约 8 次/秒：够顺滑，也不卡界面
+            return
+        last_emit[0] = now
+        done, pct, d_sum, t_sum = _snapshot()
+        worker.emit_progress(
+            pct, f"已完成 {done}/{total} 条 · {_fmt_size(d_sum)} / {_fmt_size(t_sum)}")
+
+    def on_progress(count, tot, video, path, err):
+        with lock:
+            state["done"] = int(count)
+            state["frac"].pop(_key(video), None)   # 完成：按整条计满
+        done, pct, _d, _t = _snapshot()
+        worker.emit_progress(pct, f"已完成 {done}/{total} 条：{_label(video)}")
+
+    return downloader.download_videos(videos, on_progress=on_progress,
+                                      on_chunk=on_chunk, media_type=media_type)
+
+
+def _fetch_list_task(worker, downloader, list_type, sec_uid, use_own,
+                     use_browser=True, profile_url=""):
+    """后台拉取博主作品 / 喜欢 / 收藏列表（在 Worker 线程中运行）。
+
+    list_type: post（作品）/ favorite（喜欢）/ collect（收藏）
+    profile_url: 原始主页链接 / 分享短链，sec_uid 为空时交给浏览器解开。
+    返回 (videos, error_msg)；error_msg 非空表示失败。
+
+    默认走**真实浏览器会话**抓取：抖音的列表接口有 Argus 风控网关，
+    纯 HTTP 客户端即便算对 a_bogus 也会被拦（Signature Not Found / Sign Invalid），
+    由真实浏览器发起请求则与用户手动浏览完全一致，可以稳定拿到数据。
+    """
+    def on_progress(total):
+        worker.emit_progress(min(total, 100), f"已拉取 {total} 条")
+
+    if not use_browser:
+        # 纯 HTTP 模式必须自己定位博主；浏览器模式可以直接从登录态取本人
+        if use_own:
+            sid, err = downloader.get_own_sec_uid()
+            if err:
+                return [], err
+            sec_uid = sid
+        elif not sec_uid:
+            return [], "请粘贴博主主页链接（留空则拉取登录账号自己的列表）"
+    elif not use_own and not sec_uid and not profile_url:
+        return [], "请粘贴博主主页链接（留空则拉取登录账号自己的列表）"
+
+    kind = list_type if list_type in ("post", "favorite", "collect") else "post"
+    videos, err = downloader.list_user_list(
+        kind, sec_uid, use_browser=use_browser, max_pages=30,
+        on_progress=on_progress, profile_url=profile_url,
+    )
+    if err:
+        return videos, err
+    if not videos:
+        return [], "列表为空（该账号未公开此列表，或确实为空）"
+    return videos, ""
+
+
+def _looks_like_ks_profile(text: str) -> bool:
+    """这段文本像不像「快手博主主页」链接（而不是单条作品）。
+
+    ★ 2026-11-05 客户现场同款：把快手主页链接贴进「解析」框，服务端只能
+      回"解析失败"——主页本来就没有"某一条作品"。识别出来就转交
+      「拉取列表」（平台自动切快手），别让客户拿着对的链接干瞪眼。
+      v.kuaishou.com 短链主页/作品都可能是它 —— 只有在解析**失败**后
+      才用它兜底转交（是作品的话早就解析成功了）。
+    """
+    u = (text or "").lower()
+    if "kuaishou.com" not in u and "kuaishou.cn" not in u:
+        return False
+    if "/f/" in u or "/short-video/" in u or "/fw/photo" in u:
+        return False          # 单条作品的链接形态
+    return ("/profile/" in u) or ("v.kuaishou.com" in u)
+
+
+def _fetch_ks_list_task(worker, downloader, url_text):
+    """后台拉取快手博主作品列表（两段式，在 Worker 线程中运行）。
+
+    ★ 2026-11-05：快手与抖音完全不同 —— 抖音列表有 Argus 风控，必须借
+      真实浏览器会话；快手列表走 JustOneAPI 云端接口（数据采集端口），
+      不需要本机登录、不开浏览器窗口。每条的下载地址由列表自带的
+      main_mv_urls 直链优先提供，缺的走 zacao.top（视频采集端口）补。
+    """
+    def on_progress(total):
+        worker.emit_progress(min(total, 100), f"已拉取 {total} 条")
+
+    videos, err = downloader.list_kuaishou_blogger_videos(
+        url_text, max_pages=30, on_progress=on_progress,
+    )
+    if err and not videos:
+        return [], err
+    if not videos:
+        return [], "列表为空（该账号可能没有公开作品）"
+    return videos, err or ""
+
+
+def _batch_resolve_task(worker, downloader, urls, skip_ids, should_stop):
+    """后台批量解析链接任务（导入的 Excel/粘贴链接都走这里）。
+
+    返回 (videos, failures, total_urls)：videos 已按作品 ID 去重，
+    失败项逐条带回原因，最后由界面汇总提示，不打断整批。
+    """
+    def on_progress(i, total, url):
+        pct = (i / total * 100.0) if total else 0.0
+        worker.emit_progress(pct, f"批量解析中 {i}/{total} …")
+        worker.emit_log(f"  [{i}/{total}] {url[:90]}")
+
+    worker.emit_progress(0, f"共 {len(urls)} 条链接，开始批量解析…")
+    videos, failures = resolve_links(
+        downloader, urls, on_progress=on_progress,
+        should_stop=should_stop, skip_ids=skip_ids,
+    )
+    return videos, failures, len(urls)
+
+
+class VideoDownloadPage(QWidget):
+    def __init__(self, ctx=None):
+        super().__init__()
+        self.ctx = ctx
+        self._videos: list = []          # 与表格行一一对应的 VideoInfo（演示行为 None）
+        self._resolve_worker = None
+        self._download_worker = None
+        self._list_worker = None          # 博主列表批量拉取（作品/喜欢/收藏）
+        self._import_worker = None        # 批量导入（Excel / 粘贴链接）解析
+        self._import_stop = False
+        # ★ 2026-10-24：单条「解析」识别出输入其实是博主主页链接时暂存于此，
+        #   等本轮回调收尾后再启动拉列表（见 _on_resolve_finished）。
+        self._pending_blogger_url = ""
+        # ★ 2026-10-27：本批成果计数（顶部大号数字条用）。
+        #   只统计"这一批"，清空列表时归零 —— 它回答的是"我这次干了多少"，
+        #   不是"这软件一共干了多少"（后者要翻台账，不该摆在下载页）。
+        self._stat_ok = 0
+        self._stat_fail = 0
+
+        # 优先用上下文的真实下载器；缺失时按需现场构造；仍无则退化为占位（仅供演示行）
+        downloader = None
+        if ctx is not None:
+            downloader = getattr(ctx, "downloader", None)
+            # ★ v1.14.2：免费档 / 没配 Token 的试用机也要真的构造一次下载器 ——
+            #   ctx.ensure_downloader() 会把「抖音登录 Cookie」注入进去，
+            #   免费通道（抓页面）带上 Cookie 命中率明显更高。以前这里只看
+            #   ctx.demo，免费用户拿到的是裸占位下载器，连 Cookie 都没有。
+            if downloader is None and (not getattr(ctx, "demo", True)
+                                       or _feature_ok("download")):
+                try:
+                    downloader = ctx.ensure_downloader()
+                except Exception:  # noqa: BLE001
+                    downloader = None
+        self.downloader = downloader or VideoDownloader(_MockClient(), save_dir=None)
+
+        self._build_ui()
+        # 仅演示模式才铺演示行；真实环境中列表从空开始，避免误导
+        # ★ 免费档能真下载，铺三行假数据等于骗人（客户会以为那是自己解析出来的）
+        if not self._has_real_client() and not self._free_mode():
+            self._load_demo_rows()
+        if self._free_mode():
+            self.status.setText(self._free_status())
+        self._sync_actions()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
+
+        title = QLabel("视频下载")
+        title.setStyleSheet("font-size:18px;font-weight:600;")
+        root.addWidget(title)
+
+        # 页面使用引导条（新手直接看到这一页怎么用）
+        root.addWidget(guide_banner("视频下载", self))
+
+        # 保存目录卡片
+        dir_card = QFrame()
+        dir_card.setObjectName("Card")
+        dl = QHBoxLayout(dir_card)
+        dl.setContentsMargins(16, 16, 16, 16)
+        dl.addWidget(QLabel("保存目录"))
+        default_dir = "D:\\流量捕手\\下载"
+        if self.ctx is not None:
+            default_dir = str(self.ctx.settings.get("dl_save_dir") or default_dir)
+        self.dir_edit = QLineEdit(default_dir)
+        dl.addWidget(self.dir_edit, 1)
+        dl.addWidget(QPushButton("浏览..."))
+        root.addWidget(dir_card)
+
+        # ---------- 本批成果（大号数字，2026-10-27） ----------
+        # ★ 为什么要在下载页放一排大号数字
+        #   这一页原来唯一的"进度感"来自底部那一行 12px 的状态文字 ——
+        #   客户批量下 30 条，中途不知道成了几条、废了几条，只能等它跑完。
+        #   数字跳成 30px 之后，"已下载 12 个"扫一眼就知道还剩多少。
+        # ★ 只用来自查，不做任何拦截（不因为额度少就禁用按钮）——
+        #   下载页是免费引流漏斗，拦一次就少一个客户（2026-10-26 的教训）。
+        stat_card = QFrame()
+        stat_card.setObjectName("Card")
+        sl = QVBoxLayout(stat_card)
+        sl.setContentsMargins(18, 14, 18, 12)
+        sl.setSpacing(0)
+        self.stats = MetricStrip(
+            [("待下载", "0", "条", "", None),
+             ("已下载", "0", "个", "", None),
+             ("失败", "0", "条", "", None),
+             ("今日剩余", "—", "次", "", None)],
+            mode="light", size=30, parent=stat_card)
+        sl.addWidget(self.stats)
+        root.addWidget(stat_card)
+
+        # 平台登录 + 链接解析 卡片
+        mid = QFrame()
+        mid.setObjectName("Card")
+        ml = QVBoxLayout(mid)
+        ml.setContentsMargins(16, 16, 16, 16)
+        ml.setSpacing(12)
+
+        lr = QHBoxLayout()
+        lr.setSpacing(8)
+        lr.addWidget(QLabel("平台登录"))
+        # ★ 2026-10-17 二次改版：原来是「每个平台一套品牌色描边」（抖音红 /
+        #   小红书红 / 快手橙）用内联样式写死，两个问题：
+        #   ① 内联样式优先级最高，深色主题下白底盖不掉，一排白块浮在黑面板上；
+        #   ② 三个高饱和彩色按钮并排，把整屏唯一的柠檬主按钮彻底压没了。
+        #   改成中性的 #PlatformChip（见 QSS），平台名本身就是标识 ——
+        #   苹果的登录页也是「一堆同款灰按钮，只有名字不同」。
+        # ★ 2026-10-23（v1.24.0）：解析彻底不调付费接口，小红书 / 快手只有
+        #   付费解析接口这一条路 ⇒ 等于下不了。按家规「禁用按钮 = 烂门禁，
+        #   点了没反应像软件坏了」，这里直接撤掉这两个平台的登录按钮，
+        #   不留死按钮；同时在右边一行小字说清楚为什么没有。
+        platforms = [
+            ("抖音", "douyin", "", False),
+        ]
+        for label, plat, _color, disabled in platforms:
+            b = QPushButton(label)
+            b.setObjectName("PlatformChip")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            if disabled:
+                b.setEnabled(False)
+                b.setToolTip("TikTok 在国内网络不可用，已置灰")
+            b.clicked.connect(lambda _checked=False, p=plat, d=disabled: self._login(p, d))
+            lr.addWidget(b)
+        # ★ 2026-10-25（v1.24.6）：作品解析改成**服务端解析**之后，抖音 /
+        #   小红书 / 快手三个平台都能下了，而且**都不需要登录** —— 打开链接的
+        #   是服务端，不是客户本机。这行小字要说清两件事：
+        #   ① 支持哪些平台；② 为什么这里只有一个登录按钮（因为用不着）。
+        # ★ 2026-10-25（v1.24.7）：补上微信视频号。它跟小红书 / 快手是同一类：
+        #   本机拿不到（微信不给抓），服务端能拿到，且同样不用登录。
+        _only = QLabel("抖音 / 小红书 / 快手 / 视频号 都支持，都不用登录")
+        _only.setObjectName("Caption")
+        _only.setToolTip("作品链接是由服务端去打开解析的，跟本机有没有登录态无关，"
+                         "所以四个平台都直接支持。\n"
+                         "这里唯一的「抖音」按钮是给「拉取列表」用的 —— "
+                         "拉博主作品列表要走浏览器会话，那个必须有抖音登录态。")
+        lr.addWidget(_only)
+        lr.addStretch()
+        ml.addLayout(lr)
+
+        ir = QHBoxLayout()
+        ir.setSpacing(8)
+        ir.addWidget(QLabel("视频 / 博主链接"))
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText(
+            "粘贴抖音 / 小红书 / 快手 / 视频号作品链接（也认分享文案），一次可以粘多条")
+        self.url_edit.returnPressed.connect(self._resolve)
+        ir.addWidget(self.url_edit, 1)
+        self.resolve_btn = QPushButton("解析")
+        self.resolve_btn.setObjectName("Primary")
+        self.resolve_btn.clicked.connect(self._resolve)
+        ir.addWidget(self.resolve_btn)
+        ml.addLayout(ir)
+        root.addWidget(mid)
+
+        # 批量导入卡片：「关键词抓取」导出 Excel → 一键批量解析加入下载列表
+        imp_card = QFrame()
+        imp_card.setObjectName("Card")
+        il = QVBoxLayout(imp_card)
+        il.setContentsMargins(16, 16, 16, 16)
+        il.setSpacing(10)
+
+        ir0 = QHBoxLayout()
+        ir0.setSpacing(8)
+        ir0.addWidget(QLabel("批量导入"))
+        self.import_btn = QPushButton("导入「关键词抓取」Excel")
+        # 这是"另一条入口"，不是本页主操作：一页里三颗柠檬按钮就没人分得清
+        # 该先点哪个。留白描边即可（QSS 默认样式），主操作仍归「解析 / 下载选中」。
+        self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_btn.setToolTip(
+            "选择在「关键词抓取」页导出的 .xlsx / .csv，自动读取其中的「链接」列，\n"
+            "逐条解析后全部加入下方列表并勾选，你只需再点「下载选中」。")
+        self.import_btn.clicked.connect(self._import_excel)
+        ir0.addWidget(self.import_btn)
+        # ★ v1.24.6：客户原话「批量解析的失败率比较高，可以创建一个导入 txt
+        #   格式的按钮，方便需要大批量解析的用户」。做几十上百条时没人愿意
+        #   先去 Excel 里拼一张表 —— 记事本一行一条才是真实工作流。
+        #   放在 Excel 按钮右边而不是藏进它的文件类型里：那道文件选择框
+        #   里虽然早就写着 *.txt，但按钮名字叫「导入关键词抓取Excel」，
+        #   手上有 txt 的客户根本不会往那里点。
+        self.import_txt_btn = QPushButton("导入 TXT 链接清单")
+        self.import_txt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_txt_btn.setToolTip(
+            "选一个 .txt，一行一条链接：\n"
+            "  https://www.douyin.com/video/xxxxxxxxx\n"
+            "  https://v.douyin.com/xxxxx/\n"
+            "行首的数字、标题、 emoji 都不影响识别（软件只抠链接）；\n"
+            "记事本直接保存的 ANSI/GBK 也能读；重复链接会自动去重。")
+        self.import_txt_btn.clicked.connect(self._import_txt)
+        ir0.addWidget(self.import_txt_btn)
+        self.paste_btn = QPushButton("解析下方链接")
+        self.paste_btn.setToolTip("解析下面文本框里粘贴的多行链接（一行一条）")
+        self.paste_btn.clicked.connect(self._resolve_pasted)
+        ir0.addWidget(self.paste_btn)
+        self.import_stop_btn = QPushButton("停止导入")
+        self.import_stop_btn.setEnabled(False)
+        self.import_stop_btn.clicked.connect(self._stop_import)
+        ir0.addWidget(self.import_stop_btn)
+        ir0.addStretch()
+        il.addLayout(ir0)
+
+        self.import_links = QPlainTextEdit()
+        self.import_links.setFixedHeight(72)
+        self.import_links.setPlaceholderText(
+            "导入后链接会显示在这里；也可以直接粘贴多行链接（一行一条），再点「解析下方链接」")
+        il.addWidget(self.import_links)
+
+        imp_hint = QLabel(
+            "用法一：在「关键词抓取」页搜到视频后点「导出Excel」，回到本页点「导入…Excel」选中该文件。\n"
+            "用法二：手上有大批量链接时，用记事本一行一条存成 .txt，点「导入 TXT 链接清单」—— "
+            "几百条也不用整理表格。\n"
+            "同一视频重复出现会自动去重；解析失败的会单独列出原因，不影响其余视频。"
+        )
+        imp_hint.setStyleSheet("color:#6B7280;font-size:12px;")
+        imp_hint.setWordWrap(True)
+        il.addWidget(imp_hint)
+        root.addWidget(imp_card)
+
+        # 博主列表批量拉取卡片（作品 / 喜欢 / 收藏 一键拉取）
+        list_card = QFrame()
+        list_card.setObjectName("Card")
+        ll = QVBoxLayout(list_card)
+        ll.setContentsMargins(16, 16, 16, 16)
+        ll.setSpacing(10)
+
+        lr2 = QHBoxLayout()
+        lr2.setSpacing(8)
+        # ★ 2026-11-05：快手账号作品批量采集上线 —— 博主拉取加「平台」选择。
+        #   抖音走本机浏览器会话（Argus 风控），快手走云端列表接口（免登录），
+        #   两条链路在后端完全分开，这里只是让客户选哪个账号体系。
+        lr2.addWidget(QLabel("平台"))
+        self.blogger_platform_combo = QComboBox()
+        self.blogger_platform_combo.addItem("抖音", "douyin")
+        self.blogger_platform_combo.addItem("快手", "kuaishou")
+        self.blogger_platform_combo.setToolTip(
+            "抖音：走本机浏览器会话抓取（需登录，能过风控）。\n"
+            "快手：走云端列表接口，无需登录、不开浏览器窗口。")
+        lr2.addWidget(self.blogger_platform_combo)
+        lr2.addWidget(QLabel("列表类型"))
+        self.list_type_combo = QComboBox()
+        self.list_type_combo.addItem("作品", "post")
+        self.list_type_combo.addItem("喜欢", "favorite")
+        self.list_type_combo.addItem("收藏", "collect")
+        self.list_type_combo.setToolTip("作品=该博主公开发布；喜欢/收藏=本人或公开账号可见，需先登录")
+        lr2.addWidget(self.list_type_combo)
+        self.use_browser_chk = QCheckBox("浏览器会话抓取")
+        self.use_browser_chk.setChecked(True)
+        self.use_browser_chk.setToolTip(
+            "推荐开启：用本机 Chrome/Edge 的登录会话抓取，能过抖音风控。\n"
+            "关闭则改为纯 HTTP 直连（多数情况下会被抖音风控拦截，仅供排查）。"
+        )
+        lr2.addWidget(self.use_browser_chk)
+        lr2.addWidget(QLabel("博主主页链接"))
+        self.list_url_edit = QLineEdit()
+        self.list_url_edit.setPlaceholderText(
+            "粘贴博主主页链接拉取作品/喜欢/收藏；留空 = 拉取【登录账号本人】的喜欢/收藏"
+        )
+        self.list_url_edit.returnPressed.connect(self._fetch_list)
+        lr2.addWidget(self.list_url_edit, 1)
+        self.fetch_list_btn = QPushButton("拉取列表")
+        self.fetch_list_btn.setObjectName("Primary")
+        self.fetch_list_btn.clicked.connect(self._fetch_list)
+        lr2.addWidget(self.fetch_list_btn)
+        ll.addLayout(lr2)
+
+        hint = QLabel(
+            "提示：「喜欢 / 收藏」仅抖音支持且需先在「设置 → 抖音登录」扫码登录；"
+            "留空链接则拉取【登录账号本人】的喜欢 / 收藏。\n"
+            "快手：只拉「作品」，粘贴快手博主主页链接即可 —— 走云端接口，"
+            "无需登录、不会弹浏览器窗口。\n"
+            "浏览器会话抓取会自动打开一个 Chrome/Edge 窗口并滚动加载页面（抖音风控较严，"
+            "这是目前唯一稳定的方式），抓取期间请勿关闭该窗口。结果会加入下方列表，勾选后「下载选中」。"
+        )
+        hint.setStyleSheet("color:#6B7280;font-size:12px;")
+        hint.setWordWrap(True)
+        ll.addWidget(hint)
+        # ★ 信号必须等 list_type_combo / use_browser_chk 都建好再连：
+        #   addItem 首项会让 currentIndex 从 -1 变 0 并立刻发一次信号，
+        #   连早了会在槽里摸到不存在的属性，把整个 _build_ui 炸断。
+        self.blogger_platform_combo.currentIndexChanged.connect(
+            self._on_blogger_platform_changed)
+        root.addWidget(list_card)
+
+        # 操作工具栏
+        tb = QHBoxLayout()
+        tb.setSpacing(8)
+        self.sel_all = QCheckBox("全选")
+        self.sel_all.clicked.connect(self._toggle_all)
+        tb.addWidget(self.sel_all)
+        tb.addStretch()
+        self.archive = QCheckBox("下载后归档到项目素材库")
+        self.archive.setChecked(True)
+        tb.addWidget(self.archive)
+        # 破坏性动作放主操作左侧，样式弱化 + 二次确认（避免误点）
+        self.clear_btn = danger_button("清空列表")
+        self.clear_btn.setToolTip("清空下方待下载列表（不会删除已经下载到本地的文件）")
+        self.clear_btn.clicked.connect(self._clear_list)
+        tb.addWidget(self.clear_btn)
+        # 下载内容类型选择：视频 / 音频 / 图文 / 文案
+        tb.addWidget(QLabel("下载内容"))
+        self.media_combo = QComboBox()
+        self.media_combo.addItem("视频", "video")
+        self.media_combo.addItem("音频(抽mp3)", "audio")
+        self.media_combo.addItem("图文(图集)", "image")
+        self.media_combo.addItem("文案", "text")
+        self.media_combo.setToolTip("视频=无水印mp4；音频=从视频抽取mp3；图文=下载图集图片；文案=仅保存文字")
+        tb.addWidget(self.media_combo)
+        self.download_btn = QPushButton("下载选中")
+        self.download_btn.setObjectName("Primary")
+        self.download_btn.clicked.connect(self._download_selected)
+        tb.addWidget(self.download_btn)
+        root.addLayout(tb)
+
+        # ★ v1.14.4：进度条与状态文字从表格下方移到「下载选中」正下方。
+        #   原来它俩排在表格之后 —— 批量导入几十条时表格很高，进度条被顶到
+        #   视口外，客户点完按钮只看到按钮变灰、进度条在屏幕下面看不到，
+        #   这正是「进度条不够明显」的一半原因。
+        self.progress = FlowProgressBar()
+        self.progress.setValue(0)
+        root.addWidget(self.progress)
+
+        self.status = QLabel("就绪")
+        root.addWidget(self.status)
+
+        # 视频表格
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["选择", "平台", "标题", "时长 / 大小"])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        root.addWidget(self.table, 1)
+
+
+
+    # ------------------------------------------------------- 状态 / 提示
+    def _has_real_client(self) -> bool:
+        """当前是否已接入真实采集服务（而非占位客户端）。"""
+        return not isinstance(getattr(self.downloader, "client", None), _MockClient)
+
+    def _download_channel_ok(self) -> bool:
+        """「视频下载」这条链路本身允不允许用（免费档 / 试用 / 已过期都算允许）。
+
+        ★ v1.14.2：判据只能用「下载功能是否被授权放开」，**不能**用
+          `is_free_tier()`。因为试用期（state=trial）虽然不是免费档，但试用
+          机器上同样没有 Token —— 按旧判据会被门禁拦死，客户看到的还是
+          「请填 API Token」（2026-10-17 客户第二次反馈的正是这个）。
+          真正该拦的只有一种：改系统时间作弊（tamper>=3），那时
+          licensing.check('download') 本身就是 False。
+        """
+        return _feature_ok("download")
+
+    def _free_mode(self) -> bool:
+        """是否只走免费页面解析通道（v1.24.0 起：恒为 True）。
+
+        ★ 2026-10-23：解析彻底不调付费接口（见 VideoDownloader.PAID_FALLBACK_ENABLED）。
+          完整版和免费版走的是**同一条零成本通道**，所以这里不再看有没有真实
+          client —— 以前完整版客户明明有授权，也会被算成"不是免费模式"，
+          状态栏因此显示「免费通道（未配置 Token）」，客户以为自己哪里没配好。
+
+        唯一还要判的是「下载功能本身允许不允许用」：免费档、试用期、
+        授权过期都允许（视频下载与直播录制是永久免费的两条路）。
+        """
+        return self._download_channel_ok()
+
+    def _ensure_ready(self) -> bool:
+        """门禁：能干活就放行 —— 有真实 client，或免费通道可用（走页面解析）。"""
+        if self._has_real_client():
+            return True
+        if self._free_mode():
+            return True
+        return self._ensure_real_downloader()
+
+    def _free_left(self) -> int:
+        """免费档今日剩余次数。-1 = 不限量（v1.20.0 起就是这种情况）。
+
+        读不到也当作不限，绝不因为计数问题拦住人 —— 计数只是诊断用的。
+        """
+        try:
+            return int(quota.free_remaining())
+        except Exception:  # noqa: BLE001
+            return -1
+
+    def _free_status(self) -> str:
+        """状态栏文案：把「能免费用到什么程度」摆在明面上，别让人摸黑用。
+
+        ★ v1.24.0：解析与下载全程不消耗接口额度（见 PAID_FALLBACK_ENABLED），
+          完整版走的也是同一条零成本通道，所以不再区分「免费版」还是
+          「免费通道（未配置 Token）」—— 后一句对有授权的完整版客户是错的：
+          他明明激活了，却被告知"未配置 Token"。
+        """
+        left = self._free_left()
+        if left < 0:
+            # ★ 别写「额度」两个字：免费版用户看到"额度"就以为有限制
+            #   （_probe_free_edition.py 有断言盯着）。
+            # ★ v1.24.6：解析搬到服务端后三个平台都支持了，只写抖音是在骗人
+            #   —— 客户会以为小红书不能用。
+            return "抖音 / 小红书 / 快手 / 视频号 视频下载　·　直播录制　·　不花钱，不限次数"
+        return (f"抖音 / 小红书 / 快手 / 视频号 视频下载　·　直播录制　·　"
+                f"今日剩余 {left}/{quota.free_limit()} 次")
+
+    def _prompt_paid_feature(self, name: str):
+        """免费档点了付费功能 —— 统一弹「付费须知」（v1.21.0）。
+
+        ★ 只用于「博主主页作品批量入库」这类要调采集接口的附加动作；
+          视频下载本身免费不限量，一根手指都不碰（见 _free_mode）。
+        """
+        self.status.setText(f"「{name}」需要激活授权码后使用")
+        paid_notice(self, "collect", name)
+
+    def _prompt_need_token(self):
+        """确实用不了的时候，说清「哪一步坏了」，并把版本号带上。
+
+        ★ v1.14.2：这个弹窗本来只在「下载功能本身被禁」（例如 tamper>=3）时
+          才会出现。以前它一律写「去填 API Token」—— 而免费档/试用机根本没有
+          Token，这句话等于把人引到死路，客户反复反馈"填了也没用"。
+          现在改成走统一诊断 `connection_diagnosis()`，并带上版本号：
+          万一是旧版本没升级，客户自己就能看出来。
+        """
+        try:
+            from justoneapi_collector import branding
+            ver = str(getattr(branding, "APP_VERSION", "") or "")
+        except Exception:  # noqa: BLE001
+            ver = ""
+        title, detail = connection_diagnosis()
+        self.status.setText(f"无法解析：{title}" + (f"（v{ver}）" if ver else ""))
+        hint = ""
+        if ver and tuple(int(x) for x in re.findall(r"\d+", ver)[:3] or [0]) < (1, 14, 2):
+            hint = ("\n\n当前版本偏低：v1.14.0 / v1.14.1 在免费版下会误报本提示，"
+                    "请点右上角「检查更新」升级到 v1.14.2 后再试。")
+        QMessageBox.warning(self, "未能操作", f"{detail}{hint}")
+
+    def _ensure_real_downloader(self) -> bool:
+        """确保 self.downloader 是真实下载器；失败返回 False。"""
+        if self._has_real_client():
+            return True
+        if self.ctx is not None and not getattr(self.ctx, "demo", True):
+            try:
+                real = self.ctx.ensure_downloader()
+            except Exception:  # noqa: BLE001
+                real = None
+            if real is not None and not isinstance(getattr(real, "client", None), _MockClient):
+                self.downloader = real
+                return True
+        return False
+
+    def _apply_save_dir(self):
+        """把界面上的保存目录同步到下载器，并写回配置。
+
+        ★ v1.19.1：顺手探一次可写性。目录不可写时当场在状态栏说清楚，
+          不要等客户点了下载、4 条全失败、弹一个「保存目录不可写」才知道。
+          下载器本身也会自动改存到备用目录，这里只是提前告知。
+        """
+        d = self.dir_edit.text().strip()
+        if not d:
+            return
+        p = Path(d)
+        self.downloader.save_dir = p
+        self.downloader.last_save_dir_used = p
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        problem = ""
+        try:
+            from justoneapi_collector.video_downloader import writable_problem
+            problem = writable_problem(p)
+        except Exception:  # noqa: BLE001
+            pass
+        if problem:
+            self.status.setText(
+                f"⚠ 保存目录写不进去（{problem}）。下载时会自动改存到「文档」下的备用目录；"
+                "建议点「浏览」换成可写的位置。")
+        if self.ctx is not None:
+            self.ctx.settings["dl_save_dir"] = d
+
+    def _login(self, platform, disabled):
+        if disabled:
+            self.status.setText("TikTok 国内网络不可用，已禁用")
+            return
+        self.status.setText(f"打开内置浏览器登录 {platform}：请到「设置」页扫码登录")
+
+    # ------------------------------------------------ 批量导入（Excel / 粘贴）
+    def _import_excel(self):
+        """选 Excel / CSV → 读出链接 → 自动批量解析并加入下载列表。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择「关键词抓取」导出的表格", "",
+            "表格文件 (*.xlsx *.xlsm *.csv *.txt);;所有文件 (*.*)")
+        if not path:
+            return
+        links, err = read_links_from_file(path)
+        if err:
+            QMessageBox.warning(self, "导入失败", err)
+            self.status.setText(f"导入失败：{err}")
+            return
+        if not links:
+            QMessageBox.information(
+                self, "没找到视频链接",
+                "这个文件里没有识别到可用的视频链接。\n\n"
+                "请确认它是「关键词抓取」页导出的 Excel（表头含「链接」列）；"
+                "也可以直接把链接粘贴到下方文本框，再点「解析下方链接」。")
+            self.status.setText("导入的文件里没有链接")
+            return
+        self.import_links.setPlainText("\n".join(links))
+        self.status.setText(f"已读取 {len(links)} 条链接，开始批量解析…")
+        self._start_batch_resolve(links)
+
+    def _import_txt(self):
+        """选一个 txt 链接清单 → 批量解析。
+
+        ★ v1.24.6 客户要的入口：大批量时人家手上就是一个记事本清单，
+          行首还写着序号和标题。read_links_from_txt 会替他把链接抠出来，
+          并且忍耐记事本默认存出来的 ANSI/GBK。
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择链接清单（.txt，一行一条）", "",
+            "文本文件 (*.txt);;所有文件 (*.*)")
+        if not path:
+            return
+        links, err = read_links_from_txt(path)
+        if err:
+            QMessageBox.warning(self, "导入失败", err)
+            self.status.setText(f"导入失败：{err}")
+            return
+        if not links:
+            QMessageBox.information(
+                self, "没找到视频链接",
+                "这个文件里没有识别到链接。\n\n"
+                "txt 里请一行写一条链接，例如：\n"
+                "  https://www.douyin.com/video/7644834211292280293\n"
+                "  https://v.douyin.com/iabcdef/\n\n"
+                "行首可以带序号、标题和 emoji，软件只抠链接那一段；\n"
+                "抖音 / 小红书 / 快手 / 视频号的分享链接都认。")
+            self.status.setText("导入的 txt 里没有链接")
+            return
+        self.import_links.setPlainText("\n".join(links))
+        self.status.setText(f"已读取 {len(links)} 条链接，开始批量解析…")
+        self._start_batch_resolve(links)
+
+    def _resolve_pasted(self):
+        """解析文本框里粘贴的多行链接。"""
+        links = self._pasted_links()
+        if not links:
+            self.status.setText("请在文本框里粘贴至少一条链接（一行一条）")
+            return
+        self._start_batch_resolve(links)
+
+    def _pasted_links(self) -> list[str]:
+        """从文本框抓链接：一行一条，也容忍一行里夹着说明文字 / emoji。"""
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in self.import_links.toPlainText().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            found = find_links_in_text(line)
+            if not found and "http" in line.lower():
+                found = [line]
+            for u in found:
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+        return out
+
+    def _start_batch_resolve(self, urls):
+        if not urls:
+            return
+        if not self._ensure_ready():
+            self._prompt_need_token()
+            return
+        # ★ v1.20.0：免费档的下载/录制已改成不限量，这里不再按「免费次数」拦人。
+        #   这条路走零成本的页面解析，不花接口费，卡次数只会把用户赶走。
+        #   （计数仍然记着，仅用于状态栏展示与诊断。）
+        if self._import_worker is not None and self._import_worker.isRunning():
+            self.status.setText("已有导入解析任务在进行中…")
+            return
+        # ★ v1.22.0：拆掉了付费额度的「预检闸门」（原 _quota_confirmed）。
+        #   2026-10-22 客户现场：导入 192 条链接，被弹「今天的额度只剩 30 次，
+        #   大约只能完成前 30 条」，客户只能手动删到 30 条再跑 —— 而
+        #   「视频下载不限量」是 v1.20.0 亲口承诺过的，下载页是免费引流入口。
+        #   这个闸门从一开始就不该存在，三个理由：
+        #    ① 它假设「每条链接都要花 1 次额度」。实际上解析**优先走免费的
+        #       页面解析通道**，只有页面拿不到时才调接口，大部分链接一分钱
+        #       不花 —— 预警里的「只能完成前 N 条」本身就是一句错话；
+        #    ② 它把免费路径一起堵了：付费客户额度见底时，明明还能免费解析，
+        #       却连批量导入都启动不了；而免费用户从来没有这个闸门 ——
+        #       等于付费客户比免费客户受更多限制，正是客户投诉的原话；
+        #    ③ 该说清的是**每一条**链接为什么失败（今日额度用完 / 接口欠费 /
+        #       页面没读到数据 / 要登录），而不是在动手前把整批拦下。
+        #   现在改成：不拦截、批量照跑；这一批实际花了多少接口额度，
+        #   收尾时在结果里算给客户看（_import_quota_before）。
+        if self._import_worker is not None and self._import_worker.isRunning():
+            self.status.setText("已有导入解析任务在进行中…")
+            return
+        # 记账：批量开始前的今日接口调用数，收尾时对比出「本批实际消耗」
+        try:
+            self._import_quota_before = int(quota.today_count())
+        except Exception:                                    # noqa: BLE001
+            self._import_quota_before = None
+        self._apply_save_dir()
+
+        # 已在列表里的作品 ID —— 跨批去重，避免同一视频被重复加入
+        skip = {str(getattr(v, "video_id", "") or "")
+                for v in self._videos if v is not None}
+        skip.discard("")
+
+        self._import_stop = False
+        self.import_btn.setEnabled(False)
+        self.paste_btn.setEnabled(False)
+        self.import_stop_btn.setEnabled(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.status.setText(
+            f"开始批量解析 {len(urls)} 条链接…"
+            "（全程零成本；页面读不到时会自动用浏览器补一次，这一步每条要几秒）")
+
+        w = Worker(_batch_resolve_task, self.downloader, urls, skip,
+                   lambda: self._import_stop)
+        w.progress.connect(self._on_dl_progress)
+        connect_guarded(w.done, self._on_batch_resolved,
+                        on_error=self._slot_failed, label="批量导入结果")
+        connect_guarded(w.error, lambda m: self.status.setText(f"批量解析出错：{m}"))
+        connect_guarded(w.finished, self._on_batch_finished, label="批量导入收尾")
+        self._import_worker = w
+        w.start()
+
+    def _stop_import(self):
+        self._import_stop = True
+        self.import_stop_btn.setEnabled(False)
+        self.status.setText("正在停止导入…（已发出的解析会跑完）")
+
+    def _import_cost_note(self) -> str:
+        """本批接口兜底消耗了几次、今日还剩几次（v1.22.0 加的"事后算账"）。
+
+        ★ v1.24.0：解析已经彻底不调付费接口（见 PAID_FALLBACK_ENABLED），
+          这一批永远花 0 次，所以恒返回空串 —— 界面上不该再出现
+          「接口兜底消耗 X 次，今日还剩 Y 次」这种已经不成立的话。
+
+        方法留着而不是删掉：调用点不用改，而且哪天把付费兜底改回来，
+        算账能立刻恢复（把下面这个短路去掉即可）。
+        """
+        # —— 原来的算账逻辑留在下面（注释状态）。哪天把 VideoDownloader.
+        #    PAID_FALLBACK_ENABLED 改回 True，把上面那行 return "" 删掉、
+        #    下面这段取消注释，事后算账就立刻恢复了 —— 这个项目没有 git，
+        #    删掉的代码找不回来。
+        # before = getattr(self, "_import_quota_before", None)
+        # if before is None:
+        #     return ""
+        # try:
+        #     used = max(0, int(quota.today_count()) - int(before))
+        #     left = quota.remaining()
+        # except Exception:
+        #     return ""
+        # if left < 0:                      # 不限量套餐
+        #     return ""
+        # return f"接口兜底消耗 {used} 次，今日还剩 {left} 次"
+        return ""
+
+    def _on_batch_resolved(self, result):
+        try:
+            videos, failures, total = result
+        except Exception:                                    # noqa: BLE001
+            videos, failures, total = [], [], 0
+        for v in videos:
+            self._add_video_info_row(v)          # 内部已默认勾选
+        ok = len(videos)
+        if self._free_mode() and ok:
+            # 只按"真正解析出来的条数"扣次数（失败的链接不占额度）
+            quota.consume_free(ok)
+        cost_note = self._import_cost_note()
+        if ok:
+            msg = f"批量导入完成：新增 {ok} 条（已自动勾选，共解析 {total} 条链接）"
+            if failures:
+                msg += f"，{len(failures)} 条失败"
+            if self._free_mode():
+                msg += f"　·　{self._free_status()}"
+            elif cost_note:
+                msg += f"　·　{cost_note}"
+            self.status.setText(msg + " —— 可直接点「下载选中」")
+        else:
+            # ★ v1.24.6：删掉「去扫码登录」这句引导。解析已经在服务端做了，
+            #   整批失败跟本机有没有登录态没有关系 —— 留着它只会让客户去
+            #   做一件对结果毫无影响的事（这正是上一轮投诉的成因之一）。
+            self.status.setText(
+                f"批量导入结束：{total} 条链接都没解析成功。"
+                "多半是这批链接已经失效（分享链接有有效期），"
+                "请在 App 里重新复制几条试试；也可能是解析通道需要刷新 —— "
+                "确认新链接也失败时把截图发给作者"
+                + (f"（{cost_note}）" if cost_note else ""))
+        if failures:
+            head = failures[:5]
+            sample = "\n".join(f"· {u[:70]}\n  {r}" for u, r in head)
+            extra = f"\n…另有 {len(failures) - 5} 条失败" if len(failures) > 5 else ""
+            # ★ v1.22.0 那句「多半是没登录」在 v1.24.6 已经不成立了 ——
+            #   解析搬到服务端之后跟本机登录态一点关系都没有，再这么说
+            #   就是把客户往一条永远走不通的路上推（客户已被这条提示坑过）。
+            #   现在按**这批失败的真实原因**来劝：
+            joined = " ".join(str(r or "") for _u, r in failures)
+            if "没有登录态" in joined or "登录态已经失效" in joined:
+                hint = ("\n\n这批里有的是本机登录态的问题："
+                        "到「设置 → 平台登录」扫码登录后，单独重试这几条。")
+            else:
+                hint = ("\n\n最常见的原因是链接本身已经失效（分享链接有有效期），"
+                        "到 App 里重新「分享 → 复制链接」再导一次；"
+                        "抖音 / 小红书 / 快手 / 视频号都支持，不需要登录。")
+            QMessageBox.information(self, "部分链接未能解析",
+                                    f"以下 {len(head)} 条未能解析：\n\n{sample}{extra}{hint}")
+
+    def _on_batch_finished(self):
+        self.import_btn.setEnabled(True)
+        self.import_txt_btn.setEnabled(True)
+        self.paste_btn.setEnabled(True)
+        self.import_stop_btn.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self._sync_actions()
+
+    # ----------------------------------------------------------- 解析
+    def _resolve(self):
+        url = self.url_edit.text().strip()
+        if not url:
+            self.status.setText("请先粘贴链接")
+            return
+        # 未接入采集服务：明确提示（不再静默失败）
+        # ★ 免费档不需要 Token：抖音走页面解析，所以这里放行
+        # ★ v1.20.0：免费档不限次数，这里不再按「今日剩余」拦人
+        if not self._ensure_ready():
+            self._prompt_need_token()
+            return
+        if self._resolve_worker is not None and self._resolve_worker.isRunning():
+            self.status.setText("正在解析中，请稍候…")
+            return
+
+        self._apply_save_dir()
+        self.resolve_btn.setEnabled(False)
+        self.resolve_btn.setText("解析中…")
+        # ★ 2026-10-25：解析主力已搬到服务端，多数链接 1~3 秒出结果。
+        #   兜底的本机通道（浏览器渲染）仍然可能用到，所以"十几秒"这句留着。
+        self.status.setText(
+            "正在解析，请稍候…（多数 1~3 秒出结果；拿不到时会换本机通道再试一次，可能要十几秒）")
+        self.progress.setRange(0, 0)   # 0/0 = 忙碌指示
+
+        w = Worker(_resolve_task, self.downloader, url)
+        # ★ 必须走 connect_guarded：解析成功后的列表填充一旦抛异常，
+        #   直接 connect 会让界面永远停在「正在解析，请稍候…」（客户现场）。
+        connect_guarded(w.done, self._on_resolved,
+                        on_error=self._slot_failed, label="解析结果")
+        connect_guarded(w.error, self._on_resolve_error)
+        connect_guarded(w.finished, self._on_resolve_finished, label="解析收尾")
+        self._resolve_worker = w
+        w.start()
+
+    def _on_resolved(self, result):
+        try:
+            info, reason = result
+        except Exception:  # noqa: BLE001
+            info, reason = None, "解析返回结果异常"
+        if info is None:
+            # ★ 2026-10-24 客户现场：把博主主页链接贴进上面的「视频 / 博主链接」
+            #   点「解析」，软件报「作品被删除 / 仅粉丝可见」。可主页里本来就没有
+            #   "某一条作品"，这句错话只会让客户反复重试、反复扫码。
+            #   这里识别出来就直接接手，转成拉这个账号的作品列表。
+            #   （必须等收尾再启动，否则会被 _on_resolve_finished 重置进度条打断）
+            if (getattr(self.downloader, "_last_blogger_sec_uid", "") or ""):
+                self._pending_blogger_url = self.url_edit.text().strip()
+                self.status.setText("这是博主主页链接（不是单条作品），正在改用「拉取列表」…")
+                return
+            # ★ 2026-11-05：快手主页链接同样转交 —— 服务端解析不了主页
+            #   （它只解析单条作品），对客户说"解析失败"等于让他反复重试。
+            if _looks_like_ks_profile(self.url_edit.text().strip()):
+                self._pending_blogger_url = self.url_edit.text().strip()
+                self.status.setText("这是快手博主主页链接（不是单条作品），正在改用「拉取列表」…")
+                return
+            self.status.setText(f"解析失败：{reason or '未知原因'}")
+            return
+        self._add_video_info_row(info)
+        title = getattr(info, "desc", "") or getattr(info, "video_id", "")
+        if self._free_mode():
+            # ★ 只对"真的解析出来了"计数：失败不扣次数，否则风控页会把次数白吃光
+            quota.consume_free(1)
+            self.status.setText(f"解析成功：{title}　·　{self._free_status()}")
+        else:
+            self.status.setText(f"解析成功：{title}")
+
+    def _on_resolve_error(self, msg):
+        self.status.setText(f"解析出错：{msg}")
+
+    def _slot_failed(self, msg: str):
+        """后台任务回调内部出错时的统一出口。
+
+        绝不能让界面停在「正在解析，请稍候…」—— 客户会一直等下去，
+        我们这边也拿不到任何线索。这里把类型和原因直接摆到状态栏，
+        同时 connect_guarded 已把堆栈写进运行日志。
+        """
+        self.status.setText(f"{msg}　·　已记录到运行日志，可截图发给服务方")
+
+    def _on_resolve_finished(self):
+        self.resolve_btn.setEnabled(True)
+        self.resolve_btn.setText("解析")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        # ★ 主页链接的自动转交放在这里：必须在上面几行把进度条复位之后再启动，
+        #   否则拉列表刚设好的忙碌指示会被立刻清掉，客户以为没反应。
+        pending = self._pending_blogger_url
+        if pending:
+            self._pending_blogger_url = ""
+            self._start_blogger_fetch(pending)
+
+    def _start_blogger_fetch(self, url_text: str):
+        """把「解析」框里的主页链接交给「拉取列表」流程。
+
+        ★ 2026-10-24：客户手上的链接是对的，错的是他点了「解析」。
+          以前软件只回一句「作品被删除 / 仅粉丝可见」，等于让他拿着对的链接
+          去做一件不可能成功的事。现在自动接手：填进下方的「博主主页链接」，
+          按客户本来勾选的「列表类型 / 浏览器会话抓取」开跑（浏览器抓取免费）。
+        """
+        text = (url_text or "").strip()
+        try:
+            links = VideoDownloader.extract_urls(text)
+            if links:
+                text = links[0]          # 多条链接时先拉第一个账号
+        except Exception:                # noqa: BLE001
+            pass
+        self.list_url_edit.setText(text)
+
+        # ★ 2026-11-05：快手主页转交时把「平台」也切到快手 ——
+        #   否则会按抖音链路去 resolve_sec_uid，必然报"无法识别博主"。
+        is_ks = _looks_like_ks_profile(text)
+        if is_ks:
+            for i in range(self.blogger_platform_combo.count()):
+                if self.blogger_platform_combo.itemData(i) == "kuaishou":
+                    self.blogger_platform_combo.setCurrentIndex(i)
+                    break
+        else:
+            self.blogger_platform_combo.setCurrentIndex(0)
+
+        if self._free_mode():
+            # 免费档不自动开跑：这一步在套餐里属于「博主主页作品批量入库」，
+            # 直接把链接填好、把话说明白，客户自己点那个按钮（点了才会弹付费须知）。
+            # 绝不在这里偷偷弹窗 —— 客户点的是「解析」，弹付费窗会莫名其妙。
+            self.status.setText(
+                "这是博主主页链接（不是单条作品）—— 已填到下方「博主主页链接」，"
+                "点「拉取列表」即可批量获取该账号的作品（此项需激活后使用）")
+            return
+
+        if is_ks:
+            self.status.setText("这是快手博主主页链接（不是单条作品），"
+                                "正在自动拉取该账号的作品列表…（云端接口，无需登录）")
+        else:
+            self.status.setText("这是博主主页链接（不是单条作品），正在自动拉取该账号的作品列表…"
+                                "（会自动打开浏览器滚动加载，请稍候）")
+        self._fetch_list()
+
+    # --------------------------------------------------- 博主列表批量拉取
+    def _blogger_platform(self) -> str:
+        return self.blogger_platform_combo.currentData() or "douyin"
+
+    def _on_blogger_platform_changed(self):
+        """平台切换：快手没有「喜欢/收藏」（云端接口只有作品列表），
+        也没有浏览器会话一说 —— 相关选项灰掉，免得客户选了再吃一句报错。
+        ★ 家规「禁用按钮＝烂门禁」针对的是**主动作**；这两个是条件选项，
+          灰掉并配提示是正确姿势（主动作「拉取列表」永远可点）。
+        """
+        ks = self._blogger_platform() == "kuaishou"
+        model = self.list_type_combo.model()
+        for i in range(self.list_type_combo.count()):
+            model.item(i).setEnabled(not ks or i == 0)
+        if ks:
+            self.list_type_combo.setCurrentIndex(0)
+            self.list_type_combo.setToolTip("快手云端接口只提供「作品」列表；喜欢/收藏是抖音专属")
+        else:
+            self.list_type_combo.setToolTip(
+                "作品=该博主公开发布；喜欢/收藏=本人或公开账号可见，需先登录")
+        self.use_browser_chk.setEnabled(not ks)
+        if ks:
+            self.use_browser_chk.setChecked(False)
+        self.list_url_edit.setPlaceholderText(
+            "粘贴快手博主主页链接拉取作品列表（云端接口，无需登录）" if ks else
+            "粘贴博主主页链接拉取作品/喜欢/收藏；留空 = 拉取【登录账号本人】的喜欢/收藏")
+
+    def _fetch_list(self):
+        """拉取博主作品 / 喜欢 / 收藏列表并加入表格。"""
+        if not self._ensure_real_downloader():
+            # ★ 免费档：这一项要调采集接口（真花钱），不能白送，但话要说清楚
+            if self._free_mode():
+                self._prompt_paid_feature("博主主页作品批量入库")
+            else:
+                self._prompt_need_token()
+            return
+        list_type = self.list_type_combo.currentData() or "post"
+        url = self.list_url_edit.text().strip()
+        if self._list_worker is not None and self._list_worker.isRunning():
+            self.status.setText("列表拉取中，请稍候…")
+            return
+
+        # ---- 快手链路（2026-11-05）：云端接口两段式，与抖音完全分开
+        if self._blogger_platform() == "kuaishou":
+            if list_type != "post":
+                self.status.setText("快手目前只支持「作品」列表（喜欢/收藏是抖音专属）")
+                return
+            if not url:
+                self.status.setText("快手请粘贴博主主页链接（不支持拉取登录账号本人的列表）")
+                return
+            self.fetch_list_btn.setEnabled(False)
+            self.fetch_list_btn.setText("拉取中…")
+            self.status.setText("正在拉取快手作品列表…（云端接口，无需登录，请稍候）")
+            self.progress.setRange(0, 0)
+            w = Worker(_fetch_ks_list_task, self.downloader, url)
+            connect_guarded(w.done, self._on_list_fetched,
+                            on_error=self._slot_failed, label="快手列表结果")
+            connect_guarded(w.error, lambda m: self.status.setText(f"拉取出错：{m}"))
+            connect_guarded(w.finished, self._on_list_finished, label="快手列表收尾")
+            self._list_worker = w
+            w.start()
+            return
+
+        # ---- 抖音链路
+        # ★ 2026-11-10 客户「无法直接提取抖音博主主页实现批量下载」：
+        #   以前这里同步跑 resolve_sec_uid（内含 JustOneAPI 兜底 + 两个 UA 的
+        #   本地 302 跟随，最多卡主线程 30 秒），一旦短链跳回抖音首页就直接
+        #   return「无法识别博主」，客户勾了「浏览器会话抓取」也用不上。
+        #   现在浏览器模式下只做零耗时的正则判断，剩下的交给带登录态的浏览器。
+        use_browser = self.use_browser_chk.isChecked()
+        use_own = (not url)
+        sec_uid = None
+        profile_url = ""
+        if url:
+            try:
+                sec_uid, reason = self.downloader.resolve_sec_uid(
+                    url, allow_network=False)
+            except TypeError:
+                # 演示模式 / 旧版假下载器只有单参签名，保持兼容
+                sec_uid, reason = self.downloader.resolve_sec_uid(url)
+            if not sec_uid:
+                if not use_browser:
+                    self.status.setText(
+                        f"无法识别博主：{reason}；请勾选「浏览器会话抓取」，"
+                        "或粘贴含 MS4w… 的完整主页链接")
+                    return
+                profile_url = url
+        if self._list_worker is not None and self._list_worker.isRunning():
+            self.status.setText("列表拉取中，请稍候…")
+            return
+
+        self.fetch_list_btn.setEnabled(False)
+        self.fetch_list_btn.setText("拉取中…")
+        if use_browser and profile_url:
+            self.status.setText(
+                "正在用浏览器打开主页链接识别博主…（请勿关闭弹出的窗口）")
+        elif use_browser:
+            self.status.setText("正在唤起浏览器抓取…（会自动滚动加载，请勿关闭弹出的窗口）")
+        else:
+            self.status.setText("正在拉取列表…（纯 HTTP 模式，可能被抖音风控拦截）")
+        self.progress.setRange(0, 0)   # 忙碌指示
+
+        w = Worker(_fetch_list_task, self.downloader, list_type, sec_uid,
+                   use_own, use_browser, profile_url)
+        connect_guarded(w.done, self._on_list_fetched,
+                        on_error=self._slot_failed, label="列表结果")
+        connect_guarded(w.error, lambda m: self.status.setText(f"拉取出错：{m}"))
+        connect_guarded(w.finished, self._on_list_finished, label="列表收尾")
+        self._list_worker = w
+        w.start()
+
+    def _on_list_fetched(self, result):
+        try:
+            videos, err = result
+        except Exception:  # noqa: BLE001
+            videos, err = [], "返回结果异常"
+        if err:
+            self.status.setText(f"拉取失败：{err}")
+            return
+        if not videos:
+            self.status.setText("拉取完成，但列表为空（可能该账号未公开或确实为空）")
+            return
+        for v in videos:
+            self._add_video_info_row(v)
+        # ★ 拉全了／没拉全要分开说（v1.24.4）。以前不管拉多少都只说
+        #   "已拉取 N 条"，客户拿抖音主页一对比发现少了十几条，以为软件吃数据。
+        note = getattr(self.downloader, "_last_list_note", "") or ""
+        if note:
+            self.status.setText(f"已拉取 {len(videos)} 条（{note}）")
+        else:
+            self.status.setText(
+                f"已拉取 {len(videos)} 条，已加入下方列表；勾选后点「下载选中」即可批量下载"
+            )
+
+    def _on_list_finished(self):
+        self.fetch_list_btn.setEnabled(True)
+        self.fetch_list_btn.setText("拉取列表")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+
+    def _add_video_info_row(self, info):
+        plat = getattr(info, "platform", "douyin") or "douyin"
+        # ★ 视频号 / 小红书的标题里常夹着换行（后面跟一整串 #话题标签）。
+        #   换行符直接扔进表格单元格，Qt 会拿 fallback 字体去画这个字符，
+        #   客户看到的是一个小方块或者空白 —— 像乱码。
+        #   进表格前压成单行：**保留**话题标签（列表里它们有信息量，
+        #   客户看标题本来就习惯带标签），只有写文件名时才剥掉
+        #   （见 video_downloader._clean_desc_for_name）。
+        _raw = getattr(info, "desc", "") or getattr(info, "video_id", "") or "（无标题）"
+        title = " ".join(str(_raw).split())
+        self._add_row(plat, title, _fmt_duration(getattr(info, "duration", 0)), video=info)
+        r = self.table.rowCount() - 1
+        it = self.table.item(r, 0)
+        if it is not None:
+            it.setCheckState(Qt.CheckState.Checked)   # 新解析出的默认勾选，便于直接下载
+        self._sync_actions()
+
+    # ----------------------------------------------------------- 下载
+    def _download_selected(self):
+        rows = self._checked_rows()
+        if not rows:
+            self.status.setText("请先勾选要下载的视频（标题左侧方框）")
+            return
+        picked = [self._videos[r] for r in rows
+                  if 0 <= r < len(self._videos) and self._videos[r] is not None]
+        if not picked:
+            self.status.setText("勾选的是演示数据；请先「解析」出真实视频后再下载")
+            return
+        if not self._ensure_ready():
+            self._prompt_need_token()
+            return
+        if self._download_worker is not None and self._download_worker.isRunning():
+            self.status.setText("已有下载任务在进行中…")
+            return
+
+        self._apply_save_dir()
+        self.download_btn.setEnabled(False)
+        self.download_btn.setText("下载中…")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.status.setText(f"开始下载 {len(picked)} 条…")
+
+        media_type = self.media_combo.currentData() or "video"
+        w = Worker(_download_task, self.downloader, picked, media_type)
+        w.progress.connect(self._on_dl_progress)
+        connect_guarded(w.done, self._on_downloaded,
+                        on_error=self._slot_failed, label="下载结果")
+        connect_guarded(w.error, lambda m: self.status.setText(f"下载出错：{m}"))
+        connect_guarded(w.finished, self._on_dl_finished, label="下载收尾")
+        self._download_worker = w
+        w.start()
+
+    def _on_dl_progress(self, pct, msg):
+        self.progress.setRange(0, 100)
+        self.progress.setValue(int(pct))
+        if msg:
+            self.status.setText(msg)
+
+    def _on_downloaded(self, results):
+        ok = sum(1 for item in results if item and item[1] and not item[2])
+        fail = len(results) - ok
+        # 累进本批成果（顶部数字条立刻能看到"这轮成了几条"）
+        self._stat_ok += ok
+        self._stat_fail += fail
+        self._refresh_stats()
+        # ★ v1.19.1：弹窗/状态栏展示**实际落盘**目录（last_save_dir_used）——
+        #   下载器发现原目录写不进去时会自动改存到备用目录，还拿用户填的
+        #   那个说事，客户会去一个根本没文件的文件夹里找。
+        actual_dir = str(getattr(self.downloader, "last_save_dir_used", "") or "")
+        if not actual_dir:
+            actual_dir = str(getattr(self.downloader, "save_dir", "") or "")
+        dir_note = str(getattr(self.downloader, "last_dir_note", "") or "")
+
+        if not fail:
+            if dir_note:
+                # 全部成功但中途改存过 —— 单独告知，别让客户按原目录找文件
+                self.status.setText(f"下载完成：{ok} 条 → {actual_dir}（{dir_note}）")
+                QMessageBox.information(
+                    self, "下载完成",
+                    f"下载完成：{ok} 条 → {actual_dir}\n\n{dir_note}")
+            else:
+                self.status.setText(f"下载完成：{ok} 条 → {actual_dir}")
+            return
+
+        # ★ v1.14.3：以前只报"失败 N 条"，客户和服务方都无从下手。
+        #   现在把每条的真实原因摆出来（状态栏给第一条，弹窗列前三条）。
+        bad = [(v, e) for v, p, e in (r for r in results if r)
+               if not (p and not e)]
+        first = bad[0][1] if bad else "未知原因"
+        self.status.setText(f"下载完成：成功 {ok} 条，失败 {fail} 条 —— 原因：{first}")
+
+        lines = []
+        for v, e in bad[:3]:
+            title = (getattr(v, "desc", "") or getattr(v, "video_id", "") or "（无标题）")[:22]
+            lines.append(f"· {title}\n  {e}")
+        extra = f"\n…另有 {len(bad) - 3} 条失败" if len(bad) > 3 else ""
+        # ★ 写入失败要给专门的指引 —— 三条通用建议里没有一条能解决它
+        write_hint = ""
+        if any("写入失败" in (e or "") for _v, e in bad):
+            write_hint = ("\n写入失败怎么办：到「设置 → 下载保存位置」换一个能写入的"
+                          "目录（比如「文档」下的默认目录）再试一次。\n")
+        note_block = f"\n{dir_note}\n" if dir_note else ""
+        QMessageBox.warning(
+            self, "下载未完成",
+            f"成功 {ok} 条，失败 {fail} 条 → {actual_dir}\n"
+            + note_block + "\n"
+            + "\n".join(lines) + extra + "\n"
+            + write_hint + "\n"
+            "最常见的三种情况：\n"
+            "① 播放地址已过期 —— 把这条链接重新解析一次再下载；\n"
+            "② 保存目录写不进去 —— 到「设置 → 下载保存位置」换个目录再试；\n"
+            "③ 网络或代理拦截 —— 关掉代理 / 换网络再试。\n\n"
+            "如果一直失败，把这段原因截图发给服务方即可定位。")
+
+    def _on_dl_finished(self):
+        self.download_btn.setText("下载选中")
+        self._sync_actions()
+
+    # ------------------------------------------------------- 列表操作
+    def _refresh_stats(self):
+        """刷新顶部那排大号数字。
+
+        ★ 三个"本批"计数是页面自己的（_stat_ok / _stat_fail），
+          额度那一格才是全局的 —— 混在一起会让人以为"已下载"是全店累计。
+        ★ 免费版这一格写「今日已用」而不是「今日剩余」：
+          免费档不限量，说"剩余"等于撒谎；而且免费版状态栏不许出现"额度"
+          二字（_probe_free_edition 有断言，别改回去）。
+        """
+        strip = getattr(self, "stats", None)
+        if strip is None:
+            return
+        try:
+            rows = self.table.rowCount()
+            strip.cell(0).set_value(f"{rows}", "条")
+            strip.cell(1).set_value(f"{self._stat_ok}", "个")
+            strip.cell(2).set_value(f"{self._stat_fail}", "条",
+                                    tone=("bad" if self._stat_fail else "normal"))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from justoneapi_collector import quota
+            s = quota.summary() or {}
+            unlimited = bool(s.get("unlimited")) or self._free_mode()
+            used = int(s.get("used") or 0)
+            left = int(s.get("remaining") or 0) if not unlimited else 0
+            cell = strip.cell(3)
+            if unlimited:
+                cell.set_title("今日已用")
+                cell.set_value(f"{used}", "次")
+            else:
+                cell.set_title("今日剩余")
+                cell.set_value(f"{left}", "次",
+                               tone=("warn" if left <= 5 else "normal"))
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def _empty_action(self):
+        """空态按钮的落点：把光标送进「视频 / 博主链接」输入框。
+
+        ★ 为什么不直接调解析（2026-10-26 的坑，见 main_window._EMPTY_HINTS）
+          这一页进链接有三条路（单条粘贴 / 批量导入 / 博主主页列表），空态里
+          固定挂一颗「解析」＝在批量场景下拿一个空输入框去解析，点了像坏了。
+          所以空态出口只做「把你送到能动手的地方」，不替用户选哪条路。
+        """
+        try:
+            self.url_edit.setFocus()
+            self.url_edit.setSelection(0, len(self.url_edit.text()))
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            from PySide6.QtWidgets import QScrollArea
+            w = self.parent()
+            while w is not None and not isinstance(w, QScrollArea):
+                w = w.parent()
+            if w is not None:
+                w.ensureWidgetVisible(self.url_edit)
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def _sync_actions(self):
+        """按列表状态同步控件可用性：空列表时禁用「下载选中 / 清空列表」。"""
+        has_rows = self.table.rowCount() > 0
+        self.clear_btn.setEnabled(has_rows)
+        # 下载中不要因列表有行就误启用
+        if self._download_worker is None or not self._download_worker.isRunning():
+            self.download_btn.setEnabled(has_rows)
+
+    def _checked_rows(self) -> list:
+        rows = []
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None and it.checkState() == Qt.CheckState.Checked:
+                rows.append(r)
+        return rows
+
+    def _toggle_all(self, checked: bool):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it is not None:
+                it.setCheckState(state)
+        self.status.setText(
+            f"已选中 {self.table.rowCount()} 条" if checked else "已取消全选"
+        )
+
+    def _load_demo_rows(self):
+        demo = [
+            ("douyin", "3分钟学会的爆款开头公式", "00:32"),
+            ("xiaohongshu", "新手做账号的5个误区", "00:45"),
+            ("kuaishou", "实体店引流实操", "01:12"),
+        ]
+        for plat, title, meta in demo:
+            self._add_row(plat, title, meta)
+
+    def _add_row(self, plat, title, meta, video=None):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        chk = QTableWidgetItem()
+        chk.setCheckState(Qt.CheckState.Unchecked)
+        chk.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+        self.table.setItem(r, 0, chk)
+        self.table.setItem(r, 1, QTableWidgetItem(str(plat)))
+        self.table.setItem(r, 2, QTableWidgetItem(str(title)))
+        self.table.setItem(r, 3, QTableWidgetItem(str(meta)))
+        # 维护与行一一对应的 VideoInfo（演示行为 None）
+        while len(self._videos) < r:
+            self._videos.append(None)
+        self._videos.append(video)
+        self._sync_actions()
+
+    def _clear_list(self):
+        """清空待下载列表：二次确认 → 清空 → 明确反馈清掉了几条。"""
+        n = self.table.rowCount()
+        if n == 0:
+            self.status.setText("列表已经是空的")
+            return
+        if not confirm_destructive(
+            self,
+            "清空下载列表",
+            f"确定清空当前 {n} 条待下载视频吗？",
+            ok_text="确认清空",
+            detail="只清空本页的待下载清单，不会删除已经下载到本地的文件。",
+        ):
+            self.status.setText("已取消，列表未做改动")
+            return
+        self.table.setRowCount(0)
+        self._videos.clear()
+        self.sel_all.setChecked(False)
+        # 清空 = 开新一批，成果基数跟着归零（否则"已下载 12 个"会跨批累计，
+        # 客户看着数字对不上这一批的 3 条，会以为软件记错了）
+        self._stat_ok = 0
+        self._stat_fail = 0
+        self._sync_actions()
+        self.status.setText(f"已清空 {n} 条待下载视频")

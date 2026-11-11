@@ -1,0 +1,9 @@
+{
+  "_说明": "复制本文件为 cos_config.json 后填写。cos_config.json 已在 .gitignore 中，不会提交。",
+  "secret_id": "AKIDxxxxxxxxxxxxxxxxxxxxxxxx",
+  "secret_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "bucket": "你的桶名-1250000000",
+  "region": "ap-guangzhou",
+  "prefix": "trafficcatcher",
+  "cdn_domain": ""
+}

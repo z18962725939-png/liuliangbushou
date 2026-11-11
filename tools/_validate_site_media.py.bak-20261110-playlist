@@ -1,0 +1,236 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""官网配图 + 背景音乐发版门禁（2026-11-10）。
+
+背景：客户反馈「官网里面的配图都显示丢失」。真因不是 CDN 挂了，而是
+`官网素材/ui/` 整个目录不在了，build_site.py 遇到缺图只 continue，
+模板变量被替换成空字符串，产物里一排 <img src=""> —— 浏览器把当前
+页面当图片重新请求，于是满屏破图。这类问题编译查不出、curl 200 也
+查不出，只能靠产物级断言钉死。
+
+同时钉住背景音乐：三个发布渠道（自有域名 / COS 镜像 / 旧域名应用）只要
+漏传一个静态文件，用户点按钮就是哑的。所以要求播放器必须在每一页、
+必须有 Web Audio 合成曲兜底、镜像同步白名单必须收音频。
+
+只做只读检查，不联网、不上传、不写产物。
+"""
+from __future__ import annotations
+
+import base64
+import json
+import re
+import sys
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent
+ROOT = TOOLS.parent
+sys.path.insert(0, str(TOOLS))
+
+STANDALONE = ROOT / "installer_output" / "standalone"
+ASSETS = STANDALONE / "assets" / "bgm.mp3"
+
+TOTAL = 0
+FAILED = 0
+
+
+def chk(cond: bool, name: str, detail: str = "") -> bool:
+    global TOTAL, FAILED
+    TOTAL += 1
+    if cond:
+        print(f"  ✔ {name}")
+        return True
+    FAILED += 1
+    print(f"  ✘ {name}" + (f"  → {detail}" if detail else ""))
+    return False
+
+
+def sec(title: str) -> None:
+    print(f"\n--- {title} ---")
+
+
+def read(p: Path) -> str:
+    return p.read_text(encoding="utf-8")
+
+
+def main() -> int:
+    import site_seo
+
+    pages = sorted(STANDALONE.glob("*.html"))
+    sec("1) 产物与素材")
+    chk(len(pages) >= 12, f"生成了全部页面（实际 {len(pages)} 个）", str(len(pages)))
+    chk(all(p.stat().st_size > 20_000 for p in pages), "没有空壳页面")
+
+    sec("2) 配图：绝不允许空 src")
+    empty_src = []
+    for p in pages:
+        h = read(p)
+        empty_src += [p.name] * len(re.findall(r'<img[^>]*\ssrc=(?:""|\'\')', h))
+    chk(not empty_src, "★ 所有页面都没有 <img src=\"\">（破图真因）",
+        str(sorted(set(empty_src))))
+
+    home = read(STANDALONE / "index.html")
+    imgs = re.findall(r"<img[^>]*>", home)
+    chk(len(imgs) >= 5, f"首页配图齐全（实际 {len(imgs)} 处 img 引用）", str(len(imgs)))
+
+    broken = []
+    for p in pages:
+        for tag in re.findall(r"<img[^>]*>", read(p)):
+            m = re.search(r'\ssrc="([^"]*)"', tag)
+            src = m.group(1) if m else ""
+            if not src:
+                broken.append(f"{p.name}: 无 src")
+            elif src.startswith("data:"):
+                continue
+            elif src.startswith(("http://", "https://")):
+                continue
+            elif not (STANDALONE / src.split("?")[0]).is_file():
+                broken.append(f"{p.name}: {src[:60]}")
+    chk(not broken, "★ 每个图片引用都能落地（data / 绝对地址 / 本地文件）",
+        "; ".join(broken[:4]))
+
+    shot_names = ("shot-video-download.png", "shot-live-monitor.png",
+                  "shot-transcribe.png", "shot-collect.png")
+    chk(all((STANDALONE / n).is_file() for n in shot_names),
+        "4 张界面截图都生成到了 standalone",
+        str([n for n in shot_names if not (STANDALONE / n).is_file()]))
+
+    sec("3) 缺图兜底：素材再次丢失也不会破图")
+    site_src = read(TOOLS / "build_site.py")
+    chk("def placeholder_shot(" in site_src, "build_site.py 有占位图函数")
+    chk("imgs = {n: (imgs.get(n) or placeholder_shot(n))" in site_src,
+        "★ build_html 入口统一补齐 imgs（一处兜住 hero + 4 个详情块）")
+    chk("用内联示意图兜底" in site_src, "素材缺失分支不再只是 continue")
+
+    import build_site
+    uri = build_site.placeholder_shot("视频下载")
+    chk(uri.startswith("data:image/svg+xml;base64,"), "占位图是内联 SVG data URI")
+    svg = base64.b64decode(uri.split(",", 1)[1]).decode("utf-8")
+    chk("<svg" in svg and "视频下载" in svg, "占位图能解出带页面名的 SVG")
+    chk("$" not in svg, "占位图里没有 $（不会炸 string.Template）")
+
+    # 真调一次 build_html，模拟 4 张图全丢，验证产物没有空 src
+    try:
+        products = json.loads((TOOLS / "products.json").read_text(encoding="utf-8"))
+        if isinstance(products, dict):
+            products = products.get("products") or products.get("items") or []
+        dry = build_site.build_html(
+            version="1.28.1", published="2026-11-06", size=95554182,
+            url="https://example.invalid/x.exe", sha256="-", notes="门禁自检",
+            qr_img="", pay={"pay_note": ""}, imgs={},
+            products=products, changelog=[], free_version="", free_size=0,
+            free_url="", ext_gif="",
+        )
+        chk('src=""' not in dry, "★ 模拟「4 张素材全缺」重生成，产物仍无空 src")
+        chk("data:image/svg+xml;base64," in dry,
+            "★ 缺图时真的换成了内联示意图，不是静默留白")
+    except Exception as exc:                                    # noqa: BLE001
+        chk(False, "★ 模拟缺图重生成成功", f"{type(exc).__name__}: {exc}")
+
+    chk((STANDALONE / "index.html").stat().st_size < 400_000,
+        "首页仍 <400KB（音乐没被内联进去）")
+
+    sec("4) 背景音乐：文件与全站注入")
+    chk(ASSETS.is_file(), "standalone/assets/bgm.mp3 存在")
+    if ASSETS.is_file():
+        head = ASSETS.read_bytes()[:3]
+        chk(ASSETS.stat().st_size > 50_000,
+            f"音乐文件不是空壳（{ASSETS.stat().st_size / 1024:.0f} KB）")
+        chk(head == b"ID3" or head[0] == 0xFF, "文件头是有效 MP3", repr(head))
+
+    no_player = []
+    no_audio_tag = []
+    for p in pages:
+        h = read(p)
+        if 'id="tcbgm-btn"' not in h or 'id="tcbgm"' not in h:
+            no_player.append(p.name)
+        if 'id="tcbgm-audio"' not in h:
+            no_audio_tag.append(p.name)
+    chk(not no_player, f"★ 全部 {len(pages)} 页都有音乐按钮", str(no_player))
+    chk(not no_audio_tag, "★ 全部页面都有 audio 元素", str(no_audio_tag))
+
+    atag = re.search(r"<audio[^>]*>", home)
+    a = atag.group(0) if atag else ""
+    chk("loop" in a, "audio 带 loop（循环播放）")
+    chk('preload="none"' in a, "audio 不预加载（不拖慢首屏/不偷跑流量）")
+    chk("playsinline" in a, "audio 带 playsinline（移动端内联播放）")
+    chk("autoplay" not in a, "★ 不自动播放（不打扰用户、不触发浏览器拦截）")
+
+    btn = re.search(r"<button id=\"tcbgm-btn\"[^>]*>", home)
+    b = btn.group(0) if btn else ""
+    chk('type="button"' in b, "按钮不会误提交表单")
+    chk("aria-label=" in b and "aria-pressed=" in b, "按钮有无障碍标签与状态")
+
+    sec("5) 播放器：手机端 / 网页端 / 漏传文件都能响")
+    div_pos = home.find('<div id="tcbgm">')
+    # 播放器的 <style> 在 <div> 之前，必须从样式开始截，否则
+    # 「手机端适配 / 减少动效」这类 CSS 断言会假失败。
+    css_pos = home.rfind("<style", 0, div_pos) if div_pos >= 0 else -1
+    start = css_pos if css_pos >= 0 else div_pos
+    block = home[start:] if start >= 0 else ""
+    chk(bool(block), "能从产物里截出播放器整块（含 CSS）")
+    chk("class=" not in block,
+        "★ 播放器不用 class（_validate_theme 会要求每个 class 都有 CSS 定义）")
+    chk(not re.search(r"\$[A-Z_]{3,}", block),
+        "播放器不含 $占位符（不会炸 string.Template）")
+    for needle, label in (
+        ("localStorage", "记住用户开关（翻页不丢）"),
+        ("WeixinJSBridgeReady", "微信内置浏览器解锁音频"),
+        ("webkitAudioContext", "iOS Safari 兼容前缀"),
+        ("createOscillator", "★ Web Audio 合成曲兜底"),
+        ("NotAllowedError", "区分「自动播放被拦」与「文件坏了」"),
+        ('addEventListener("click"', "★ 由用户手势触发播放"),
+        ("touchstart", "移动端首次触摸解锁"),
+        ("visibilitychange", "切后台暂停省电"),
+        ("@media (max-width:720px)", "手机端样式适配"),
+        ("prefers-reduced-motion", "尊重减少动效偏好"),
+    ):
+        chk(needle in block, label, needle)
+    chk('var SRC="assets/bgm.mp3"' in block, "注入了真实音乐文件路径")
+    chk("data:audio" not in home, "音乐没有被内联成 base64")
+    chk("// ★ 绝不在这里清掉 localStorage" in block,
+        "自动续播被拦时不清用户意愿")
+
+    sec("6) 兜底与同步链路（动态调用）")
+    clean = "<!DOCTYPE html><html><body><p>hi</p>__MOTION__</body></html>"
+    once = site_seo.inject_motion(clean)
+    chk(once.count('id="tcbgm-btn"') == 1, "★ inject_motion 自动带上播放器")
+    chk(site_seo.inject_bgm(once).count('id="tcbgm-btn"') == 1,
+        "★ 重复注入会被拦住（不会出两个按钮）")
+    fallback = site_seo.inject_bgm("<html><body></body></html>", audio_src="")
+    chk('id="tcbgm-btn"' in fallback and 'var SRC=""' in fallback,
+        "★ 音频文件缺失时仍注入播放器，且走纯合成曲")
+    chk("__MOTION__" not in once, "没有残留占位符")
+
+    import publish_site_mirror as mirror
+    chk('.mp3' in mirror.CTYPES and mirror.CTYPES[".mp3"] == "audio/mpeg",
+        "★ 镜像同步带 audio/mpeg Content-Type")
+    collected = [p.relative_to(STANDALONE).as_posix() for p in mirror.collect()]
+    chk("assets/bgm.mp3" in collected,
+        "★ 镜像同步清单真的收了音乐文件", str(collected[-4:]))
+    chk(any(n in collected for n in shot_names),
+        "镜像同步清单也收了本地模式下的界面截图")
+    chk("max-age=604800" in mirror.cache_header(ASSETS),
+        "音乐文件走长缓存，不反复下载")
+
+    sec("7) 源码链路")
+    seo_src = read(TOOLS / "site_seo.py")
+    chk("return inject_bgm(html)" in seo_src,
+        "★ inject_motion 与播放器是同一条注入链（改一处全站生效）")
+    chk('"assets" / "bgm.mp3"' in seo_src and "candidate.is_file()" in seo_src,
+        "播放器会自动探测音频文件是否存在")
+    chk("1.8) 背景音乐" in site_src, "build_site.py 有音乐拷贝步骤")
+    chk((TOOLS / "gen_site_bgm.py").is_file(),
+        "原创音乐可复现生成（换歌只需替换一个 mp3）")
+
+    print("\n" + "=" * 66)
+    print(f"  通过 {TOTAL - FAILED} 项，失败 {FAILED} 项")
+    print("=" * 66)
+    if FAILED:
+        print("官网配图或背景音乐门禁未通过，先修好再发版。")
+        return 1
+    print("官网配图 + 全站背景音乐门禁全绿")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

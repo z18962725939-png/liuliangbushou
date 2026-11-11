@@ -1,0 +1,642 @@
+"""
+本地历史库：把每次抓到的数据留在自己硬盘上，让「涨了多少」有据可查。
+
+为什么要有它（2026-10-14 对标蝉妈妈 / 飞瓜之后立的）：
+    那两家真正值钱的不是"能看到数据"，而是"能看到三个月前的数据"——
+    「这个号最近 30 天涨还是跌」「这条视频是不是突然爆了」，全靠历史对比。
+    本工具之前每次抓完就丢，永远只有当下这一帧，所以只能当「取款机」，当不了「账本」。
+    有了一本机的时间序列，才能支撑：自己的账号看板、发布后表现曲线、定时监控。
+    它同时也是我们唯一有、而云端 SaaS 结构性给不了的东西：**数据不出本机**。
+
+设计取舍：
+    - **粒度＝每天一个数据点**。同一天反复抓同一条，只在库里覆盖成最新值，
+      不会把库撑爆；隔几天再抓就多一个点，趋势自己就出来了。
+    - **零第三方依赖**，只用标准库 sqlite3。
+    - **任何异常一律吞掉并静默返回**。落库是附加价值，绝不能因为数据库
+      坏了把采集拖垮 —— 这是硬约束，写本模块每一行都要守。
+    - **缺失 sqlite 时整体降级为空操作**：某些打包环境可能没带 sqlite 动态库，
+      那时本模块所有写 读接口安全返回空，主程序照常跑。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import threading
+import time
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any, Iterable
+
+try:                                                # pragma: no cover - 环境相关
+    import sqlite3
+    _HAS_SQLITE = True
+except Exception:                                   # noqa: BLE001
+    sqlite3 = None                                  # type: ignore[assignment]
+    _HAS_SQLITE = False
+
+DB_NAME = "history.db"
+
+_LOCK = threading.RLock()
+_CONN = None
+_CONN_KEY = ""
+_ENABLED = True
+_DB_PATH = None            # 路径覆盖（自检脚本指向临时库，平时为 None）
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS post_snap (
+    platform     TEXT    NOT NULL,
+    post_id      TEXT    NOT NULL,
+    day          TEXT    NOT NULL,
+    seen_ts      INTEGER NOT NULL DEFAULT 0,
+    title        TEXT    DEFAULT '',
+    author_id    TEXT    DEFAULT '',
+    author_name  TEXT    DEFAULT '',
+    author_fans  INTEGER DEFAULT 0,
+    digg         INTEGER DEFAULT 0,
+    comment_cnt  INTEGER DEFAULT 0,
+    collect_cnt  INTEGER DEFAULT 0,
+    share_cnt    INTEGER DEFAULT 0,
+    play_cnt     INTEGER DEFAULT 0,
+    duration     INTEGER DEFAULT 0,
+    publish_ts   INTEGER DEFAULT 0,
+    url          TEXT    DEFAULT '',
+    source       TEXT    DEFAULT '',
+    PRIMARY KEY (platform, post_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_post_day  ON post_snap(day);
+CREATE INDEX IF NOT EXISTS idx_post_auth ON post_snap(platform, author_id);
+
+CREATE TABLE IF NOT EXISTS author_snap (
+    platform    TEXT    NOT NULL,
+    author_id   TEXT    NOT NULL,
+    day         TEXT    NOT NULL,
+    seen_ts     INTEGER NOT NULL DEFAULT 0,
+    nickname    TEXT    DEFAULT '',
+    fans        INTEGER DEFAULT 0,
+    source      TEXT    DEFAULT '',
+    PRIMARY KEY (platform, author_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_author_day ON author_snap(day);
+"""
+
+
+# ------------------------------------------------------------------ 基础工具
+
+def db_path() -> Path:
+    """历史库文件位置（默认 %APPDATA%/TrafficCatcher/history.db）。
+
+    `_DB_PATH` 为空时才走默认目录 —— 留这个口子是为了自检脚本能把库指到
+    临时目录，不污染真实数据（也方便日后支持"换个盘存历史"）。
+    """
+    if _DB_PATH:
+        # 外面可能塞进来字符串，一律转成 Path —— 否则调用方的 p.exists()
+        # 会抛 AttributeError，被下游容错吞成"库大小 0"，看不出原因。
+        return Path(_DB_PATH)
+    try:
+        from . import branding
+        return Path(branding.app_data_dir()) / DB_NAME
+    except Exception:                               # noqa: BLE001
+        root = os.environ.get("APPDATA") or str(Path.home())
+        return Path(root) / "TrafficCatcher" / DB_NAME
+
+
+def available() -> bool:
+    """本机是否真的能用 SQLite（缺失时整个模块降级为空操作）。"""
+    return _HAS_SQLITE
+
+
+def enabled() -> bool:
+    """自动记录开关。关掉后所有 snap_* 直接返回 0，读接口仍可用。"""
+    return _ENABLED and _HAS_SQLITE
+
+
+def set_enabled(on: bool) -> None:
+    """开关只影响写入，不影响读取（关了也还能回看已有数据）。"""
+    global _ENABLED
+    _ENABLED = bool(on)
+
+
+def _today(ts: float | None = None) -> str:
+    """取**本地**日期 YYYY-MM-DD。
+
+    刻意不做 UTC 偏移换算 —— 用户心里的"今天"就是北京时间，
+    按 UTC 算会出现凌晨抓的数据被记到昨天的怪现象。
+    """
+    d = date.fromtimestamp(ts if ts is not None else time.time())
+    return d.isoformat()
+
+
+def _day_offset(days: int, base: str = "") -> str:
+    """days 天前那一天（负数＝往前推）。base 用于自检/回放，默认今天。"""
+    d = date.fromisoformat(base) if base else date.today()
+    return (d + timedelta(days=days)).isoformat()
+
+
+_UNITS = {"万": 10000, "w": 10000, "W": 10000, "k": 1000, "K": 1000, "亿": 100000000}
+
+
+def _to_int(v: Any) -> int:
+    """把各种写法都收成整数。
+
+    采集层返回的值不老实：有时候是 12000，有时候是 "1.2万"，
+    偶尔还带逗号或空格。这里统一收口，宁可记 0 也不让一条脏数据
+    把整次落库带崩（历史库坏了不影响采集，但记录错了没人会发现）。
+    """
+    try:
+        if v is None:
+            return 0
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = str(v).strip().replace(",", "").replace(" ", "").replace("　", "")
+        if not s:
+            return 0
+        try:
+            return int(float(s))
+        except Exception:                           # noqa: BLE001
+            pass
+        m = re.match(r"^([\d.]+)\s*([万wWkK亿])\+?$", s)
+        if m:
+            return int(float(m.group(1)) * _UNITS[m.group(2)])
+        m2 = re.search(r"[\d.]+", s)
+        if m2:
+            try:
+                return int(float(m2.group()))
+            except Exception:                       # noqa: BLE001
+                return 0
+        return 0
+    except Exception:                               # noqa: BLE001
+        return 0
+
+
+def _to_text(v: Any, limit: int = 200) -> str:
+    """统一转字符串并截断：标题再长也不该把库撑大。"""
+    try:
+        s = "" if v is None else str(v)
+    except Exception:                               # noqa: BLE001
+        s = ""
+    return s.replace("\r", " ").replace("\n", " ").strip()[:limit]
+
+
+def _getter(obj):
+    """统一 dict / 对象的取值方式。"""
+    if isinstance(obj, dict):
+        return lambda k, d="": obj.get(k, d)
+    return lambda k, d="": (lambda v: d if v is None else v)(getattr(obj, k, None))
+
+
+# ------------------------------------------------------------------ 连接管理
+
+def _connect(key: str):
+    """取得（或新建）数据库连接；路径变了就重建。"""
+    global _CONN, _CONN_KEY
+    if _CONN is not None and _CONN_KEY == key:
+        return _CONN
+    p = Path(key)
+    if p.parent and not p.parent.exists():
+        p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=15, check_same_thread=False)
+    # WAL：读写不互相排队，GUI 后台线程写库时不卡界面
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:                               # noqa: BLE001
+        pass
+    try:
+        conn.executescript(_SCHEMA)
+        conn.commit()
+    except Exception:                               # noqa: BLE001
+        pass
+    _CONN, _CONN_KEY = conn, key
+    return conn
+
+
+def _reset_conn() -> None:
+    """关闭当前连接，下次调用自动重连（损坏恢复 / 测试隔离用）。"""
+    global _CONN, _CONN_KEY
+    if _CONN is not None:
+        try:
+            _CONN.close()
+        except Exception:                           # noqa: BLE001
+            pass
+    _CONN, _CONN_KEY = None, ""
+
+
+def _query(sql: str, args: tuple = ()) -> list[tuple]:
+    """只读查询。任何失败都返回空列表，绝不抛给调用方。"""
+    if not _HAS_SQLITE:
+        return []
+    with _LOCK:
+        try:
+            conn = _connect(str(db_path()))
+            cur = conn.execute(sql, args)
+            rows = cur.fetchall()
+            cur.close()
+            return rows
+        except Exception:                           # noqa: BLE001
+            return []
+
+
+def _write(sql: str, rows: list[tuple]) -> int:
+    """批量写入（INSERT OR REPLACE）。返回写入条数，失败返回 0。"""
+    if not _HAS_SQLITE or not rows:
+        return 0
+    with _LOCK:
+        try:
+            conn = _connect(str(db_path()))
+            conn.executemany(sql, rows)
+            conn.commit()
+            return len(rows)
+        except Exception:                           # noqa: BLE001
+            # 库损坏 / 磁盘满 / 文件被占用都不该影响主流程，下次重试会自愈
+            try:
+                conn.rollback()
+            except Exception:                       # noqa: BLE001
+                pass
+            _reset_conn()
+            return 0
+
+
+_INSERT_POST = """
+INSERT OR REPLACE INTO post_snap
+    (platform, post_id, day, seen_ts, title, author_id, author_name, author_fans,
+     digg, comment_cnt, collect_cnt, share_cnt, play_cnt, duration, publish_ts, url, source)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+"""
+
+_INSERT_AUTHOR = """
+INSERT OR REPLACE INTO author_snap
+    (platform, author_id, day, seen_ts, nickname, fans, source)
+VALUES (?,?,?,?,?,?,?)
+"""
+
+
+# ------------------------------------------------------------------ 写入接口
+
+def snap_posts(posts, source: str = "") -> int:
+    """记录一批作品快照。
+
+    接受 PostItem 或任何带同名字段的对象，也接受 dict。
+    返回实际写入行数（返回 0 不一定代表失败，也可能是输入为空）。
+    """
+    if not enabled():
+        return 0
+    now = int(time.time())
+    day = _today(now)
+    rows = [r for r in (_post_row(p, day, now, source) for p in (posts or [])) if r]
+    return _write(_INSERT_POST, rows) if rows else 0
+
+
+def _post_row(p, day: str, now: int, source: str) -> tuple | None:
+    """把一个作品摊平成一行。**异常只丢这一行**，不影响同批其它行。"""
+    try:
+        g = _getter(p)
+        post_id = _to_text(g("post_id"), 64)
+        if not post_id:
+            return None
+        return (
+            _to_text(g("platform"), 24),
+            post_id,
+            day,
+            now,
+            _to_text(g("title"), 200),
+            _to_text(g("author_id"), 64),
+            _to_text(g("author_name"), 64),
+            _to_int(g("author_fans")),
+            _to_int(g("digg")),
+            _to_int(g("comment")),
+            _to_int(g("collect")),
+            _to_int(g("share")),
+            _to_int(g("play")),
+            _to_int(g("duration")),
+            _to_int(g("publish_ts")),
+            _to_text(g("url"), 500),
+            _to_text(source or g("source"), 32),
+        )
+    except Exception:                               # noqa: BLE001
+        return None
+
+
+def snap_authors(items, source: str = "") -> int:
+    """记录一批账号快照（AuthorInfo / dict 均可）。"""
+    if not enabled():
+        return 0
+    now = int(time.time())
+    day = _today(now)
+    rows = [r for r in (_author_row(a, day, now, source) for a in (items or [])) if r]
+    return _write(_INSERT_AUTHOR, rows) if rows else 0
+
+
+def _author_row(a, day: str, now: int, source: str) -> tuple | None:
+    try:
+        g = _getter(a)
+        aid = _to_text(g("author_id") or g("user_id"), 64)
+        if not aid:
+            return None
+        fans = g("fans", None)
+        if fans is None:
+            fans = g("author_fans", 0)
+        return (
+            _to_text(g("platform"), 24),
+            aid,
+            day,
+            now,
+            _to_text(g("nickname") or g("author_name"), 64),
+            _to_int(fans),
+            _to_text(source or g("source"), 32),
+        )
+    except Exception:                               # noqa: BLE001
+        return None
+
+
+def snap_post(post, source: str = "") -> int:
+    """记一条作品（单条场景的便捷入口）。"""
+    return snap_posts([post], source=source)
+
+
+def snap_author(author, source: str = "") -> int:
+    """记一个账号（单条场景的便捷入口）。"""
+    return snap_authors([author], source=source)
+
+
+# ------------------------------------------------------------------ 读取接口
+
+def post_trend(platform: str, post_id: str, days: int = 120) -> list[dict]:
+    """某条作品随时间的数据变化，按天升序。"""
+    since = _day_offset(-max(1, int(days)))
+    rows = _query(
+        "SELECT day, seen_ts, title, author_name, author_fans, digg, comment_cnt,"
+        " collect_cnt, share_cnt, play_cnt, url"
+        "  FROM post_snap WHERE platform=? AND post_id=? AND day>=?"
+        "  ORDER BY day ASC, seen_ts ASC",
+        (platform, post_id, since),
+    )
+    out: list[dict] = []
+    for day, ts, title, author, fans, digg, cmt, col, shr, play, url in rows:
+        digg, cmt, col, shr = _to_int(digg), _to_int(cmt), _to_int(col), _to_int(shr)
+        out.append({
+            "day": day, "ts": _to_int(ts), "title": title, "author": author,
+            "fans": _to_int(fans), "digg": digg, "comment": cmt, "collect": col,
+            "share": shr, "play": _to_int(play), "interact": digg + cmt + col + shr,
+            "url": url,
+        })
+    return out
+
+
+def author_trend(platform: str, author_id: str, days: int = 120) -> list[dict]:
+    """某账号的粉丝增长曲线。
+
+    两个来源合并（同一天以 author_snap 为准）：
+      1) author_snap —— 单独查过主页时的精确值；
+      2) post_snap   —— 挖作品时顺带带回来的 author_fans。
+    第二个来源很关键：**用户绝大多数时候只是在挖作品**，
+    若只认 author_snap，粉丝曲线会长期是空的。
+    """
+    since = _day_offset(-max(1, int(days)))
+    precise = {r[0]: r[1] for r in _query(
+        "SELECT day, fans FROM author_snap"
+        " WHERE platform=? AND author_id=? AND day>=? ORDER BY day, seen_ts",
+        (platform, author_id, since))}
+    coarse: dict[str, int] = {}
+    for day, fans in _query(
+            "SELECT day, MAX(author_fans) FROM post_snap"
+            " WHERE platform=? AND author_id=? AND author_fans>0 AND day>=?"
+            " GROUP BY day ORDER BY day",
+            (platform, author_id, since)):
+        coarse[day] = max(coarse.get(day, 0), _to_int(fans))
+
+    out: list[dict] = []
+    for day in sorted(set(precise) | set(coarse)):
+        if day in precise:
+            out.append({"day": day, "fans": _to_int(precise[day]), "exact": True})
+        else:
+            out.append({"day": day, "fans": coarse.get(day, 0), "exact": False})
+    # 补齐偶发的 0：粉丝数不会是 0（除非接口没给），沿用上一天的值
+    prev = 0
+    for row in out:
+        if row["fans"] <= 0:
+            row["fans"], row["exact"] = prev, False
+        else:
+            prev = row["fans"]
+    return out
+
+
+def tracked_authors(days: int = 365, platform: str = "") -> list[dict]:
+    """被记录过的账号清单（按最新粉丝数降序）。
+
+    「记录天数」取两个来源的**并集**：只算作者表会漏掉挖作品时顺带记下的天数，
+    用户会以为"我只记了 1 天"（自检里正是这一条先报了错）。
+    """
+    since = _day_offset(-max(1, int(days)))
+    where = " AND platform=? " if platform else ""
+    args = (platform,) if platform else ()
+
+    # ① 先把每个账号出现过的日期收全（作品快照 ∪ 作者快照）
+    day_sets: dict[tuple[str, str], set[str]] = {}
+    for plt, aid, day in _query(
+            "SELECT platform, author_id, day FROM post_snap"
+            " WHERE day>=? AND author_id<>'' " + where, (since,) + args):
+        day_sets.setdefault((plt, aid), set()).add(day)
+    for plt, aid, day in _query(
+            "SELECT platform, author_id, day FROM author_snap WHERE day>=? " + where,
+            (since,) + args):
+        day_sets.setdefault((plt, aid), set()).add(day)
+
+    # ② 作者表的记录（单独查过主页，资料最准，优先）
+    #    表列名是 nickname / fans（post_snap 才是 author_name / author_fans），
+    #    两处写混过一回 —— 症状是「查过主页的账号死活不在清单里」，且不报错。
+    out: list[dict] = []
+    for r in _query(
+            "SELECT platform, author_id, nickname, fans, MAX(day), COUNT(*), source"
+            "  FROM author_snap WHERE day>=? " + where +
+            "  GROUP BY platform, author_id", (since,) + args):
+        key = (r[0], r[1])
+        out.append({"platform": key[0], "author_id": key[1],
+                    "nickname": r[2] or "（未取名）", "fans": _to_int(r[3]),
+                    "last_day": r[4],
+                    "snap_days": len(day_sets.get(key) or ()) or _to_int(r[5]),
+                    "source": r[6] or ""})
+
+    # ③ 作品表补上「只挖过作品、没查过主页」的账号
+    seen = {(a["platform"], a["author_id"]) for a in out}
+    for r in _query(
+            "SELECT platform, author_id, author_name, author_fans, MAX(day), COUNT(*), source"
+            "  FROM post_snap WHERE day>=? AND author_id<>'' " + where +
+            "  GROUP BY platform, author_id", (since,) + args):
+        key = (r[0], r[1])
+        if key in seen:
+            continue
+        out.append({"platform": key[0], "author_id": key[1],
+                    "nickname": r[2] or "（未取名）", "fans": _to_int(r[3]),
+                    "last_day": r[4],
+                    "snap_days": len(day_sets.get(key) or ()) or _to_int(r[5]),
+                    "source": r[6] or ""})
+
+    out.sort(key=lambda a: a["fans"], reverse=True)
+    return out
+
+
+def author_posts(platform: str, author_id: str, days: int = 365,
+                 limit: int = 300) -> list[dict]:
+    """某账号被记录到的作品（每条作品取最新一天的数据）。"""
+    since = _day_offset(-max(1, int(days)))
+    rows = _query(
+        "SELECT platform, post_id, title, author_name, author_fans, digg, comment_cnt,"
+        " collect_cnt, share_cnt, play_cnt, url, MAX(day), COUNT(*), publish_ts"
+        "  FROM post_snap WHERE day>=? AND platform=? AND author_id=?"
+        "  GROUP BY platform, post_id ORDER BY digg DESC LIMIT ?",
+        (since, platform, author_id, int(limit)),
+    )
+    out: list[dict] = []
+    for r in rows:
+        digg, cmt, col, shr = _to_int(r[5]), _to_int(r[6]), _to_int(r[7]), _to_int(r[8])
+        out.append({
+            "platform": r[0], "post_id": r[1], "title": r[2], "author": r[3],
+            "fans": _to_int(r[4]), "digg": digg, "comment": cmt, "collect": col,
+            "share": shr, "play": _to_int(r[9]), "url": r[10], "last_day": r[11],
+            "snap_days": _to_int(r[12]), "publish_ts": _to_int(r[13]),
+            "interact": digg + cmt + col + shr,
+        })
+    return out
+
+
+_ORDER_COL = {"digg": "digg", "comment": "comment_cnt", "collect": "collect_cnt",
+              "share": "share_cnt", "play": "play_cnt", "fans": "author_fans"}
+
+
+def top_posts(days: int = 365, platform: str = "", order_by: str = "digg",
+              limit: int = 100) -> list[dict]:
+    """「所有被记录过的作品」里最强的一批 —— 其实就是可用的素材库。
+
+    它不是每次现挖，而是你积累了多久就有多久的存货，属于复用而非重新挖掘。
+    """
+    since = _day_offset(-max(1, int(days)))
+    col = _ORDER_COL.get(order_by, "digg")
+    where = " AND platform=? " if platform else ""
+    args = (platform,) if platform else ()
+    rows = _query(
+        "SELECT platform, post_id, title, author_name, author_fans, digg, comment_cnt,"
+        " collect_cnt, share_cnt, play_cnt, url, MAX(day), COUNT(*), publish_ts, author_id"
+        "  FROM post_snap WHERE day>=? " + where +
+        "  GROUP BY platform, post_id"
+        f"  ORDER BY {col} DESC LIMIT ?",
+        (since,) + args + (int(limit),),
+    )
+    out: list[dict] = []
+    for r in rows:
+        digg, cmt, colv, shr = _to_int(r[5]), _to_int(r[6]), _to_int(r[7]), _to_int(r[8])
+        out.append({
+            "platform": r[0], "post_id": r[1], "title": r[2], "author": r[3],
+            "fans": _to_int(r[4]), "digg": digg, "comment": cmt, "collect": colv,
+            "share": shr, "play": _to_int(r[9]), "url": r[10], "last_day": r[11],
+            "snap_days": _to_int(r[12]), "publish_ts": _to_int(r[13]),
+            "author_id": r[14], "interact": digg + cmt + colv + shr,
+        })
+    return out
+
+
+def stats() -> dict:
+    """库的规模概览（页面顶部几张卡的数据源）。
+
+    **必须读真实数据** —— 绝不允许给写死的示例数，那会让用户误以为已经记录了。
+    """
+    try:
+        rows = _query("SELECT COUNT(*) FROM post_snap")
+        uniq_posts = _query("SELECT COUNT(*) FROM (SELECT 1 FROM post_snap"
+                            " GROUP BY platform, post_id)")
+        # 账号数取两表并集：只查过主页（没挖过作品）的账号也算，
+        # 否则用户查了十几个号，卡片上还是显示 1，会以为没记上。
+        uniq_authors = _query(
+            "SELECT COUNT(*) FROM ("
+            "  SELECT platform, author_id FROM post_snap WHERE author_id<>''"
+            "  UNION"
+            "  SELECT platform, author_id FROM author_snap WHERE author_id<>''"
+            ")")
+        days = _query("SELECT COUNT(*) FROM (SELECT 1 FROM post_snap GROUP BY day)")
+        span = _query("SELECT MIN(day), MAX(day) FROM post_snap")
+        size = 0
+        try:
+            p = db_path()
+            if p.exists():
+                size = p.stat().st_size
+        except Exception:                           # noqa: BLE001
+            pass
+        first = span[0][0] if span and span[0] else ""
+        last = span[0][1] if span and span[0] else ""
+        return {
+            "rows": _to_int(rows[0][0]) if rows else 0,
+            "posts": _to_int(uniq_posts[0][0]) if uniq_posts else 0,
+            "authors": _to_int(uniq_authors[0][0]) if uniq_authors else 0,
+            "days": _to_int(days[0][0]) if days else 0,
+            "first_day": first or "", "last_day": last or "",
+            "size_bytes": size, "available": _HAS_SQLITE, "enabled": enabled(),
+        }
+    except Exception:                               # noqa: BLE001
+        return {"rows": 0, "posts": 0, "authors": 0, "days": 0, "first_day": "",
+                "last_day": "", "size_bytes": 0, "available": _HAS_SQLITE,
+                "enabled": enabled()}
+
+
+# ------------------------------------------------------------------ 维护接口
+
+def prune(days: int = 365) -> int:
+    """删掉 days 天之前的旧快照，返回删除行数。
+
+    默认留一年。老数据再有价值，也不值得让一个本机数据库无限膨胀。
+    """
+    if not _HAS_SQLITE:
+        return 0
+    since = _day_offset(-max(1, int(days)))
+    deleted = 0
+    with _LOCK:
+        try:
+            conn = _connect(str(db_path()))
+            for table in ("post_snap", "author_snap"):
+                cur = conn.execute(f"DELETE FROM {table} WHERE day<?", (since,))
+                deleted += cur.rowcount or 0
+                cur.close()
+            conn.commit()
+            conn.execute("VACUUM")
+            conn.commit()
+        except Exception:                           # noqa: BLE001
+            return 0
+    return deleted
+
+
+def clear_all() -> int:
+    """清空全部快照（页面「一键清理」用）。"""
+    if not _HAS_SQLITE:
+        return 0
+    deleted = 0
+    with _LOCK:
+        try:
+            conn = _connect(str(db_path()))
+            for table in ("post_snap", "author_snap"):
+                cur = conn.execute(f"DELETE FROM {table}")
+                deleted += cur.rowcount or 0
+                cur.close()
+            conn.commit()
+            conn.execute("VACUUM")
+            conn.commit()
+        except Exception:                           # noqa: BLE001
+            return 0
+    return deleted
+
+
+EXPORT_COLUMNS = ["平台", "最近记录", "标题", "作者", "作者粉丝", "点赞", "评论",
+                  "收藏", "分享", "播放", "观察天数", "作品链接"]
+
+
+def export_rows(items: Iterable[dict]) -> list[list]:
+    """把读取结果摊平成可导出的表格行（与其它页面导出格式保持一致）。"""
+    rows: list[list] = []
+    for it in items or []:
+        rows.append([
+            it.get("platform", ""), it.get("last_day", ""), it.get("title", ""),
+            it.get("author", ""), it.get("fans", 0), it.get("digg", 0),
+            it.get("comment", 0), it.get("collect", 0), it.get("share", 0),
+            it.get("play", 0), it.get("snap_days", 0), it.get("url", ""),
+        ])
+    return rows

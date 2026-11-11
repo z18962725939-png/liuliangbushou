@@ -1,0 +1,831 @@
+class VideoDownloader:
+    """Download no-watermark videos from Douyin."""
+
+    # 默认保存子目录（GUI 通常显式传 save_dir，这里只作兜底）
+    SAVE_SUBDIR = branding.VIDEO_SUBDIR
+
+    # 并行下载默认并发数。下载是大流量 IO，并发过高易被 CDN 限流，保守取 3。
+    DEFAULT_DOWNLOAD_WORKERS = 3
+
+    # Douyin CDN requires a realistic UA + referer, otherwise returns 403.
+    _DL_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.douyin.com/",
+        "Accept": "*/*",
+    }
+
+    # Headers for short-link resolution — mimic a mobile browser visiting Douyin
+    _SHORT_LINK_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+
+    def __init__(self, client: JustOneAPICollector, save_dir: Path | None = None,
+                 cookie: str = ""):
+        self.client = client
+        if save_dir is None:
+            desktop = Path.home() / "Desktop"
+            if not desktop.exists():
+                desktop = Path.home()
+            save_dir = desktop / self.SAVE_SUBDIR
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        # 抖音登录 Cookie（来自内置浏览器扫码登录）。
+        # 带上它解析分享链接/取视频页数据的成功率明显更高；
+        # 为空时行为与以前完全一致，不影响老用户。
+        self.cookie = (cookie or "").strip()
+
+        dl_headers = dict(self._DL_HEADERS)
+        resolve_headers = dict(self._SHORT_LINK_HEADERS)
+        if self.cookie:
+            dl_headers["Cookie"] = self.cookie
+            resolve_headers["Cookie"] = self.cookie
+
+        # Separate httpx client for file downloads — longer timeout, CDN headers.
+        self._dl_client = httpx.Client(
+            timeout=httpx.Timeout(300.0, connect=30.0),
+            follow_redirects=True,
+            headers=dl_headers,
+        )
+
+        # Separate httpx client for short-link resolution — browser-like headers
+        # follow_redirects=False: used when we need to capture intermediate redirects
+        self._resolver_client = httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=10.0),
+            follow_redirects=False,
+            headers=resolve_headers,
+        )
+
+        # Lightweight client that follows redirects automatically — much faster for
+        # the common case where we just want the final page content
+        self._redirect_client = httpx.Client(
+            timeout=httpx.Timeout(15.0, connect=10.0),
+            follow_redirects=True,
+            headers=resolve_headers,
+            max_redirects=8,
+        )
+
+    def set_cookie(self, cookie: str):
+        """运行时更新 Cookie（登录后无需重启程序）。"""
+        self.cookie = (cookie or "").strip()
+        for c in (self._dl_client, self._resolver_client, self._redirect_client):
+            try:
+                if self.cookie:
+                    c.headers["Cookie"] = self.cookie
+                elif "Cookie" in c.headers:
+                    del c.headers["Cookie"]
+            except Exception:               # noqa: BLE001
+                pass
+
+    def close(self):
+        self._dl_client.close()
+        try:
+            self._resolver_client.close()
+        except Exception:
+            pass
+        try:
+            self._redirect_client.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+
+    def resolve_share_link(self, share_text: str) -> VideoInfo | None:
+        """
+        Resolve a Douyin share link / short link / share text to a VideoInfo.
+
+        Accepts:
+          - Pure video ID (19-digit number)
+          - Full video URL (douyin.com/video/xxx, iesdouyin.com/share/video/xxx)
+          - Short link (v.douyin.com/xxxxx)
+          - Full share text with emoji/hashtags + embedded link
+
+        Resolution strategy (in order):
+          1. Extract URLs from the text
+          2. Extract video_id directly from URL
+          3. Follow short link redirects locally (httpx) to get real URL
+          4. Call share-link-resolution-v1 API as backup
+          5. Try video-details-v2 with extracted ID
+        """
+        result, _reason = self.resolve_share_link_with_reason(share_text)
+        return result
+
+    def resolve_share_link_with_reason(self, share_text: str) -> tuple[VideoInfo | None, str]:
+        """
+        Resolve a Douyin share link / short link / share text to a VideoInfo.
+
+        Performance-optimized resolution order (fastest first):
+          1. Pure video ID → API query (1 request)
+          2. URL contains video ID → API query (1 request)
+          3. Short link / video URL → fetch final page with auto-redirect + extract from HTML (~2-3 requests total)
+          4. API share-link-resolution + video-details (fallback)
+        """
+        if not share_text or not share_text.strip():
+            return None, "输入为空"
+
+        text = share_text.strip()
+        reasons = []
+
+        # Step 0: pure video ID (fastest)
+        if text.isdigit() and len(text) >= 15:
+            video = self.get_video_detail(text)
+            if video:
+                return video, ""
+            reasons.append(f"视频ID {text[:10]}... 查询无结果")
+
+        # Step 1: extract URLs from text
+        urls = self.extract_urls(text)
+        if not urls:
+            vid = self.extract_video_id(text)
+            if vid:
+                video = self.get_video_detail(vid)
+                if video:
+                    return video, ""
+                reasons.append(f"提取到视频ID {vid[:10]}... 但查询无结果")
+            else:
+                reasons.append("未从文本中识别出链接或视频ID")
+            return None, "；".join(reasons)
+
+        for i, url in enumerate(urls):
+            url_label = f"链接{i+1}" if len(urls) > 1 else "链接"
+
+            # Step 1.5: 短链（v.douyin.com/xxx）→ 本地跟随重定向判定真实类型
+            # 短链本身不含任何类型信息，可能是「视频」也可能是「博主主页」。
+            if VideoDownloader.is_short_link(url):
+                final = self.resolve_short_link(url)
+                info = VideoDownloader.parse_share_url(final)
+                if info["kind"] == "blogger":
+                    reasons.append(
+                        "这是【博主主页】链接而非单条视频，已跳过；"
+                        "请在「博主」下拉中选择该博主再下载其作品，或用「竞品体检」查看账号数据"
+                    )
+                    continue
+                if info["kind"] == "video":
+                    result = self.get_video_detail(info["aweme_id"])
+                    if result:
+                        return result, ""
+                    reasons.append(f"{url_label}已解析为视频ID {info['aweme_id'][:10]}… 但详情接口无结果")
+                    continue
+                if not final:
+                    reasons.append(f"{url_label}短链无法访问（网络不通或链接已失效）")
+                    continue
+                # 能打开但识别不出类型 → 继续走下面的通用流程
+
+            # Step 2: direct video_id from URL → API query (fast path, 1 request)
+            vid = self.extract_video_id(url)
+            if vid:
+                result = self.get_video_detail(vid)
+                if result:
+                    return result, ""
+                reasons.append(f"{url_label}含视频ID但API查询无结果")
+                # Don't continue — also try HTML extraction below for this same URL
+                # but mark it as already having tried the API path
+
+            # Step 3: short link or video page → fetch HTML and extract (fastest for short links)
+            is_short_link = ("v.douyin.com" in url or "iesdouyin.com" in url)
+            is_video_page = "douyin.com/video/" in url
+
+            if is_short_link or is_video_page:
+                try:
+                    # Use redirect client — follows all redirects automatically in one go
+                    page_resp = self._redirect_client.get(
+                        url,
+                        headers={
+                            "User-Agent": self._SHORT_LINK_HEADERS["User-Agent"],
+                            "Referer": "https://www.douyin.com/",
+                        },
+                    )
+                    if page_resp.status_code == 200:
+                        # Extract video info directly from page HTML
+                        video_from_html = self._extract_video_from_html(page_resp.text)
+                        if video_from_html and video_from_html.no_watermark_url:
+                            return video_from_html, ""
+                        elif video_from_html:
+                            reasons.append(f"页面提取到视频但无播放地址")
+                        else:
+                            reasons.append(f"页面未解析出视频数据")
+
+                        # If HTML extraction failed but we got a video ID from URL,
+                        # we already tried API above. Try extracting ID from page content.
+                        page_vid = self.extract_video_id(page_resp.text)
+                        if page_vid and page_vid != vid:
+                            result2 = self.get_video_detail(page_vid)
+                            if result2:
+                                return result2, ""
+                            reasons.append(f"页面ID查询无结果({page_vid[:10]}...)")
+                    else:
+                        reasons.append(f"页面HTTP {page_resp.status_code}")
+                except httpx.RequestError as e:
+                    reasons.append(f"网络请求失败({type(e).__name__})")
+
+            # Step 4: try API share-link-resolution (slower fallback)
+            if not is_video_page:
+                # Only try API if we haven't already extracted a video ID from the URL
+                try:
+                    resp = self.client.request(
+                        "douyin-tiktok-china", "share-link-resolution-v1", {"shareUrl": url}
+                    )
+                    if resp.success:
+                        resolved = resp.data
+                        resolved_url = ""
+                        resolved_id = ""
+
+                        if isinstance(resolved, dict):
+                            for key in ("url", "resolved_url", "location", "target_url",
+                                         "redirect_url", "share_url", "long_url"):
+                                v = resolved.get(key)
+                                if isinstance(v, str) and v:
+                                    resolved_url = v
+                                    break
+                            for key in ("aweme_id", "item_id", "video_id", "itemId", "awemeId"):
+                                v = resolved.get(key)
+                                if v and str(v).isdigit() and len(str(v)) >= 15:
+                                    resolved_id = str(v)
+                                    break
+                        elif isinstance(resolved, str):
+                            resolved_url = resolved
+
+                        if resolved_id:
+                            result = self.get_video_detail(resolved_id)
+                            if result:
+                                return result, ""
+                            reasons.append(f"API解析ID查询无结果")
+
+                        if resolved_url:
+                            vid2 = self.extract_video_id(resolved_url)
+                            if vid2:
+                                result = self.get_video_detail(vid2)
+                                if result:
+                                    return result, ""
+                                reasons.append(f"API URL出ID查询无结果")
+                            else:
+                                reasons.append(f"API返回URL但无视频ID")
+                    else:
+                        if getattr(self.client, "token_invalid", False):
+                            reasons.append(
+                                f"API Token 无效/未激活（{getattr(resp, 'message', '') or 'code=' + str(getattr(resp, 'code', '?'))}），"
+                                "请到「设置」页更新 Token"
+                            )
+                        else:
+                            reasons.append(f"API解析失败(code={getattr(resp, 'code', '?')})")
+                except Exception as e:
+                    reasons.append(f"API异常({type(e).__name__})")
+
+        # Step 5: final fallback — extract video_id from original text
+        vid = self.extract_video_id(text)
+        if vid and not any(vid[:10] in r for r in reasons):
+            result = self.get_video_detail(vid)
+            if result:
+                return result, ""
+            reasons.append(f"全文提取ID查询无结果({vid[:10]}...)")
+
+        return None, "；".join(reasons) if reasons else "未知原因"
+
+    @staticmethod
+    def _extract_sec_uid(text: str) -> str | None:
+        """Extract sec_uid (MS4wLj...) from text/URL."""
+        if not text:
+            return None
+        m = re.search(r"MS4wLj[A-Za-z0-9_\-]+", text)
+        return m.group(0) if m else None
+
+    def resolve_blogger_link(self, profile_text: str) -> BloggerInfo | None:
+        """
+        Resolve a Douyin blogger profile link / short link / share text to a BloggerInfo.
+
+        Accepts:
+          - Full profile URL (douyin.com/user/MS4wLjAB...)
+          - Short link
+          - Share text with embedded link
+
+        Tries:
+          1. Extract URLs from the text
+          2. Extract sec_uid directly from the URL
+          3. Call share-link-resolution-v1 to follow the redirect, then extract
+          4. Call user-profile-v3 with the extracted sec_uid to get full info
+        """
+        if not profile_text or not profile_text.strip():
+            return None
+
+        text = profile_text.strip()
+        sec_uid = ""
+
+        # Step 1: extract URLs from the text
+        urls = self.extract_urls(text)
+        candidates = urls if urls else [text]
+
+        for url in candidates:
+            # Step 2: direct sec_uid extraction
+            m = re.search(r"(?:user|profile)/([A-Za-z0-9_\-]+)", url)
+            if m and m.group(1).startswith("MS4wLj"):
+                sec_uid = m.group(1)
+                break
+
+            # Step 2.5: 短链本地跟随重定向（不消耗 API 额度，且 Token 失效时依然可用）
+            if not sec_uid and VideoDownloader.is_short_link(url):
+                final = self.resolve_short_link(url)
+                info = VideoDownloader.parse_share_url(final)
+                if info["kind"] == "blogger" and info["sec_uid"]:
+                    sec_uid = info["sec_uid"]
+                    break
+
+            # Step 3: resolve short link first (API 兜底)
+            if not sec_uid:
+                resp = self.client.request(
+                    "douyin-tiktok-china", "share-link-resolution-v1", {"shareUrl": url}
+                )
+                if resp.success:
+                    resolved = resp.data
+                    resolved_url = ""
+                    if isinstance(resolved, dict):
+                        for key in ("url", "resolved_url", "location", "target_url", "redirect_url"):
+                            v = resolved.get(key)
+                            if isinstance(v, str) and v:
+                                resolved_url = v
+                                break
+                    elif isinstance(resolved, str):
+                        resolved_url = resolved
+                    if resolved_url:
+                        m2 = re.search(r"(?:user|profile)/([A-Za-z0-9_\-]+)", resolved_url)
+                        if m2 and m2.group(1).startswith("MS4wLj"):
+                            sec_uid = m2.group(1)
+                            break
+
+        if not sec_uid:
+            # Fallback: try extracting sec_uid from original text directly
+            m = re.search(r"MS4wLj[A-Za-z0-9_\-]+", text)
+            if m:
+                sec_uid = m.group(0)
+
+        if not sec_uid:
+            return None
+
+        # Step 4: get full blogger info via profile API
+        resp = self.client.request(
+            "douyin-tiktok-china", "user-profile-v3", {"secUid": sec_uid}
+        )
+        if resp.success and isinstance(resp.data, dict):
+            user = resp.data.get("user", {}) or {}
+            nickname = user.get("nickname", "") or ""
+            avatar_obj = user.get("avatar_medium") or user.get("avatar_larger") or {}
+            avatar_urls = avatar_obj.get("url_list") or []
+            return BloggerInfo(
+                sec_uid=sec_uid,
+                nickname=nickname,
+                uid=str(user.get("uid", "") or ""),
+                follower_count=user.get("follower_count", 0) or 0,
+                avatar_url=avatar_urls[0] if avatar_urls else "",
+                signature=user.get("signature", "") or "",
+                platform="douyin",
+            )
+        # Minimal info if profile API fails
+        return BloggerInfo(
+            sec_uid=sec_uid, nickname=sec_uid[:16], uid="",
+            follower_count=0, avatar_url="", signature="", platform="douyin",
+        )
+
+    # -- 短链解析（本地，不依赖 API） --------------------------------------
+
+    @staticmethod
+    def is_short_link(url: str) -> bool:
+        """是否为需要跟随重定向才能判定类型的抖音短链。"""
+        u = (url or "").lower()
+        return any(h in u for h in (
+            "v.douyin.com", "v.iesdouyin.com", "www.iesdouyin.com/share/",
+        ))
+
+    def resolve_short_link(self, url: str) -> str:
+        """本地跟随短链重定向，返回最终 URL（不消耗 API 额度）。
+
+        失败返回空串。这是判定"视频链接 vs 博主主页链接"的唯一可靠方式，
+        因为 v.douyin.com/xxxx 短链本身不含任何类型信息。
+        """
+        if not url:
+            return ""
+        # 已经是长链，无需解析
+        if not self.is_short_link(url):
+            return url
+        try:
+            resp = self._redirect_client.get(
+                url,
+                headers={"Referer": "https://www.douyin.com/"},
+            )
+            final = str(resp.url or "")
+            return final if final and final != url else ""
+        except httpx.HTTPError:
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def parse_share_url(url: str) -> dict:
+        """从（已跟随重定向的）URL 中识别类型并提取 ID。
+
+        返回 {"kind": "video"|"blogger"|None, "sec_uid": str, "aweme_id": str}
+        """
+        u = url or ""
+        out = {"kind": None, "sec_uid": "", "aweme_id": ""}
+
+        # 博主主页：/share/user/<sec_uid>、/user/<sec_uid>、?sec_uid=xxx
+        m = re.search(r"(?:share/user|share/profile|user|profile)/(MS4wLj[A-Za-z0-9_\-]+)", u)
+        if m:
+            return {"kind": "blogger", "sec_uid": m.group(1), "aweme_id": ""}
+        m = re.search(r"[?&]sec_uid=(MS4wLj[A-Za-z0-9_\-]+)", u)
+        if m:
+            return {"kind": "blogger", "sec_uid": m.group(1), "aweme_id": ""}
+
+        # 视频：/share/video/<id>、/video/<id>、?modal_id=<id>
+        m = re.search(r"(?:share/video|video|note)/(\d{15,})", u)
+        if m:
+            return {"kind": "video", "sec_uid": "", "aweme_id": m.group(1)}
+        m = re.search(r"[?&](?:modal_id|aweme_id|item_id|vid)=(\d{15,})", u)
+        if m:
+            return {"kind": "video", "sec_uid": "", "aweme_id": m.group(1)}
+
+        return out
+
+    def classify_url_kind(self, url: str) -> str:
+        """classify_url 的便捷封装，直接返回 'video'|'blogger'|'unknown'。
+
+        供 classify_input(resolver=...) 使用。
+        """
+        return self.classify_url(url)[0]
+
+    def classify_url(self, url: str) -> tuple[str, str]:
+        """把单个 URL 判定为 ('video'|'blogger'|'unknown', 原始url)。
+
+        短链会先本地跟随重定向再判定；网络失败时按字面特征兜底。
+        """
+        kind = VideoDownloader.detect_input_type(url)
+        if kind == "blogger_link":
+            return "blogger", url
+        if kind == "video_link" and not VideoDownloader.is_short_link(url):
+            return "video", url
+        # 短链：必须解析重定向才能知道是主页还是视频
+        if VideoDownloader.is_short_link(url):
+            final = self.resolve_short_link(url)
+            info = VideoDownloader.parse_share_url(final)
+            if info["kind"] == "blogger":
+                return "blogger", url
+            if info["kind"] == "video":
+                return "video", url
+            # 解析不出 → 按视频处理（保持旧行为），但上层会给出明确失败原因
+            return "video", url
+        return ("video", url) if kind == "video_link" else ("unknown", url)
+
+    @staticmethod
+    def detect_input_type(text: str) -> str:
+        """
+        Detect what kind of input the user provided.
+        Accepts raw share text, pure URLs, nicknames, video IDs.
+
+        Returns: 'video_link', 'blogger_link', 'nickname'
+        """
+        t = text.strip()
+        if not t:
+            return "nickname"
+
+        # Extract URLs from text (handles share-text pastes)
+        urls = VideoDownloader.extract_urls(t)
+        check_text = urls[0] if urls else t
+
+        # Video link patterns
+        if any(p in check_text for p in ("douyin.com/video/", "iesdouyin.com/share/video",
+                                          "v.douyin.com", "douyin.com/root/share/")):
+            return "video_link"
+        if re.search(r"video/\d{15,}", check_text):
+            return "video_link"
+        # Blogger profile link patterns
+        if any(p in check_text for p in ("douyin.com/user/", "douyin.com/profile/",
+                                          "www.douyin.com/user/")):
+            return "blogger_link"
+        if re.search(r"(?:user|profile)/MS4wLj", check_text):
+            return "blogger_link"
+        # Short link (v.douyin.com/xxxxx) - most are video links, but some are blogger
+        # Default to video_link; resolve_share_link and resolve_blogger_link both try
+        # to extract what they can from short links.
+        if "v.douyin.com" in check_text:
+            return "video_link"
+        # Pure digits could be a video ID
+        if check_text.isdigit() and len(check_text) >= 15:
+            return "video_link"
+        # Contains sec_uid pattern → blogger
+        if re.search(r"MS4wLj[A-Za-z0-9_\-]+", t):
+            return "blogger_link"
+        # Otherwise treat as nickname
+        return "nickname"
+
+    @staticmethod
+    def classify_input(text: str, resolver=None) -> dict:
+        """
+        四合一智能识别：把任意输入拆分为 {videos, bloggers, texts} 三类。
+
+        - videos:   视频分享链接 / 纯数字视频ID（逐条解析为单个视频）
+        - bloggers: 博主主页链接 / 含 sec_uid 的文本（解析该博主并列出其视频）
+        - texts:    不含链接的纯文本（博主昵称 或 搜索关键词，交由上层二次判定）
+
+        支持多行混合输入（每行一个），也支持整段复制粘贴的分享文案。
+        返回的 videos / bloggers 已按出现顺序去重。
+
+        resolver: 可选回调 (url) -> 'video'|'blogger'|'unknown'。
+                  传入后，v.douyin.com 这类"无类型信息的短链"会先跟随重定向再判定，
+                  从而支持粘贴【博主主页短链】也能自动识别为博主。
+        """
+        lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+        videos: list[str] = []
+        bloggers: list[str] = []
+        texts: list[str] = []
+
+        def _kind(u: str) -> str:
+            if resolver is not None:
+                try:
+                    k = resolver(u)
+                    if k in ("video", "blogger", "unknown"):
+                        return k
+                except Exception:  # noqa: BLE001
+                    pass
+            k = VideoDownloader.detect_input_type(u)
+            if k == "blogger_link":
+                return "blogger"
+            if k == "video_link":
+                return "video"
+            return "unknown"
+
+        for line in lines:
+            urls = VideoDownloader.extract_urls(line)
+            if urls:
+                for u in urls:
+                    kind = _kind(u)
+                    if kind == "blogger":
+                        bloggers.append(u)
+                    else:
+                        # 视频链接 / 短链 / 未知链接统一按视频处理
+                        videos.append(u)
+                # 该行若夹带纯文本（如"快来看这个视频"），忽略之
+                continue
+
+            kind = VideoDownloader.detect_input_type(line)
+            if kind == "video_link":
+                videos.append(line)
+            elif kind == "blogger_link":
+                bloggers.append(line)
+            else:
+                texts.append(line)
+
+        def _dedup(seq: list[str]) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for x in seq:
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+
+        return {"videos": _dedup(videos), "bloggers": _dedup(bloggers), "texts": texts}
+
+    # ==================================================================
+    #  Workflow 3: Keyword search download
+    # ==================================================================
+
+    def search_videos(self, keyword: str, count: int = 20) -> list[VideoInfo]:
+        """Search Douyin videos by keyword. Returns up to `count` results."""
+        resp = self.client.request(
+            "douyin-tiktok-china", "video-search-v4",
+            {"keyword": keyword, "count": count},
+        )
+        if not resp.success or not isinstance(resp.data, dict):
+            return []
+        awemes: list[dict] = []
+
+        # 抖音搜索接口的实际返回结构：business_data[].data.aweme_info
+        # 注意 business_data 中混有 related_word_list（关联词卡片，type!=1）等非视频项，需按 aweme_info 过滤。
+        bd = resp.data.get("business_data")
+        if isinstance(bd, list):
+            for item in bd:
+                if not isinstance(item, dict):
+                    continue
+                d = item.get("data")
+                if not isinstance(d, dict):
+                    continue
+                aw = d.get("aweme_info") or d.get("aweme")
+                if isinstance(aw, dict) and aw.get("aweme_id"):
+                    awemes.append(aw)
+
+        # 兼容其它返回容器（若接口版本变化）
+        if not awemes:
+            for key in ("data", "aweme_list", "list", "items", "video_list"):
+                v = resp.data.get(key)
+                if isinstance(v, list):
+                    awemes = v
+                    break
+                if isinstance(v, dict):
+                    for sub_key in ("aweme_list", "list", "items", "video_list"):
+                        sv = v.get(sub_key)
+                        if isinstance(sv, list):
+                            awemes = sv
+                            break
+                    if awemes:
+                        break
+
+        videos = [self._aweme_to_video_info(a) for a in awemes if isinstance(a, dict)]
+        # 服务端不一定遵守 count，这里客户端再截断一次
+        return videos[:count] if count and count > 0 else videos
+
+    # ==================================================================
+    #  Download primitives
+    # ==================================================================
+
+    def download_video(
+        self,
+        video: VideoInfo,
+        subdir: str = "",
+        on_chunk: Callable[[int, int], None] | None = None,
+    ) -> tuple[Path | None, str]:
+        """
+        Download a single no-watermark video to disk.
+
+        Args:
+            video:        VideoInfo with a no_watermark_url.
+            subdir:       Optional subfolder under save_dir (e.g. blogger nickname).
+            on_chunk:     Callback(downloaded_bytes, total_bytes) for progress.
+
+        Returns (saved_path_or_None, error_message).
+        error_message is empty string on success.
+        """
+        if not video.no_watermark_url:
+            return None, "无可用下载链接（API未返回播放地址）"
+
+        save_dir = self.save_dir / subdir if subdir else self.save_dir
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return None, f"无法创建保存目录: {e}"
+
+        author = _safe_filename(video.author, 30) or "unknown"
+        desc = _safe_filename(video.desc, 50)
+        filename = f"{author}_{desc}_{video.video_id}.mp4"
+        save_path = save_dir / filename
+
+        # Skip if already downloaded
+        if save_path.exists() and save_path.stat().st_size > 0:
+            return save_path, ""
+
+        try:
+            with self._dl_client.stream("GET", video.no_watermark_url) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(save_path, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if on_chunk:
+                            on_chunk(downloaded, total)
+            # Verify file is not empty
+            if save_path.stat().st_size == 0:
+                save_path.unlink(missing_ok=True)
+                return None, "下载文件为空（0字节）"
+            return save_path, ""
+        except httpx.HTTPStatusError as e:
+            if save_path.exists():
+                try:
+                    save_path.unlink()
+                except OSError:
+                    pass
+            return None, f"HTTP错误 {e.response.status_code}"
+        except httpx.RequestError as e:
+            if save_path.exists():
+                try:
+                    save_path.unlink()
+                except OSError:
+                    pass
+            return None, f"网络错误: {type(e).__name__}"
+        except Exception as e:
+            if save_path.exists():
+                try:
+                    save_path.unlink()
+                except OSError:
+                    pass
+            return None, f"下载失败: {type(e).__name__}"
+
+    def download_videos(
+        self,
+        videos: list[VideoInfo],
+        subdir: str = "",
+        on_progress: Callable[[int, int, VideoInfo, Path | None, str], None] | None = None,
+        on_chunk: Callable[[VideoInfo, int, int], None] | None = None,
+        max_workers: int | None = None,
+    ) -> list[tuple[VideoInfo, Path | None, str]]:
+        """Download multiple videos concurrently.
+
+        Args:
+            videos: list of VideoInfo to download.
+            subdir: optional subfolder under save_dir.
+            on_progress: called after each video completes: (done_count, total, video, path, err).
+            on_chunk: called during download of each video: (video, downloaded_bytes, total_bytes).
+            max_workers: max parallel downloads. None → DEFAULT_DOWNLOAD_WORKERS.
+
+        Returns [(video, path_or_None, error_msg), ...] in the same order as *videos*.
+        error_msg is empty string on success.
+        """
+        total = len(videos)
+        if total == 0:
+            return []
+
+        workers = max_workers or self.DEFAULT_DOWNLOAD_WORKERS
+        workers = max(1, min(int(workers), total))
+
+        # 预分配结果槽位：各线程按自己的下标写入，无锁竞争且保持输入顺序
+        slots: list[tuple[VideoInfo, Path | None, str] | None] = [None] * total
+        done = [0]
+        lock = threading.Lock()
+
+        def worker(idx: int, v: VideoInfo):
+            # 每个视频绑定自己的 chunk 回调，避免并发下进度串台
+            chunk_cb = None
+            if on_chunk:
+                def chunk_cb(d, t, _v=v):
+                    on_chunk(_v, d, t)
+            try:
+                path, err = self.download_video(v, subdir=subdir, on_chunk=chunk_cb)
+            except Exception as e:
+                path, err = None, f"下载异常: {type(e).__name__}: {e}"
+            slots[idx] = (v, path, err)
+            with lock:
+                done[0] += 1
+                finished = done[0]
+            if on_progress:
+                on_progress(finished, total, v, path, err)
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dl") as ex:
+            for idx, v in enumerate(videos):
+                ex.submit(worker, idx, v)
+        # ThreadPoolExecutor.__exit__ 会阻塞等待全部下载结束
+        return [s for s in slots if s is not None]
+
+    # ==================================================================
+    #  Internal helpers
+    # ==================================================================
+
+    def _aweme_to_video_info(self, aweme: dict) -> VideoInfo:
+        """Build a VideoInfo from a raw aweme object."""
+        video = aweme.get("video", {}) or {}
+
+        # Try multiple sources for the no-watermark play URL
+        no_wm_url = ""
+        # Priority 1: play_addr.url_list (standard no-watermark CDN URL)
+        play_addr = video.get("play_addr", {}) or {}
+        urls = play_addr.get("url_list") or []
+        if urls:
+            no_wm_url = urls[0]
+
+        # Priority 2: bit_rate[].play_addr.url_list (higher quality variants)
+        if not no_wm_url:
+            bit_rates = video.get("bit_rate") or []
+            for br in bit_rates:
+                if isinstance(br, dict):
+                    bp = br.get("play_addr", {}) or {}
+                    bp_urls = bp.get("url_list") or []
+                    if bp_urls:
+                        no_wm_url = bp_urls[0]
+                        break
+
+        # Priority 3: play_addr_h264 / play_addr_265 etc.
+        if not no_wm_url:
+            for key in ("play_addr_h264", "play_addr_265", "play_addr_hdr", "download_addr"):
+                addr = video.get(key) or {}
+                if isinstance(addr, dict):
+                    u = addr.get("url_list") or []
+                    if u:
+                        no_wm_url = u[0]
+                        break
+
+        cover = video.get("cover", {}) or {}
+        cover_urls = cover.get("url_list") or []
+        cover_url = cover_urls[0] if cover_urls else ""
+
+        author = aweme.get("author", {}) or {}
+        stats = aweme.get("statistics", {}) or {}
+
+        return VideoInfo(
+            video_id=str(aweme.get("aweme_id", "")),
+            desc=aweme.get("desc", "") or "",
+            author=author.get("nickname", "") or "",
+            sec_uid=author.get("sec_uid", "") or "",
+            create_time=int(aweme.get("create_time", 0) or 0),
+            duration=int(video.get("duration", 0) or 0),
+            digg_count=int(stats.get("digg_count", 0) or 0),
+            cover_url=cover_url,
+            no_watermark_url=no_wm_url,
+            share_url=aweme.get("share_url", "") or "",
+            platform="douyin",
+        )

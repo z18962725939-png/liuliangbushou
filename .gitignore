@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+venv/
+.venv/
+env/
+
+# Cache
+.justoneapi_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Export outputs
+results.json
+results.csv
+results.xlsx
+
+# ---------------------------------------------------------------
+#  ★ 授权私钥：一旦泄露，别人就能自己造授权码。绝对不能提交 / 不能分发。
+#    （产品里只放公钥 licensing.LICENSE_PUBLIC_KEY_HEX，那个可以公开）
+# ---------------------------------------------------------------
+tools/license_private.key
+tools/.token_seed
+*.key
+
+# ---------------------------------------------------------------
+#  ★ 云存储密钥：腾讯云 COS 的 SecretId/SecretKey，泄露会被人刷流量。
+#    （程序里不需要它，只有你本地发版脚本用）
+# ---------------------------------------------------------------
+tools/cos_config.json
+# ★ .bak 是子账号降权时自动备份的「主账号密钥」，权限最大，必须一起忽略
+tools/cos_config.json.bak
+tools/*.bak
+
+# 打包相关：安装包产物、下载的第三方安装器、自动生成的 .iss
+installer_output/
+_tools/
+installer/*.iss
+# 注意：installer/languages/ChineseSimplified.isl 要提交（官方版不自带中文）
+
+# 发卡工具（build_keygen.py）的打包中间产物。
+# ★ tools/_keygen_stamp.json 不忽略 —— 它记录「桌面 exe 对应哪个功能位清单」，
+#   发版流程靠它判断发卡工具是否跟得上新功能，必须跟着仓库走。
+tools/_keygen_build/
+tools/_keygen_dist/
+
+# ---------------------------------------------------------------
+# 2026-11-11 首次 git init 补充：旧构建、素材、临时脚本、日志
+# ---------------------------------------------------------------
+/dist_*/
+/build_*/
+/build_free/
+/_archive/
+/_tmp_shots/
+/_pre_*/
+/tools/_pre_*/
+/_douyin_live_recorder_src/
+tcvenv/
+
+# 大体积素材（官网配图/音频/宣传图另行管理，不入库）
+/assets/
+/官网素材/
+/宣传素材/
+*.mp3
+*.mp4
+*.flac
+*.exe
+*.msi
+*.zip
+*.7z
+*.log
+
+# 根目录的一次性探针 / 诊断脚本
+# ★ 全部以 / 开头：tools/ 下的 _validate_*.py / _probe_*.py 是发版门禁，必须入库
+/_diag_*.py
+/_probe_*.py
+/_smoke_*.py
+/_test_*.py
+/_hello_*.py
+/_tmp_*.py
+/_validate_*.py
+/_verify_*.py
+/_dlr_*.py
+/_cp_*.py
+/_fix_*.py
+/_gen_*.py
+
+*.bak
+*.bak.*
+*.tmp
+
+# 运行时数据与本地工具状态（含登录态，绝不入库）
+/bot/.data/
+/.edgeone/
+/.workbuddy/

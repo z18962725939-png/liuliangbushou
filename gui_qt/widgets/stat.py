@@ -1,0 +1,1215 @@
+"""轻量可视化组件：指标卡、额度条、条形榜、折线趋势图、功能卡片。
+
+★ 为什么自己画而不引图表库（matplotlib / PyQtGraph）：
+  1. 这是打包成 37 MB 安装包的桌面软件，多一个绘图库体积和启动时间都涨一截；
+  2. 这里要的只是「一眼看出多少、谁最高」——几个矩形条就够了，
+     引一套坐标/刻度/图例系统进来是拿牛刀杀鸡，还会带来版本兼容风险。
+
+组件清单：
+  StatCard   指标卡：大数字 + 标题 + 副说明（授权状态、剩余额度…）
+  UsageBar   额度进度条：已用 / 总量，带颜色分级（充足→紧张→用完）
+  TopBars    横向条形榜：谁的数据最高，一眼排出来（爆款榜 / 作者榜）
+  TrendChart 折线趋势图：按天看涨跌（点赞曲线 / 粉丝增长）
+  ActionCard 功能大卡片：图标 + 名称 + 一句话说明，点击进入
+
+全部跟随浅色 / 深色主题，颜色集中在本文件顶部的调色板里。
+"""
+from __future__ import annotations
+
+import re
+
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPainterPath,
+                           QPen, QPolygonF, QRadialGradient)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+
+from .motion import RatioAnimation, SmoothValue, count_up, fade_in, mix
+from ..theme import app_font_family
+
+# ---------------------------------------------------------------- 调色板
+#
+# ★ 2026-10-17 品牌改版：这些自绘组件**不读 QSS**（自己 paintEvent 画），
+#   所以每次动 QSS 的品牌色都必须同步这里 —— 漏了就出现「半天蓝色 + 半天紫色」
+#   的撕裂感，而且因为不报错，往往到截图才发现。
+#
+#   角色分工见 theme.py 顶部：墨=结构、柠檬=能量。这里多一个规则：
+#   图表里第一条序列用结构色（强调主指标），其余用区分色。
+_LIGHT = {
+    "canvas": "#F6F7F9",
+    "card": "#FFFFFF",
+    "card_hover": "#F2F3F5",
+    "border": "#E6E8EC",
+    "border_hover": "#C9CED6",
+    "title": "#8B93A1",          # 小标签（11px，拉开字距）
+    "label": "#5B6472",          # 行标题
+    "value": "#0B0E14",
+    "sub": "#8B93A1",
+    "accent": "#0B0E14",
+    "acid": "#C8F751",           # 能量色（badge / 激活）
+    "track": "#EDEFF3",          # 槽：条形榜底、进度槽
+    "icon_bg": "#F2F3F5",
+    "ok": "#0F9960",
+    "warn": "#C2740A",
+    "bad": "#C42B2B",
+    "bar": "#0B0E14",
+}
+
+_DARK = {
+    "canvas": "#0B0E14",
+    # ★ 2026-10-17 三次改版：跟 dark.qss 对齐（面板抬到 #12171F）。
+    #   这两处必须同步 —— 自绘组件不读 QSS，差一个色值就会出现
+    #   「QSS 的面板是新的、自绘的卡片还是旧的」的拼接感，而且不会报错。
+    "card": "#12171F",
+    "card_hover": "#1A212B",
+    "border": "#232B36",
+    "border_hover": "#2E3846",
+    "title": "#6A7280",
+    "label": "#C7CEDA",
+    "value": "#EDF0F4",
+    "sub": "#6A7280",
+    "accent": "#C8F751",
+    "acid": "#C8F751",
+    "track": "#1C2430",
+    "icon_bg": "#1A212B",
+    "ok": "#34D399",
+    "warn": "#FBBF24",
+    "bad": "#F87171",
+    "bar": "#C8F751",
+}
+
+
+def palette(mode: str = "light") -> dict:
+    """取主题配色。mode 取 'light' / 'dark'，未知值一律按浅色处理。"""
+    return _DARK if mode == "dark" else _LIGHT
+
+
+# 折线图的序列颜色：第 1 条必须是该主题的结构色（强调主指标），
+# 后续各条保证在两种主题下都分得清，且与柠檬/墨都不撞色。
+_LINE_COLORS = {
+    "light": ["#0B0E14", "#0891B2", "#C2410C", "#7C3AED", "#B45309", "#BE185D"],
+    "dark": ["#C8F751", "#22D3EE", "#FB923C", "#A78BFA", "#FBBF24", "#F472B6"],
+}
+
+
+def ui_font(size: int, weight=QFont.Weight.Normal) -> QFont:
+    """界面正文/标签字体。
+
+    ★ 为什么不写死某个字体名
+      自绘组件不读 QSS（见本文件顶部说明），所以换字体的事必须这里也走一遍。
+      统一从 theme.app_font_family() 取：注册成功就是随包发出的思源，
+      资源缺失自动回退雅黑 —— 自绘组件不会出现豆腐块。
+    """
+    f = QFont(app_font_family(), size, weight)
+    return f
+
+
+def _num_font(size: int, weight=QFont.Weight.Normal) -> QFont:
+    """数字字体：统一走品牌字体。
+
+    ★ 2026-10-17 二次改版推翻了原来的做法
+      旧版为了让数字等宽，把 Consolas 排在第一位（中文自动回退）。结果"128"
+      是 Consolas、"不限量"是雅黑 —— 同一张卡里两种字形，一眼就看出不是
+      一个产品的东西，这也是「字体不好看」的一部分。
+      现在统一用品牌字体（MiSans 的数字本来就偏几何、比 Consolas 干净），
+      防抖动交给「等宽栅格 + 左对齐」：格子宽度固定，宽度抖动只落在右边缘。
+    """
+    return QFont(app_font_family(), size, weight)
+
+
+def _fmt_num(n) -> str:
+    """把数字显示成人能一眼读出的形式：12345 → 1.2万。
+
+    表格里塞 6 位数字没人看，'1.2万' 才是中文用户扫一眼就懂的量级。
+    """
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if v >= 100_000_000:
+        return f"{v / 100_000_000:.1f}亿"
+    if v >= 10_000:
+        return f"{v / 10_000:.1f}万"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}千"
+    return str(int(v)) if v == int(v) else f"{v:.1f}"
+
+
+# ---------------------------------------------------------------- 指标卡
+
+class StatCard(QFrame):
+    """一个指标一格：标题（小标签） + 数值（大字） + 副说明。
+
+    ★ 2026-10-17 二次改版：从「一张独立的卡」改成「面板里的一个数据格」
+      改版前三张指标卡各自带白底 + 边框 + 圆角，和下面的功能卡、步骤卡长得
+      一模一样 —— 一屏九张卡，客户看不出哪块更重要，只觉得"堆得乱"。
+      现在它**没有自己的底色和边框**：三格并排装进一块面板，格与格之间用
+      1px 竖线分，视觉上是一块「状态条」。这是苹果系统设置的 inset 分组做法。
+    """
+
+    def __init__(self, title: str, value: str = "—", sub: str = "",
+                 tone: str = "normal", mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._tone = tone
+        self.setObjectName("StatCard")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumHeight(78)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.title_lab = QLabel(title)
+        self.title_lab.setObjectName("MetricTitle")
+        self.value_lab = QLabel(value)
+        self.value_lab.setObjectName("MetricValue")
+        self.value_lab.setFont(_num_font(26, QFont.Weight.DemiBold))
+        self.sub_lab = QLabel(sub)
+        self.sub_lab.setObjectName("MetricSub")
+        self.sub_lab.setWordWrap(True)
+        lay.addWidget(self.title_lab)
+        lay.addWidget(self.value_lab)
+        lay.addWidget(self.sub_lab)
+        lay.addStretch()
+        self.apply_theme(mode)
+
+    def set_value(self, value: str, sub: str = "", tone: str | None = None):
+        changed = self.value_lab.text() != str(value)
+        if changed:
+            # 数字滚到新值（"128" → "96" 能看出掉了多少）；
+            # 非数字（"不限量"、"已激活"）count_up 会自己退回直接换文本，
+            # 这种情况再补一个淡入，保证"变了"这件事仍被看见。
+            if not count_up(self.value_lab, str(value), duration=300):
+                self.value_lab.setText(str(value))
+                fade_in(self.value_lab, duration=160)
+        if sub is not None:
+            self.sub_lab.setText(str(sub))
+        if tone is not None:
+            self._tone = tone
+        self.apply_theme(self._mode)
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        p = palette(mode)
+        tone_color = {"ok": p["ok"], "warn": p["warn"], "bad": p["bad"]}.get(
+            self._tone, p["value"])
+        # ★ 空值占位符要降级：破折号在 26px/600 下渲染成一条粗黑杠，
+        #   在「还没抓取」的空态里看着像界面画坏了（截图复核才发现）。
+        #   占位符 → 细一档、灰一档，语义正好是"还没有数据"。
+        placeholder = str(self.value_lab.text()).strip() in ("—", "-", "")
+        size = 20 if placeholder else 26
+        color = p["sub"] if placeholder else tone_color
+        weight = QFont.Weight.Normal if placeholder else QFont.Weight.DemiBold
+        # 自身完全透明：底色由外层 #Panel 提供（见 home_page）
+        self.setStyleSheet("#StatCard{background:transparent;border:none;}")
+        # 小标签：12px + 轻微拉开字距（topic 感），颜色压到最弱一级
+        # ★ 换成圆体后：字号 11→12（圆弧在 11px 下会被压成模糊），
+        #   字距 0.6→0.3（圆体本身偏宽，再拉 0.6 就散了）
+        self.title_lab.setStyleSheet(
+            f"color:{p['title']};font-size:12px;font-weight:600;"
+            f"letter-spacing:0.3px;background:transparent;")
+        self.value_lab.setFont(_num_font(size, weight))
+        self.value_lab.setStyleSheet(
+            f"color:{color};font-size:{size}px;font-weight:{'600' if not placeholder else '400'};"
+            f"letter-spacing:-0.6px;background:transparent;")
+        self.sub_lab.setStyleSheet(
+            f"color:{p['sub']};font-size:12px;background:transparent;")
+
+
+# ---------------------------------------------------------------- 额度条
+
+class UsageBar(QWidget):
+    """已用 / 总量的横条。颜色随占用率变：绿 → 黄 → 红。
+
+    额度是这个软件里最容易引发客诉的东西（"怎么用着用着就没了"），
+    所以必须让它常驻可见，而不是等超限时才弹一句冷冰冰的报错。
+    """
+
+    def __init__(self, mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._used = 0
+        self._limit = 0
+        self._unlimited = False
+        self._label = ""
+        self._note = ""
+        # 额度条从 0 「涨」到实际比例：数字变化是客户最在意的事，
+        # 直接跳到终值看不出「变了」，涨一下才知道刚才发生了什么。
+        self._anim = RatioAnimation(self, duration=320)
+        self._target = 0.0
+        self._played = False
+        self.setFixedHeight(42)
+        self.setMinimumWidth(180)
+
+    def set_usage(self, used: int, limit: int, unlimited: bool = False,
+                  label: str = "", note: str = ""):
+        """note：右侧数值位的自定义文案（免费版这类"没有额度概念"的场景用）。"""
+        self._used = max(0, int(used))
+        self._limit = int(limit)
+        self._unlimited = bool(unlimited)
+        self._label = label
+        self._note = note
+        self._target = self._target_ratio()
+        self._anim.to(self._target)
+        self.update()
+
+    def _target_ratio(self) -> float:
+        if self._unlimited:
+            return 0.0                      # 没有上限就没有"进度"，只画轨道
+        if self._limit > 0:
+            return min(1.0, self._used / self._limit)
+        return 1.0                          # 没额度（=0）：直接画满并标红
+
+    def showEvent(self, e):                                  # noqa: N802
+        """首次真正显示时补一次增长动画。
+
+        构造阶段就会 set_usage（页面 __init__ 里 refresh），那时控件还没上屏，
+        动画等于白跑 —— 客户第一眼看到的仍是"已经满了"的静态条。
+        """
+        super().showEvent(e)
+        if not self._played and self._target > 0:
+            self._played = True
+            self._anim.reset(0.0)
+            self._anim.to(self._target)
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        self.update()
+
+    def paintEvent(self, _e):                                # noqa: N802
+        p = palette(self._mode)
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        bar_h = 10
+        bar_y = (h - bar_h) // 2 - 4
+
+        ratio = self._anim.value
+        # 正常额度用结构色（浅色墨 / 深色柠檬），只有快用完才转琥珀，用光才转红。
+        # 改版前 60% 以下一律绿色：客户一进首页看到一条绿条，颜色本身已经把
+        # 三张卡的主次抢走了，而且"绿=一切正常"等于没说。
+        if self._unlimited:
+            color = QColor(p["bar"])
+        elif self._limit > 0:
+            color = QColor(p["bar"] if ratio < 0.8 else
+                           p["warn"] if ratio < 0.95 else p["bad"])
+        else:
+            color = QColor(p["bad"])
+
+        # 轨道
+        q.setPen(Qt.PenStyle.NoPen)
+        q.setBrush(QColor(p["track"]))
+        q.drawRoundedRect(QRectF(0, bar_y, w, bar_h), 5, 5)
+        # 已用
+        q.setBrush(color)
+        q.drawRoundedRect(QRectF(0, bar_y, max(6, w * ratio), bar_h), 5, 5)
+
+        # 文字
+        if self._unlimited:
+            text = f"{self._label} 不限量" if self._label else "不限量"
+        elif self._limit > 0:
+            text = f"{self._label} 已用 {self._used} / {self._limit}" if self._label \
+                else f"已用 {self._used} / {self._limit}"
+            text += f"　剩 {max(0, self._limit - self._used)} 次"
+        else:
+            text = f"{self._label} 今日额度为 0" if self._label else "今日额度为 0"
+        q.setPen(QPen(QColor(p["title"])))
+        f = ui_font(10)
+        q.setFont(f)
+        q.drawText(QRectF(0, bar_y + bar_h + 2, w, h - bar_y - bar_h),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        q.end()
+
+
+# ---------------------------------------------------------------- 条形榜
+
+class TopBars(QWidget):
+    """横向条形榜：标题 + 条 + 数值，按值从高到低排。
+
+    用来回答"这批结果里谁最猛"——表格要逐行比数字，条形图扫一眼就有答案。
+    """
+
+    def __init__(self, mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._items: list[tuple[str, float, str]] = []   # (标签, 值, 右侧文字)
+        self._unit = ""
+        self.setMinimumHeight(24)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    def set_items(self, items, unit: str = ""):
+        """items: [(标签, 数值, 右侧说明文字)]，value 用于算条长。"""
+        self._items = [(str(a), float(b), str(c)) for a, b, c in items]
+        self._unit = unit
+        self.setFixedHeight(max(24, 26 * max(1, len(self._items)) + 6))
+        self.update()
+
+    def clear(self):
+        self._items = []
+        self.setFixedHeight(24)
+        self.update()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        self.update()
+
+    def paintEvent(self, _e):                                # noqa: N802
+        p = palette(self._mode)
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        q.setPen(Qt.PenStyle.NoPen)
+        w = self.width()
+        if not self._items:
+            q.setPen(QPen(QColor(p["sub"])))
+            q.setFont(ui_font(10))
+            q.drawText(QRectF(0, 0, w, 24),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       "跑一次就会有图")
+            q.end()
+            return
+
+        top = max(v for _l, v, _t in self._items) or 1.0
+        label_w = min(190, int(w * 0.42))
+        value_w = 78
+        bar_x = label_w + 8
+        bar_max = max(30, w - label_w - value_w - 16)
+
+        f = ui_font(10)
+        q.setFont(f)
+        row_h = 26
+        for i, (label, value, right) in enumerate(self._items):
+            y = i * row_h
+            # 标题（过长截断）
+            q.setPen(QPen(QColor(p["value"])))
+            elided = label if len(label) <= 18 else label[:17] + "…"
+            q.drawText(QRectF(0, y, label_w, row_h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       elided)
+            # 先铺轨道底，再叠实际条（顺序反了会把条盖掉）
+            bw = max(4, bar_max * (value / top))
+            q.setBrush(QColor(p["track"]))
+            q.drawRoundedRect(QRectF(bar_x, y + row_h / 2 - 5, bar_max, 10), 5, 5)
+            q.setBrush(QColor(p["bar"]))
+            q.drawRoundedRect(QRectF(bar_x, y + row_h / 2 - 5, bw, 10), 5, 5)
+            # 右侧数值
+            q.setPen(QPen(QColor(p["title"])))
+            q.drawText(QRectF(bar_x + bar_max + 8, y, value_w, row_h),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       right or _fmt_num(value))
+        q.end()
+
+
+# ---------------------------------------------------------------- 折线趋势图
+
+class TrendChart(QWidget):
+    """折线趋势图：横轴是日期，纵轴是数值，支持多条线同屏对比。
+
+    它存在的唯一目的就是回答「涨了还是跌了」—— 这正是本地历史库的用处。
+
+    ★ 诚实原则：不足 2 个数据点时不画任何坡度。
+      只有一天的数据却画出一条线，那走势是编出来的，会让人误以为在增长。
+      宁可明说"多抓几次"，也不给一条假曲线。
+    """
+
+    def __init__(self, mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._series: dict[str, list[tuple[str, float]]] = {}
+        self._unit = ""
+        self.setMinimumHeight(168)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_series(self, series, unit: str = ""):
+        """series: {序列名: [(横轴标签, 数值), ...]}，横轴按出现顺序排列。"""
+        clean: dict[str, list[tuple[str, float]]] = {}
+        for name, pts in (series or {}).items():
+            try:
+                got = [(str(a), float(b)) for a, b in pts]
+            except (TypeError, ValueError):
+                got = []
+            if got:
+                clean[str(name)] = got
+        self._series = clean
+        self._unit = unit
+        self.update()
+
+    def clear(self):
+        self._series = {}
+        self.update()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        self.update()
+
+    def paintEvent(self, _e):                                # noqa: N802
+        p = palette(self._mode)
+        lines = _LINE_COLORS["dark" if self._mode == "dark" else "light"]
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        pad_l, pad_r, pad_t, pad_b = 52, 14, 26, 22
+        pw = max(10, w - pad_l - pad_r)
+        ph = max(10, h - pad_t - pad_b)
+        f = ui_font(9)
+        q.setFont(f)
+
+        def empty(text: str):
+            q.setPen(QPen(QColor(p["sub"])))
+            q.setFont(ui_font(10))
+            q.drawText(QRectF(0, 0, w, h),
+                       Qt.AlignmentFlag.AlignCenter, text)
+            q.end()
+
+        if not self._series:
+            empty("还没有记录\n去挖一次选题或关键词，数据会自动存到这里")
+            return
+
+        first_name = next(iter(self._series))
+        xs = [a for a, _ in self._series[first_name]]
+        if len(xs) < 2:
+            empty("只记录了 1 天\n同一个账号隔几天再抓一次，才看得出涨跌")
+            return
+
+        values = [v for pts in self._series.values() for _a, v in pts]
+        top = max(values)
+        lo = min(min(values), 0)
+        span = max(1.0, top - lo)
+        top_nice = (top + span * 0.12) or 1.0
+
+        def px(i: int) -> float:
+            return pad_l + pw * (i / (len(xs) - 1))
+
+        def py(v: float) -> float:
+            return pad_t + ph * (1 - (v - lo) / (top_nice - lo))
+
+        # 网格 + 纵轴刻度（4 条横线）
+        for k in range(4):
+            v = lo + (top_nice - lo) * k / 3
+            y = py(v)
+            q.setPen(QPen(QColor(p["border"])))
+            q.drawLine(pad_l, y, pad_l + pw, y)
+            q.setPen(QPen(QColor(p["sub"])))
+            q.drawText(QRectF(0, y - 8, pad_l - 6, 16),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       _fmt_num(v))
+
+        # 各条折线
+        for i, (name, pts) in enumerate(self._series.items()):
+            color = QColor(lines[i % len(lines)])
+            pts_y = [(px(min(j, len(xs) - 1)), py(v)) for j, (_a, v) in enumerate(pts)]
+            q.setPen(QPen(color, 2.0))
+            for k in range(1, len(pts_y)):
+                x0, y0 = pts_y[k - 1]
+                x1, y1 = pts_y[k]
+                q.drawLine(x0, y0, x1, y1)
+            q.setBrush(color)
+            q.setPen(Qt.PenStyle.NoPen)
+            for k, (x, y) in enumerate(pts_y):
+                r = 4.0 if k == len(pts_y) - 1 else 2.5
+                q.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
+
+        # 横轴标签：最多 4 个（首、中、尾）
+        q.setPen(QPen(QColor(p["sub"])))
+        picks = [0, len(xs) // 2, len(xs) - 1] if len(xs) < 5 else \
+                [0, len(xs) // 3, len(xs) * 2 // 3, len(xs) - 1]
+        for idx in picks:
+            x = px(idx)
+            # ★ 2026-10-27：标签框必须夹在控件内。绘图区的右边界就是 x 轴末端，
+            #   原来按 x-34 起画、宽 68 会有一半伸到控件外面 —— 最后一个日期
+            #   被卡片边缘切掉半截（"10-25" 显示成 "10-2"）。截图里一直有，
+            #   只是没人把那一列当 bug 看。
+            lx = min(max(0, x - 34), max(0, w - 68))
+            q.drawText(QRectF(lx, pad_t + ph + 2, 68, 16),
+                       Qt.AlignmentFlag.AlignCenter, xs[idx][5:])
+
+        # 顶部图例：色块 + 名称 + 最新值（写成"点赞 6300"比只写"点赞"有用得多）
+        lx = pad_l
+        for i, (name, pts) in enumerate(self._series.items()):
+            color = QColor(lines[i % len(lines)])
+            text = f"{name} {_fmt_num(pts[-1][1])}"
+            tw = q.fontMetrics().horizontalAdvance(text) + 22
+            q.setBrush(color)
+            q.setPen(Qt.PenStyle.NoPen)
+            q.drawRoundedRect(QRectF(lx, 4, 10, 10), 3, 3)
+            q.setPen(QPen(QColor(p["title"])))
+            q.drawText(QRectF(lx + 14, 0, tw, 18),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+            lx += tw + 6
+
+        # 多条线量级差太多时，小数值那条会被压成一条平线 —— 直接说出来，
+        # 免得用户以为"评论量一直没动"。宁可提示，不做拉伸美化的假图。
+        series_max = [max(v for _a, v in pts) for pts in self._series.values()]
+        if len(series_max) > 1 and max(series_max) > min(series_max) * 15:
+            q.setPen(QPen(QColor(p["warn"])))
+            q.drawText(QRectF(pad_l, pad_t + ph - 16, pw, 16),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       "各项量级相差较大，建议分开一项一项看")
+        q.end()
+
+
+# ---------------------------------------------------------------- 功能卡片
+
+class ActionCard(QFrame):
+    """可点击的功能大卡片：图标 + 名称 + 一句话说明。
+
+    工作台的主力。相比导航里一排纯文字按钮，卡片能说清"这个功能是干嘛的"，
+    新客户不用点进去试也能判断该点哪个。
+    """
+
+    clicked = Signal()
+
+    def __init__(self, icon, title: str, desc: str, mode: str = "light",
+                 badge: str = "", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._pressed = False
+        # 悬浮态用平滑插值 + 自绘，不用 QSS 的 :hover ——
+        # QSS 悬停是瞬变的，白卡"闪"一下变灰白，看着像掉帧。
+        self._hover_s = SmoothValue(self, duration=150,
+                                    on_change=lambda _v: self.update())
+        self.setObjectName("ActionCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(96)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(14)
+
+        self.icon_lab = QLabel()
+        self.icon_lab.setFixedSize(40, 40)
+        self.icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if icon is not None:
+            # icon 传 QIcon = 图标；传字符串 = 用文字当图标（流程步骤的序号这么用）
+            if isinstance(icon, str):
+                self.icon_lab.setText(icon)
+                self.icon_lab.setFont(ui_font(17, QFont.Weight.Bold))
+            else:
+                self.icon_lab.setPixmap(icon.pixmap(28, 28))
+        else:
+            self.icon_lab.setVisible(False)
+        lay.addWidget(self.icon_lab)
+
+        txt = QVBoxLayout()
+        txt.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.title_lab = QLabel(title)
+        # 15px：改版前卡片标题和下面正文同为 13px，标题直接被淹没
+        self.title_lab.setFont(ui_font(15, QFont.Weight.DemiBold))
+        head.addWidget(self.title_lab)
+        self.badge_lab = QLabel(badge)
+        # ★ 空徽标必须隐藏：badge 现在带 padding + 背景（柠檬胶囊），
+        #   空文本的 QLabel 仍占 padding 的宽高 —— 不隐藏就会在每个卡片标题
+        #   右边冒出一个没有字的小色块。2026-10-17 改版时踩到，截图才发现。
+        self.badge_lab.setVisible(bool(badge))
+        head.addWidget(self.badge_lab)
+        head.addStretch()
+        txt.addLayout(head)
+        self.desc_lab = QLabel(desc)
+        self.desc_lab.setWordWrap(True)
+        txt.addWidget(self.desc_lab)
+        txt.addStretch()
+        lay.addLayout(txt, 1)
+        self.apply_theme(mode)
+
+    def set_badge(self, text: str):
+        self.badge_lab.setText(text)
+        self.badge_lab.setVisible(bool(text))
+
+    def set_icon(self, icon):
+        """换图标（主题切换时图标颜色要跟着变，pixmap 不会自动变色）。"""
+        if icon is not None:
+            self.icon_lab.setPixmap(icon.pixmap(28, 28))
+
+    def mousePressEvent(self, e):                            # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            self.update()
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):                          # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._pressed = False
+            self.update()
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+    def enterEvent(self, e):                                 # noqa: N802
+        self._hover_s.to(1.0)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):                                 # noqa: N802
+        self._pressed = False
+        self._hover_s.to(0.0)
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e):                                # noqa: N802
+        """自绘圆角卡底 + 边框。
+
+        ★ 为什么不用 QSS 的 :hover 换样式：
+          1. QSS 悬停态是**瞬变**的，没有过渡；
+          2. 每帧改一次 setStyleSheet 要重新解析整条样式，代价比画两个矩形高得多。
+        自绘后颜色由 SmoothValue 的浮点数插值，60fps 也只是两次 fillRect 的成本。
+        """
+        p = palette(self._mode)
+        t = self._hover_s.value
+        bg = mix(p["card"], p["card_hover"], t)
+        bd = mix(p["border"], p["border_hover"], t)
+        if self._pressed:
+            bg = mix(bg, p["track"], 0.8)
+
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        q.setPen(QPen(QColor(bd), 1.0))
+        q.setBrush(QColor(bg))
+        q.drawRoundedRect(rect, 12, 12)
+        q.end()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        p = palette(mode)
+        # 背景交给 paintEvent，这里只把外壳透明掉（否则 QSS 和自绘会叠两层）
+        self.setStyleSheet("#ActionCard{background:transparent;border:none;}")
+        self.title_lab.setStyleSheet(f"color:{p['value']};font-size:15px;font-weight:600;")
+        self.desc_lab.setStyleSheet(f"color:{p['title']};font-size:12px;")
+        # 徽标用柠檬实心小胶囊：整套界面只有它是「实心柠檬 + 墨字」，
+        # 所以「新」「推荐」一眼就能跳出来，又不会到处泛滥。
+        self.badge_lab.setStyleSheet(
+            f"background:{p['acid']};color:#0B0E14;font-size:11px;"
+            f"font-weight:600;padding:2px 7px;border-radius:9px;")
+        self.icon_lab.setStyleSheet(
+            f"background:{p['icon_bg']};border-radius:10px;")
+        self.update()
+
+
+# ---------------------------------------------------------------- 三步流程条
+
+class _StepCell(QFrame):
+    """流程里的一步：左侧序号圆点 + 标题 + 说明。
+
+    ★ 2026-10-17 二次改版：不再复用 ActionCard
+      改版前三步走也是「三张大卡片」，和下面的功能卡完全同款，客户根本分不清
+      「这是流程」还是「这是功能」。现在改成轻量步骤：没有卡底、只有序号圆点 +
+      两行字，悬停时整格淡淡提亮、圆点亮成强调色。
+    """
+
+    clicked = Signal()
+
+    def __init__(self, num: str, title: str, desc: str,
+                 mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._num = str(num)
+        self._mode = mode
+        self._hover_s = SmoothValue(self, duration=140,
+                                    on_change=lambda _v: self.update())
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(66)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(52, 12, 14, 12)
+        lay.setSpacing(3)
+        self.title_lab = QLabel(title)
+        self.title_lab.setFont(ui_font(13, QFont.Weight.DemiBold))
+        self.desc_lab = QLabel(desc)
+        self.desc_lab.setWordWrap(True)
+        lay.addWidget(self.title_lab)
+        lay.addWidget(self.desc_lab)
+        lay.addStretch()
+        self.apply_theme(mode)
+
+    def mouseReleaseEvent(self, e):                          # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+    def enterEvent(self, e):                                 # noqa: N802
+        self._hover_s.to(1.0)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):                                 # noqa: N802
+        self._hover_s.to(0.0)
+        super().leaveEvent(e)
+
+    def paintEvent(self, _e):                                # noqa: N802
+        p = palette(self._mode)
+        t = self._hover_s.value
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        # 整格底：静止=面板色（无痕），悬停=提亮一档
+        q.setPen(Qt.PenStyle.NoPen)
+        q.setBrush(QColor(mix(p["card"], p["card_hover"], t)))
+        q.drawRoundedRect(rect, 10, 10)
+        # 序号圆点
+        #
+        # ★ 2026-10-27：从"灰圈灰字"改成「淡柠檬实心 + 墨字」。
+        #   客户说首页「缺少灵动感」，实测截图后的判断是：整页没有一处
+        #   高饱和的落点 —— 六个功能图标是灰的、文字是灰的、面板是白的，
+        #   眼睛在页面上滑动时找不到"起点"。三步走的序号正好是这个位置：
+        #   一、二、三 本来就是阅读顺序的锚点，给它们上能量色，
+        #   整页就有节奏了，而柠檬仍然只在"正在发生的事"上出现。
+        d = 26.0
+        dot = QRectF(14, rect.center().y() - d / 2, d, d)
+        acid_edge = QColor(p["acid"])
+        acid_edge.setAlphaF(0.50 + 0.45 * t)
+        fill = QColor(p["acid"])
+        fill.setAlphaF(0.14 + 0.62 * t)
+        q.setPen(QPen(acid_edge, 1.0))
+        q.setBrush(fill)
+        q.drawEllipse(dot)
+        # 序号：柠檬底上必须是墨字（深色主题也一样，柠檬是浅色块）
+        f = ui_font(11, QFont.Weight.DemiBold)
+        q.setFont(f)
+        q.setPen(QColor("#0B0E14"))
+        q.drawText(dot, Qt.AlignmentFlag.AlignCenter, self._num)
+        q.end()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        p = palette(mode)
+        self.setStyleSheet("_StepCell{background:transparent;border:none;}")
+        self.title_lab.setStyleSheet(
+            f"color:{p['value']};font-size:13px;font-weight:600;"
+            f"letter-spacing:-0.2px;background:transparent;")
+        self.desc_lab.setStyleSheet(
+            f"color:{p['sub']};font-size:12px;background:transparent;")
+        self.update()
+
+
+class StepFlow(QWidget):
+    """横向三步流程：① → ② → ③，每步可点击跳转。
+
+    解决"打开软件不知道先干啥"：直接把主流程画出来，点哪步就去哪。
+    """
+
+    def __init__(self, steps, mode: str = "light", parent=None):
+        """steps: [(序号文案, 标题, 说明, 点击回调)]"""
+        super().__init__(parent)
+        self._mode = mode
+        self._cards: list[_StepCell] = []
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        for i, (num, title, desc, cb) in enumerate(steps):
+            if i:
+                # 步与步之间一条 hairline 竖线：这是「同一个流程」的暗示，
+                # 比画箭头连线和更省事、也更像系统设置里的分组行。
+                sep = QFrame()
+                sep.setObjectName("VLine")
+                sep.setFixedWidth(1)
+                sep.setStyleSheet(f"background:{palette(mode)['border']};border:none;")
+                lay.addWidget(sep)
+                self._seps = getattr(self, "_seps", []) + [sep]
+            c = _StepCell(str(num or i + 1), title, desc, mode)
+            c.clicked.connect(cb)
+            lay.addWidget(c, 1)
+            self._cards.append(c)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        for c in self._cards:
+            c.apply_theme(mode)
+        for sep in getattr(self, "_seps", []):
+            sep.setStyleSheet(f"background:{palette(mode)['border']};border:none;")
+
+
+def stat_row(cards, spacing: int = 12) -> QHBoxLayout:
+    """把若干指标卡排成一行（等宽）。"""
+    h = QHBoxLayout()
+    h.setSpacing(spacing)
+    for c in cards:
+        h.addWidget(c, 1)
+    return h
+
+
+# ---------------------------------------------------------------- 迷你趋势线
+#
+# ★ 这是「卡片灵动感」的主要来源，也是全套界面里最值钱的一个 60 行。
+#   苹果 / Linear / Vercel 的仪表盘看着"活"，靠的不是动效，是**每一格里都有
+#   一小段数据形状**：数字告诉你现在多少，迷你线告诉你往哪走。
+#   一条 28px 高的折线，信息量抵得上三个字。
+class SparkLine(QWidget):
+    """一条极简折线：折线 + 下方渐隐面积 + 末端一个点。
+
+    不画坐标轴、不画刻度、不画网格 —— 它不是图表，是"形状"。
+    全部自绘（QPainter），零新依赖（见本文件顶部为什么引图表库）。
+    """
+
+    def __init__(self, values=None, mode: str = "light",
+                 height: int = 30, parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._values = list(values or [])
+        self.setFixedHeight(height)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
+        # 值变化时平滑过渡（和 ActionCard 的悬停同一套 SmoothValue）
+        self._anim = SmoothValue(self, duration=220,
+                                 on_change=lambda _v: self.update())
+        self._prev: list[float] = []
+        self._shown: list[float] = []
+
+    # ---- 数据 ----------------------------------------------------------
+    def set_values(self, values, animate: bool = True):
+        vals = [float(v) for v in (values or [])]
+        if not vals:
+            self._values = []
+            self._shown = []
+            self.update()
+            return
+        self._values = vals
+        # ★ 首次进入不做动画：客户刚切到这一页，数字应该"已经在那里"，
+        #   而不是进来先看到一条线从 0 爬上去 —— 那叫"加载感"，不叫灵动。
+        if not animate or not self._shown:
+            self._shown = list(vals)
+            self.update()
+            return
+        self._prev = list(self._shown)
+        self._shown = list(vals)
+        self.update()
+
+    # ---- 绘制 ----------------------------------------------------------
+    def _points(self, w: int, h: int) -> list[tuple[float, float]]:
+        vals = self._shown or self._values
+        if len(vals) < 2:
+            # 只有一个点：画一条居中的平线（也比什么都不画强 ——
+            # 空控件会让卡片右侧塌出一块空白）
+            y = h * 0.5
+            return [(1.0, y), (max(2.0, w - 1.0), y)]
+        lo, hi = min(vals), max(vals)
+        span = (hi - lo) or 1.0
+        # 上下各留 4px：线顶不贴卡片上沿，否则视觉上"顶出去了"
+        pad = 4.0
+        use = h - pad * 2
+        step = max(1.0, (w - 2.0) / (len(vals) - 1))
+        return [(1.0 + i * step,
+                 pad + (1.0 - (v - lo) / span) * use)
+                for i, v in enumerate(vals)]
+
+    def _frame(self, w, h, t):
+        """按进度 t 在旧形状与新形状之间插值。"""
+        pts = self._points(w, h)
+        if not (self._prev and len(self._prev) == len(self._values)
+                and t < 1.0):
+            return pts
+        lo, hi = min(self._prev), max(self._prev)
+        span = (hi - lo) or 1.0
+        use = h - 8.0
+        step = max(1.0, (w - 2.0) / (len(self._prev) - 1))
+        base = [(1.0 + i * step, 4.0 + (1.0 - (v - lo) / span) * use)
+                for i, v in enumerate(self._prev)]
+        return [(bx + (nx - bx) * t, by + (ny - by) * t)
+                for (bx, by), (nx, ny) in zip(base, pts)]
+
+    def paintEvent(self, _e):                                # noqa: N802
+        if not (self._shown or self._values):
+            return
+        p = palette(self._mode)
+        w, h = self.width(), self.height()
+        if w < 8 or h < 8:
+            return
+        pts = self._frame(w, h, self._anim.value)
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        line = QColor(p["accent"])
+        # ---- 下方渐隐面积：这是"润"的来源，只画线会显得干 ----
+        path = QPainterPath()
+        path.moveTo(pts[0][0], h)
+        for x, y in pts:
+            path.lineTo(x, y)
+        path.lineTo(pts[-1][0], h)
+        path.closeSubpath()
+        fill = QColor(line)
+        fill.setAlpha(40 if self._mode != "dark" else 56)
+        q.setPen(Qt.PenStyle.NoPen)
+        q.setBrush(QBrush(fill))
+        q.drawPath(path)
+
+        # ---- 折线：2px 圆头，比 1px 硬线更"软" ----
+        pen = QPen(line, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        q.setPen(pen)
+        q.setBrush(Qt.BrushStyle.NoBrush)
+        q.drawPolyline(QPolygonF([QPointF(x, y) for x, y in pts]))
+
+        # ---- 末端点：给眼睛一个落点（Linear 的标志做法）----
+        q.setPen(Qt.PenStyle.NoPen)
+        q.setBrush(QBrush(line))
+        q.drawEllipse(QPointF(pts[-1][0], pts[-1][1]), 2.6, 2.6)
+        q.end()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        self.update()
+
+
+# ---------------------------------------------------------------- 大号数字
+class BigNumber(QFrame):
+    """一枚大号数字：小标签 / 大数字 + 小单位 / 副说明（可选迷你线）。
+
+    ★ 为什么数字要"大"到 32px
+      13px 正文里混一个 13px 的 "128"，眼睛扫过去是一整片灰 —— 客户要找
+      "还剩多少额度"得停下来读。数字跳到 32px、标签退到 12px，扫一眼就
+      先看到数、再看到它是什么 —— 这是仪表盘唯一正确的视觉顺序。
+
+    ★ 单位必须小一号且跟在数字后面（"12 条"不是"12条"）
+      大号"条"会和大号"12"抢权重，"12 条"才读成"十二，条"。
+
+    ★ 数字必须等宽（tabular）
+      实时刷新时 9 → 10 会让整个数字右移，客户看见的是"数字在抖"。
+      等宽交给 motion 层（StatValue 会开 tnum），这里再补左对齐 ——
+      抖动只落在右边缘。
+    """
+
+    def __init__(self, title: str, value: str = "—", unit: str = "",
+                 sub: str = "", mode: str = "light",
+                 spark=None, size: int = 32, parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self._tone = "normal"
+        self._size = size
+        self.setObjectName("BigNumber")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Preferred)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(1)
+
+        self.title_lab = QLabel(title)
+        self.title_lab.setObjectName("MetricTitle")
+        self.title_lab.setFont(ui_font(12, QFont.Weight.Medium))
+
+        # 数字 + 单位：单位单独一个小 QLabel，才能各自控制字号又不换行
+        num_row = QHBoxLayout()
+        num_row.setContentsMargins(0, 0, 0, 0)
+        num_row.setSpacing(3)
+        self.value_lab = QLabel(value)
+        self.value_lab.setObjectName("StatValue")     # motion 层给它开等宽数字
+        self.unit_lab = QLabel(unit)
+        self.unit_lab.setObjectName("MetricUnit")
+        self.unit_lab.setVisible(bool(unit))
+        num_row.addWidget(self.value_lab, 0, Qt.AlignmentFlag.AlignBottom)
+        num_row.addWidget(self.unit_lab, 0, Qt.AlignmentFlag.AlignBottom)
+        num_row.addStretch()
+
+        self.sub_lab = QLabel(sub)
+        self.sub_lab.setObjectName("MetricSub")
+        self.sub_lab.setWordWrap(True)
+        self.sub_lab.setVisible(bool(sub))
+
+        lay.addWidget(self.title_lab)
+        lay.addLayout(num_row)
+        lay.addWidget(self.sub_lab)
+
+        self.spark = None
+        if spark is not None:
+            self.spark = SparkLine(spark, mode, height=30, parent=self)
+            lay.addSpacing(2)
+            lay.addWidget(self.spark)
+
+        lay.addStretch()
+        self.apply_theme(mode)
+
+    # ---- 数据 ----------------------------------------------------------
+    def set_value(self, value, unit: str | None = None,
+                  sub: str | None = None, tone: str | None = None,
+                  spark=None):
+        txt = str(value)
+        if self.value_lab.text() != txt:
+            # 数字滚到新值；非数字（"不限量"、"已激活"）count_up 会自己退回，
+            # 再补一个淡入保证"变了"这件事被看见。
+            if not count_up(self.value_lab, txt, duration=300):
+                self.value_lab.setText(txt)
+                fade_in(self.value_lab, duration=160)
+        if unit is not None:
+            self.unit_lab.setText(str(unit))
+            self.unit_lab.setVisible(bool(str(unit)))
+        if sub is not None:
+            self.sub_lab.setText(str(sub))
+            self.sub_lab.setVisible(bool(str(sub)))
+        # ★ spark 的约定：**传空列表/None ＝ 不画并收起**
+        #   （不是"不更新"）。新客户第一天没有历史，画出来是一条贴底的
+        #   直线 + 末端陡升，比不画更像界面坏了 —— 宁可空着。
+        if self.spark is not None:
+            vals = list(spark or [])
+            self.spark.setVisible(bool(vals))
+            if vals:
+                self.spark.set_values(vals)
+        if tone is not None:
+            self._tone = tone
+        self.apply_theme(self._mode)
+
+    def set_title(self, title: str):
+        """改小标签（同一个格子在不同状态下语义会变）。
+
+        例：有额度时是「今日额度」，不限量时同一格改叫「今日已用」——
+        否则那格里永远是「不限量」三个字，白白浪费一枚 32px 的位置。
+        """
+        self.title_lab.setText(str(title))
+
+    def set_spark(self, values, animate: bool = True):
+        if self.spark is not None:
+            vals = list(values or [])
+            self.spark.setVisible(bool(vals))
+            if vals:
+                self.spark.set_values(vals, animate)
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        p = palette(mode)
+        tone_color = {"ok": p["ok"], "warn": p["warn"], "bad": p["bad"]}.get(
+            self._tone, p["value"])
+        # 空值占位符降级：32px 的破折号是一道粗黑杠，看着像界面坏了
+        raw = str(self.value_lab.text()).strip()
+        placeholder = raw in ("—", "-", "")
+        # ★ 非数字也要降级（2026-10-27）：授权状态这类格子装的是"已激活"、
+        #   "不限量"，32px 的五个汉字会把整条状态条撑得头重脚轻。
+        #   规则很简单：**只有数字才配 32px**，文本一律 20px。
+        numeric = bool(re.fullmatch(r"-?\d+(?:\.\d+)?", raw))
+        size = 24 if placeholder else (self._size if numeric else 20)
+        color = p["sub"] if placeholder else tone_color
+        weight = QFont.Weight.Normal if placeholder else QFont.Weight.DemiBold
+        self.setStyleSheet("#BigNumber{background:transparent;border:none;}")
+        self.title_lab.setStyleSheet(
+            f"color:{p['title']};font-size:12px;background:transparent;")
+        self.value_lab.setFont(_num_font(size, weight))
+        # ★ 字号必须走 QSS 的 px 而不是 QFont 的第二个参数：QFont(fam, 32)
+        #   里的 32 是**磅**，在 96dpi 下等于 42px —— 想给 32px 写成 32pt
+        #   会大出一整号，第一版就是这么错的（数字大到把卡片撑破）。
+        self.value_lab.setStyleSheet(
+            f"color:{color};font-size:{size}px;"
+            f"font-weight:{'400' if (placeholder or not numeric) else '600'};"
+            f"letter-spacing:-1px;background:transparent;")
+        # ★ 数字格必须定高 + 底部对齐（2026-10-27 截图发现）
+        #   一排三格里，一格是 32px 数字、另两格是 20px 文本。不定高的话
+        #   数字格会把下面的副说明往下顶 16px，三行副说明错位 —— 整体看着
+        #   像没对齐的手写表格。
+        #   ★ 高度必须按**本格的名义字号**算（self._size），不能按当前实际
+        #     字号算：按实际算的话文本格是 20×1.32=26、数字格是 42，
+        #     两者仍然差 16px，等于白定高（第一版就是这么错的）。
+        self.value_lab.setFixedHeight(int(round(self._size * 1.32)))
+        self.value_lab.setAlignment(Qt.AlignmentFlag.AlignLeft
+                                    | Qt.AlignmentFlag.AlignBottom)
+        self.unit_lab.setFont(ui_font(12, QFont.Weight.Normal))
+        self.unit_lab.setStyleSheet(
+            f"color:{p['sub']};font-size:12px;background:transparent;")
+        self.sub_lab.setStyleSheet(
+            f"color:{p['sub']};font-size:12px;background:transparent;")
+        if self.spark is not None:
+            self.spark.apply_theme(mode)
+
+
+class MetricStrip(QFrame):
+    """一行大号数字（面板里的指标条）。
+
+    与独立卡片不同：它自己没有底色和边框，格与格之间靠 1px 竖线分，
+    装进外层 #Panel 里就是一条"状态条"（苹果系统设置的 inset 分组做法）。
+    """
+
+    def __init__(self, items: list, mode: str = "light",
+                 size: int = 32, parent=None):
+        """items: [(标题, 值, 单位, 副说明, spark 值列), ...]"""
+        super().__init__(parent)
+        self._mode = mode
+        self.setObjectName("MetricStrip")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(18)
+        self._cells: list[BigNumber] = []
+        self._seps: list[QFrame] = []
+        for i, item in enumerate(items):
+            if i:
+                sep = QFrame()
+                sep.setObjectName("VLine")
+                sep.setFixedWidth(1)
+                lay.addWidget(sep)
+                self._seps.append(sep)
+            title, value, unit, sub, spark = (list(item) + [None] * 5)[:5]
+            cell = BigNumber(title, value or "—", unit or "", sub or "",
+                             mode, spark, size, parent=self)
+            lay.addWidget(cell, 1)
+            self._cells.append(cell)
+        self.apply_theme(mode)
+
+    def cell(self, i: int) -> BigNumber:
+        return self._cells[i]
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        p = palette(mode)
+        for s in self._seps:
+            s.setStyleSheet(f"background:{p['border']};border:none;")
+        for c in self._cells:
+            c.apply_theme(mode)
+
+
+# ---------------------------------------------------------------- 微光面板
+
+class GlowPanel(QFrame):
+    """一块「带微光的面板」：白底 + 右上角一层极淡的柠檬晕 + hairline 边。
+
+    ★ 为什么需要它（2026-10-27）
+      首页三个面板、三张卡片全是同一个白，平铺在白底上，客户原话是
+      「缺少灵动感」。平面软件显"平"的根因是**没有光的方向**：所有面
+      亮度完全一致，眼睛就分不出谁是主角。
+      给它一层从右上角衰减的柠檬微光（alpha 只有 7%），面板立刻有"浮起来"
+      的错觉，而**不需要阴影** —— 阴影在 Qt 里要 QGraphicsDropShadowEffect，
+      那东西会把子控件整体栅格化，滚动时会掉帧，得不偿失。
+
+    ★ 只给一块面板用（首页的状态条）。满地微光等于没有微光。
+    """
+
+    RADIUS = 20
+
+    def __init__(self, mode: str = "light", parent=None):
+        super().__init__(parent)
+        self._mode = mode
+        self.setObjectName("GlowPanel")
+
+    def paintEvent(self, _e):                                # noqa: N802
+        p = palette(self._mode)
+        q = QPainter(self)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.RADIUS, self.RADIUS)
+
+        q.setPen(Qt.PenStyle.NoPen)
+        q.fillPath(path, QColor(p["card"]))
+
+        # 微光：圆心放在右上角外侧，半径取面板宽度的一半多一点，
+        # 让亮区只覆盖右上角那一块（正中间发亮就会变成"脏"）
+        q.save()
+        q.setClipPath(path)
+        glow = QRadialGradient(QPointF(rect.right() - 60, rect.top() - 20),
+                               max(160.0, rect.width() * 0.62))
+        acid = QColor(p["acid"])
+        acid.setAlpha(20 if self._mode != "dark" else 30)
+        glow.setColorAt(0.0, acid)
+        glow.setColorAt(0.55, QColor(acid.red(), acid.green(), acid.blue(), 0))
+        glow.setColorAt(1.0, QColor(acid.red(), acid.green(), acid.blue(), 0))
+        q.fillPath(path, QBrush(glow))
+        q.restore()
+
+        q.setBrush(Qt.BrushStyle.NoBrush)
+        q.setPen(QPen(QColor(p["border"]), 1.0))
+        q.drawPath(path)
+        q.end()
+
+    def apply_theme(self, mode: str):
+        self._mode = mode
+        self.update()
+
+
+# ---------------------------------------------------------------- 迷你趋势线
+#
+# ★ 这是「卡片灵动感」的主要来源，也是全套界面里最值钱的一个 60 行。
+#   苹果 / Linear / Vercel 的仪表盘看着"活"，靠的不是动效，是**每一格里都有
+#   一小段数据形状**：数字告诉你现在多少，迷你线告诉你往哪走。
+#   一条 28px 高的折线，信息量抵得上三个字。
