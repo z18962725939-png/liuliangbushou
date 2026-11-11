@@ -119,6 +119,8 @@ hiddenimports = [
     "justoneapi_collector.live_monitor",
     "justoneapi_collector.douyin_live_stream",
     "justoneapi_collector.ab_sign",
+    # v1.28.3 转写状态判定 / 输出去重 / 文稿映射清单（transcribe.py 顶层引用）
+    "justoneapi_collector.transcribe_state",
     # 喜欢/收藏列表自研爬虫（HTTP 直连版 + 浏览器会话版）
     "justoneapi_collector.douyin_fav_crawler",
     "justoneapi_collector.douyin_cdp_crawler",

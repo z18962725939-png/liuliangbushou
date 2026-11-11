@@ -6,10 +6,11 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (QApplication, QAbstractItemView, QCheckBox,
+                               QComboBox, QFileDialog, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QPushButton,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QDesktopServices
 
 # ★ 2026-10-31 重建补回：分档切换控件（Segmented）的 import 在源码重建中丢失，
 #   页面一打开就 NameError —— 见 drama_page 的同款用法。
@@ -17,6 +18,7 @@ from gui_qt.widgets.kit import Segmented
 from ._base import (StatusLine, Worker, append_log, connect_guarded, guide_banner,
                     log_panel, page_title, row_widget, vertical_card)
 
+from justoneapi_collector import transcribe_state as tstate
 from justoneapi_collector.transcribe import (
     CUDA_BUNDLES, DEFAULT_MODEL, MODELS, SUPPORTED_AUDIO_EXT, Transcriber,
     TranscribeTask, bootstrap_engine, detect_gpu, engine_problem, human_size,
@@ -37,6 +39,14 @@ class TranscribePage(QWidget):
         super().__init__()
         self.ctx = ctx
         self.files = []          # list[Path]
+        # ★ v1.28.3 可视化总览：当前主题、状态行数据、当前转录中的文件、
+        #   当前阶段（0 提取音频 / 1 转录 / 2 写出文稿 / 3 已完成）。
+        self._mode = "light"
+        self._rows: list[dict] = []
+        self._current_file: Path | None = None
+        self._phase = -1
+        self._phase_labels: list[QLabel] = []
+        self._stat_values: dict[str, QLabel] = {}
         self._running = False
         # 正在下载引擎时持有 downloader，让「停止」能真正取消下载。
         # ★ v1.28.2：以前下载 439 MB CUDA 引擎期间停止按钮是灰的，
@@ -69,6 +79,9 @@ class TranscribePage(QWidget):
         root.setSpacing(14)
         root.addWidget(page_title("音视频转文本"))
         root.addWidget(guide_banner("音视频转文本", self))
+        # ★ v1.28.3：以前这一页只有「一行文字 + 一根进度条」，客户既看不到
+        #   还剩多少没转，也分不清目录里哪些已经转过。把隐藏状态摊成卡片。
+        self._build_overview(root)
 
         # ★ 2026-10-27：整页 1367px 分成两档 —— 「开始转写」/「引擎与模型」。
         #   原来引擎区、模型参数、文件列表、输出、日志五块平铺，客户每次
@@ -197,11 +210,26 @@ class TranscribePage(QWidget):
         fctrl.addWidget(b_scan); fctrl.addWidget(b_rm); fctrl.addWidget(b_clr)
         fctrl.addStretch()
         fb_l.addLayout(fctrl)
-        self.file_list = QListWidget()
+        # ★ v1.28.3：原来是 QListWidget 里的一行文字，客户分不清「转过了」
+        #   和「没转过」。换成五列表格，首列用颜色徽标标五态；其余列把
+        #   大小 / 所在目录 / 转录稿一并摊开，同名文件也能一眼看出区别。
+        # ★ 列宽统一交给主窗口 _tune_tables()（按表头名定宽），页面别自己
+        #   setStretchLastSection，否则深浅两版和长页滚动都会打架。
+        self.file_list = QTableWidget(0, 5, self)
+        self.file_list.setObjectName("TranscribeFileTable")
+        self.file_list.setHorizontalHeaderLabels(
+            ["转录状态", "文件名", "大小", "所在目录", "转录稿"])
+        self.file_list.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
         # ★ 配「添加本地目录」：一次可能进来上百个文件，默认单选的话客户想
         #   删掉其中几个只能一个个点。允许 Ctrl / Shift 多选后，
         #   「移除选中」一次就能清掉一批。
-        self.file_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.file_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.file_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.file_list.verticalHeader().setVisible(False)
+        self.file_list.setShowGrid(False)
+        self.file_list.setMinimumHeight(215)
         fb_l.addWidget(self.file_list, 1)
         # ★ _refresh_empty() 早就写好了，但它读的 file_empty 在源码重建时丢了，
         #   控件从没被创建、方法也从没被调用 —— 空列表就是一块纯白，客户不知道
@@ -251,12 +279,186 @@ class TranscribePage(QWidget):
         self.log = log_panel()
         lb_l.addWidget(self.log, 1)
         root.addWidget(lb, 1)
+        # 构造末尾统一刷一次：空态、统计卡、三阶段设备提示都从这里起步，
+        # 不让「刚打开页面时四张卡全是 0 但设备那格是空的」这种半成品露出来。
+        self._sync_rows()
+        self._set_phase(-1)
+        connect_guarded(self.out_dir.textChanged, lambda *_: self._sync_rows(),
+                        on_error=lambda m: self.status.setText(m), label="输出目录变化")
+
+    # ------------------------------------------------------- 可视化总览
+    def _build_overview(self, root):
+        """4 张统计卡 + 任务即时状况卡（v1.28.3）。
+
+        ★ 全部走 QSS 语义类（#StatValue / #Body / #Meta / #Badge / #PanelFlat），
+          不写内联 color —— 深色主题下内联色会变成「深底深字」直接看不见。
+        """
+        ov, ov_l = vertical_card("任务总览", self)
+        cards = QHBoxLayout()
+        cards.setSpacing(10)
+        for key, title, hint in (
+            ("all", "全部文件", "已添加的音视频"),
+            ("done", "已转录", "已经生成文稿"),
+            ("pending", "待转录", "还没有文稿"),
+            ("attention", "需处理", "源文件更新 / 同名冲突"),
+        ):
+            box = QFrame(self)
+            box.setObjectName("PanelFlat")
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(14, 9, 14, 9)
+            bl.setSpacing(1)
+            val = QLabel("0", box)
+            val.setObjectName("StatValue")
+            t = QLabel(title, box)
+            t.setObjectName("Body")
+            h = QLabel(hint, box)
+            h.setObjectName("Meta")
+            h.setWordWrap(True)
+            bl.addWidget(val)
+            bl.addWidget(t)
+            bl.addWidget(h)
+            cards.addWidget(box, 1)
+            self._stat_values[key] = val
+        ov_l.addLayout(cards)
+
+        # 任务即时状况：三阶段指示 + 当前文件 + 设备
+        strip = QFrame(self)
+        strip.setObjectName("PanelFlat")
+        sl = QHBoxLayout(strip)
+        sl.setContentsMargins(14, 9, 14, 9)
+        sl.setSpacing(12)
+        head = QLabel("任务即时状况", strip)
+        head.setObjectName("H2")
+        sl.addWidget(head)
+        for text in ("① 提取音频", "② 转录", "③ 写出文稿"):
+            lab = QLabel(text, strip)
+            lab.setObjectName("Meta")
+            sl.addWidget(lab)
+            self._phase_labels.append(lab)
+        sl.addStretch()
+        self.task_device = QLabel("设备：—", strip)
+        self.task_device.setObjectName("Meta")
+        sl.addWidget(self.task_device)
+        ov_l.addWidget(strip)
+
+        cur = QHBoxLayout()
+        cur.setSpacing(10)
+        self.task_file = QLabel("当前任务：暂无", self)
+        self.task_file.setObjectName("Body")
+        cur.addWidget(self.task_file, 1)
+        self.overview_hint = QLabel("添加音视频后，这里会显示每个文件的转录状态", self)
+        self.overview_hint.setObjectName("Caption")
+        cur.addWidget(self.overview_hint, 1)
+        ov_l.addLayout(cur)
+
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(8)
+        self.filter_box = QComboBox(self)
+        self.filter_box.addItems(["全部文件", "只看待转录", "只看已转录", "只需处理"])
+        # ★ 用 connect_guarded 包一层：下拉切换时槽里抛异常，PySide6 只把
+        #   traceback 打到 stderr，打包后客户看到的就是「筛选没反应」。
+        connect_guarded(self.filter_box.currentIndexChanged,
+                        lambda *_: self._apply_filter(),
+                        on_error=lambda m: self.status.setText(m), label="状态筛选")
+        ctrl.addWidget(self.filter_box)
+        b_ref = QPushButton("刷新状态", self)
+        connect_guarded(b_ref.clicked, lambda *_: self._sync_rows(),
+                        on_error=lambda m: self.status.setText(m), label="刷新转录状态")
+        ctrl.addWidget(b_ref)
+        ctrl.addStretch()
+        ov_l.addLayout(ctrl)
+        root.addWidget(ov)
+
+    def _set_phase(self, idx: int):
+        """点亮三阶段中的当前一步；objectName 改完必须重新 polish 才会换样式。"""
+        self._phase = idx
+        for i, lab in enumerate(self._phase_labels):
+            lab.setObjectName("Badge" if i == idx else "Meta")
+            lab.style().unpolish(lab)
+            lab.style().polish(lab)
+        if idx < 0:
+            self.task_device.setText(f"设备：{'显卡 (CUDA)' if self.device.currentIndex() == 1 else 'CPU'}")
+        elif idx == 3:
+            self.task_device.setText("设备：本轮已完成")
+
+    def _state_color(self, state: str) -> QColor:
+        info = tstate.STATES.get(state, tstate.STATES["pending"])
+        return QColor(info["dark"] if self._mode == "dark" else info["light"])
+
+    def _sync_rows(self):
+        """按输出目录重判每个文件的状态，刷新表格 / 统计卡 / 提示。只读。"""
+        table = getattr(self, "file_list", None)
+        if table is None:
+            return
+        out = self.out_dir.text().strip() if getattr(self, "out_dir", None) else ""
+        try:
+            self._rows = tstate.classify(self.files, out or None,
+                                         running=self._current_file)
+        except Exception as exc:                            # noqa: BLE001
+            # 判定失败不能让整个页面白掉：退回「按文件名」并在提示里说清楚
+            self._rows = []
+            if getattr(self, "overview_hint", None) is not None:
+                self.overview_hint.setText(f"状态读取失败：{exc}")
+            return
+        table.setRowCount(len(self._rows))
+        for r, row in enumerate(self._rows):
+            # 完整路径动辄上百字符，塞进列里只会变成「C:...」；这里显示
+            # 所在文件夹名，完整路径放在悬停提示里，同名文件也能靠它区分。
+            folder = Path(row["dir"]).name or row["dir"]
+            cells = [row["label"], row["name"], row["size_text"],
+                     folder, row["txt_size"] or "—"]
+            for c, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setData(Qt.ItemDataRole.UserRole, str(row["path"]))
+                if c == 0:
+                    it.setForeground(QBrush(self._state_color(row["state"])))
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
+                if c == 4 and row["txt"]:
+                    it.setToolTip(row["txt"])
+                if c in (1, 3):
+                    it.setToolTip(f"{row['name']}\n{row['dir']}\n{row['reason']}")
+                table.setItem(r, c, it)
+        s = tstate.stats(self._rows)
+        for key, val in self._stat_values.items():
+            val.setText(str(s.get(key, 0)))
+        self.overview_hint.setText(tstate.note_text(self._rows))
+        self._apply_filter()
         self._refresh_empty()
+
+    def _apply_filter(self):
+        """只隐藏行、不删数据；切筛选不该触发重新扫描。"""
+        table = getattr(self, "file_list", None)
+        if table is None or not hasattr(self, "filter_box"):
+            return
+        idx = self.filter_box.currentIndex()
+        allow = {
+            1: {"pending", "running"},
+            2: {"done"},
+            3: {"stale", "conflict"},
+        }.get(idx)
+        for r, row in enumerate(self._rows):
+            table.setRowHidden(r, bool(allow) and row["state"] not in allow)
+
+    def _mark_running(self, p: Path):
+        """把当前正在转录的那一行标蓝，不重扫整个目录（进度回调高频）。"""
+        self._current_file = p
+        self.task_file.setText(f"当前任务：{p.name}")
+        table = getattr(self, "file_list", None)
+        if table is None:
+            return
+        for r, row in enumerate(self._rows):
+            if Path(row["path"]) == p:
+                it = table.item(r, 0)
+                if it is not None:
+                    it.setText("转录中")
+                    it.setForeground(QBrush(self._state_color("running")))
 
     # ---------------------------------------------------------------- 空态
     def _refresh_empty(self):
         """列表空 → 显示引导句；有文件 → 收起（两者互斥占同一块位置）。"""
-        empty = self.file_list.count() == 0
+        empty = self.file_list.rowCount() == 0
         self.file_empty.setVisible(empty)
         self.file_list.setVisible(not empty)
 
@@ -277,6 +479,22 @@ class TranscribePage(QWidget):
             self.step_seg.apply_theme(mode)
         if getattr(self, "log_fold", None) is not None:
             self.log_fold.apply_theme(mode)
+        # ★ 状态徽标的颜色是画在 QTableWidgetItem 上的（QSS 管不到），
+        #   切主题必须重刷一遍，否则深色下「已转录」还是浅色的深绿，看不清。
+        self._repaint_state_colors()
+
+    def _repaint_state_colors(self):
+        table = getattr(self, "file_list", None)
+        if table is None:
+            return
+        for r, row in enumerate(self._rows):
+            it = table.item(r, 0)
+            if it is None:
+                continue
+            state = row["state"]
+            if self._current_file is not None and Path(row["path"]) == self._current_file:
+                state = "running"
+            it.setForeground(QBrush(self._state_color(state)))
 
     # ----------------------------------------------------------------
     def _cur_model(self) -> str:
@@ -290,6 +508,9 @@ class TranscribePage(QWidget):
         self.ctx.settings["transcribe_srt"] = self.srt.isChecked()
         self.ctx.settings["transcribe_out_dir"] = self.out_dir.text().strip()
         self._refresh_status()
+        # 设备 / 模型换了，任务卡上的「设备：」也要跟着变
+        if getattr(self, "task_device", None) is not None:
+            self._set_phase(self._phase)
 
     def _refresh_status(self):
         dev = "cuda" if self.device.currentIndex() == 1 else "cpu"
@@ -478,8 +699,8 @@ class TranscribePage(QWidget):
             self, "选择音视频", getattr(self, "_last_folder", "") or "",
             f"音视频 ({exts})")
         for p in paths:
-            self._add_file(Path(p))
-        self._refresh_empty()
+            self._add_file(Path(p), refresh=False)
+        self._sync_rows()
 
     def _add_folder(self):
         """★ v1.28.2：选一个本地文件夹（含子文件夹），批量导入里面的音视频。
@@ -501,9 +722,9 @@ class TranscribePage(QWidget):
         for p in found:
             if p in self.files:
                 continue
-            self._add_file(p)
+            self._add_file(p, refresh=False)
             added += 1
-        self._refresh_empty()
+        self._sync_rows()
         if not found:
             msg = note or "这个目录里没找到可转写的音视频"
             self.status.setText(msg)
@@ -529,30 +750,31 @@ class TranscribePage(QWidget):
             dirs.append(root)
         found = list_media_files(dirs) if dirs else []
         for p in found:
-            self._add_file(p)
+            self._add_file(p, refresh=False)
         append_log(self.log, f"扫描到 {len(found)} 个媒体文件")
-        self._refresh_empty()
+        self._sync_rows()
 
-    def _add_file(self, p: Path):
+    def _add_file(self, p: Path, *, refresh: bool = True):
+        """批量导入时传 refresh=False，整批结束后统一判定一次，避免 O(n²) 扫盘。"""
         if p in self.files:
             return
         self.files.append(p)
-        size = human_size(p.stat().st_size) if p.exists() else "-"
-        item = QListWidgetItem(f"{p.name}  [{size}]")
-        item.setData(1, str(p))
-        self.file_list.addItem(item)
+        if refresh:
+            self._sync_rows()
 
     def _remove_selected(self):
-        for it in self.file_list.selectedItems():
-            p = Path(it.data(1))
-            self.files = [f for f in self.files if f != p]
-            self.file_list.takeItem(self.file_list.row(it))
-        self._refresh_empty()
+        rows = sorted({i.row() for i in self.file_list.selectedItems()}, reverse=True)
+        drop: set[str] = set()
+        for r in rows:
+            if 0 <= r < len(self._rows):
+                drop.add(str(self._rows[r]["path"]))
+        if drop:
+            self.files = [f for f in self.files if str(f) not in drop]
+        self._sync_rows()
 
     def _clear(self):
         self.files.clear()
-        self.file_list.clear()
-        self._refresh_empty()
+        self._sync_rows()
 
     def _choose_out(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -680,6 +902,10 @@ class TranscribePage(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress.setValue(0)
+        self._current_file = None
+        self._last_marked = None
+        self._set_phase(0)
+        self.task_file.setText("当前任务：正在准备…")
 
         def run(worker):
             from justoneapi_collector._ffmpeg import find_ffmpeg
@@ -690,13 +916,22 @@ class TranscribePage(QWidget):
                 if not self._running:
                     worker.emit_log("用户已停止")
                     break
+                # ★ 子线程只记一个引用（CPython 下赋值是原子的），界面在
+                #   progress 回调里读它来点亮当前行，绝不在这里碰 Qt 控件。
+                self._current_file = p
                 task = TranscribeTask(src=p, model=self._cur_model(), device=device,
                                       lang=self.lang.currentText(),
                                       out_dir=Path(out) if out else None)
-                worker.emit_progress((i) / total * 100, f"转写中 ({i+1}/{total})：{p.name}")
+                worker.emit_progress(i / total * 100,
+                                     f"转写中 ({i+1}/{total})：{p.name}")
                 worker.emit_log(f"开始：{p.name}")
-                res = tr.run(task, progress=lambda pc, m: worker.emit_progress(
-                    (i + pc / 100) / total * 100, m), log=lambda m: worker.emit_log(m))
+                # ★ 旧代码写成 lambda pc, m，但 Transcriber.run 只传一个
+                #   进度整数 ⇒ TypeError 被内层 except 吞掉，whisper 的逐段
+                #   进度全丢，客户只看到进度条每隔一个文件才跳一格。
+                res = tr.run(task, progress=lambda pc: worker.emit_progress(
+                    (i + pc / 100) / total * 100,
+                    f"转写中 ({i+1}/{total})：{p.name} · {pc}%"),
+                    log=lambda m: worker.emit_log(m))
                 if getattr(res, "txt", None):
                     ok_n += 1
                     worker.emit_log(f"完成：{res.txt}")
@@ -704,11 +939,25 @@ class TranscribePage(QWidget):
                     worker.emit_log(f"失败：{getattr(res,'msg','')}")
             return ok_n, total
 
+        def on_progress(p, m):
+            self.progress.setValue(int(p))
+            self.status.setText(m)
+            cur = getattr(self, "_current_file", None)
+            if cur is not None and cur != getattr(self, "_last_marked", None):
+                self._last_marked = cur
+                self._mark_running(cur)
+            if cur is not None:
+                self._set_phase(1)
+
         w = Worker(run)
-        w.progress.connect(lambda p, m: (self.progress.setValue(int(p)), self.status.setText(m)))
-        w.log.connect(lambda m: append_log(self.log, m))
-        w.done.connect(lambda r: (self._finish(r)))
-        w.error.connect(lambda e: (append_log(self.log, f"错误：{e}"), self._finish((0, 0))))
+        # ★ 槽抛异常＝静默卡死（打包后没控制台），全部走 connect_guarded
+        connect_guarded(w.progress, on_progress,
+                        on_error=lambda msg: self.status.setText(msg), label="转写进度")
+        connect_guarded(w.log, lambda m: append_log(self.log, m), label="转写日志")
+        connect_guarded(w.done, lambda r: self._finish(r), label="转写完成")
+        connect_guarded(w.error,
+                        lambda e: (append_log(self.log, f"错误：{e}"), self._finish((0, 0))),
+                        label="转写异常")
         w.start()
         self._worker = w
 
@@ -719,6 +968,13 @@ class TranscribePage(QWidget):
         ok_n, total = result
         self.progress.setValue(100)
         self.status.setText(f"转写完成：成功 {ok_n}/{total}")
+        self._current_file = None
+        self._last_marked = None
+        self._set_phase(2)
+        self.task_file.setText(f"当前任务：已完成（成功 {ok_n}/{total}）")
+        # ★ 清单已经由 Transcriber.run 写好，重判一次，表格里刚转完的那些
+        #   立刻从「待转录」变成「已转录」，统计卡同步跳动。
+        self._sync_rows()
 
     def _stop(self):
         # 同一个按钮两种含义：下载引擎时＝取消下载，转写时＝停止转写。
@@ -728,3 +984,8 @@ class TranscribePage(QWidget):
             return
         self._running = False
         self.status.setText("已发送停止信号")
+        self._current_file = None
+        self._last_marked = None
+        self._set_phase(-1)
+        self.task_file.setText("当前任务：已停止")
+        self._sync_rows()

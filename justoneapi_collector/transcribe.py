@@ -1359,6 +1359,11 @@ def _explain_rc(rc: int, device: str) -> str:
     return f"{who}退出码 {rc}，未产出文本"
 
 
+# ★ v1.28.3：输出去重与「源文件→文稿」映射清单。放在模块顶层 import，
+#   PyInstaller 才能静态收进去；写成函数体内 import 就得手动补 hiddenimports。
+from . import transcribe_state as _state  # noqa: E402
+
+
 class Transcriber:
     """把音视频转成 txt（可选 srt）。
 
@@ -1464,7 +1469,10 @@ class Transcriber:
 
         out_dir = Path(task.out_dir) if task.out_dir else src.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        prefix = out_dir / src.stem
+        # ★ v1.28.3：不同目录下同名的音视频（客户真实场景：四个
+        #   `[1]--视频_1.mp4` 大小各不相同）原本会写同一个 stem.txt 互相覆盖。
+        #   现在由清单判定：自己的稿复用，别人的稿自动加短哈希后缀。
+        prefix = _state.output_prefix(out_dir, src)
 
         # 音频 → wav
         ok, wav = self.extract_wav(src, log=log)
@@ -1543,12 +1551,20 @@ class Transcriber:
         if self._cancel.is_set():
             return TranscribeResult(False, src, msg="已取消")
 
-        txt = prefix.with_suffix(".txt")
-        srt = prefix.with_suffix(".srt")
+        # ★ 用字符串拼接而不是 with_suffix：stem 里带点（「第01集.最终版」）
+        #   时 Path.with_suffix(".txt") 会把 `.最终版` 当成后缀替换掉，算出的
+        #   路径和 whisper-cli 真实产物对不上，状态就永远判成「待转录」。
+        txt = _state.txt_of(prefix)
+        srt = Path(str(prefix) + ".srt")
         if rc != 0 and not txt.exists():
             return TranscribeResult(False, src, msg=_explain_rc(rc, device))
         if not txt.exists():
             return TranscribeResult(False, src, msg="转写结束但没有生成 txt 文件")
+
+        # 登记「源文件 → 实际文稿」，界面据此精确判定已转录 / 未转录。
+        # 写清单失败绝不能让一次成功的转录变成失败，所以吞掉返回值。
+        _state.record_result(src, txt, out_dir=out_dir, model=task.model,
+                             device=device)
 
         return TranscribeResult(
             ok=True, src=src, txt=txt,

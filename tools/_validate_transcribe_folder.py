@@ -236,9 +236,11 @@ with patch.object(TP, "bootstrap_engine", fake_bootstrap), \
     # ── 真点击：选一个本地素材文件夹 ──────────────────────────────
     with patch.object(TP.QFileDialog, "getExistingDirectory", return_value=str(DATA)):
         folder_btn.click()
+    # ★ v1.28.3：文件列表由 QListWidget 换成五列 QTableWidget（要显示状态徽标），
+    #   行数改读 rowCount()；验证意图不变：真点按钮必须真的导进 3 个文件。
     chk("★ 真点「添加本地目录」批量导入了 3 个音视频",
-        len(page.files) == 3 and page.file_list.count() == 3,
-        f"files={len(page.files)} rows={page.file_list.count()}")
+        len(page.files) == 3 and page.file_list.rowCount() == 3,
+        f"files={len(page.files)} rows={page.file_list.rowCount()}")
     chk("导入后空态收起、列表显示",
         page.file_empty.isHidden() and not page.file_list.isHidden())
     chk("状态栏回报导入数量", "3 个音视频" in page.status.text(), page.status.text())
@@ -346,11 +348,13 @@ with patch.object(TP, "bootstrap_engine", fake_bootstrap), \
     # ── 清空 / 移除后空态回来 ────────────────────────────────────
     with patch.object(TP.QFileDialog, "getExistingDirectory", return_value=str(DATA)):
         folder_btn.click()
-    # 离屏且未 show 时 selectAll() 不一定真的选中，逐项 setSelected 才有真链路
-    for i in range(page.file_list.count()):
-        page.file_list.item(i).setSelected(True)
-    chk("列表项确实处于选中态", len(page.file_list.selectedItems()) == 3,
-        str(len(page.file_list.selectedItems())))
+    # 离屏且未 show 时 selectAll() 不一定真的选中，逐项 setSelected 才有真链路。
+    # QTableWidget 的 item(row, col) 要两个参数；选中整行后 selectedItems() 会
+    # 返回每行的 5 个单元格，所以按 row() 去重才是真正的「选中行数」。
+    for i in range(page.file_list.rowCount()):
+        page.file_list.item(i, 0).setSelected(True)
+    selected_rows = {it.row() for it in page.file_list.selectedItems()}
+    chk("列表项确实处于选中态", len(selected_rows) == 3, str(len(selected_rows)))
     find_btn(page, "移除选中").click()
     chk("移除选中后空态回来", len(page.files) == 0 and not page.file_empty.isHidden())
     with patch.object(TP.QFileDialog, "getExistingDirectory", return_value=str(DATA)):

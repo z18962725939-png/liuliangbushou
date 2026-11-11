@@ -53,10 +53,12 @@ def _source_rules() -> dict:
         raise SystemExit("源码里找不到 SUPPORTED_AUDIO_EXT，契约拒绝生成")
     exts = sorted({x.strip().strip('"\'') for x in
                    re.findall(r'"(\.[a-z0-9]+)"', m.group(1))})
+    # ★ 2026-11-11 晚主程序已集成（v1.28.3）：输出前缀改由清单去重，
+    #   txt 用字符串拼接（stem 里带点不能被 with_suffix 吃掉）。
     needed = [
         "out_dir = Path(task.out_dir) if task.out_dir else src.parent",
-        "prefix = out_dir / src.stem",
-        'txt = prefix.with_suffix(".txt")',
+        "prefix = _state.output_prefix(out_dir, src)",
+        "txt = _state.txt_of(prefix)",
     ]
     missing = [line for line in needed if line not in text]
     if missing:
@@ -77,7 +79,7 @@ def contract() -> dict:
         "version": "1.0",
         "source": rules["source"],
         "extensions": rules["extensions"],
-        "output_rule": "输出目录 / 源文件名.txt；输出目录留空时写在源文件同目录",
+        "output_rule": "输出目录 / 源文件名.txt（同名自动加短哈希）；留空时写在源文件同目录；实际映射以 transcribe_manifest.json 为准",
         "output_code": rules["output_code"],
         "columns": ["状态", "文件名", "大小", "所在目录", "转录稿"],
         "states": [
@@ -91,7 +93,7 @@ def contract() -> dict:
         "rule_notes": [
             "有非空同名 txt、且 txt 不早于源文件 ⇒ 已转录",
             "txt 比源文件旧 ⇒ 源文件已更新，建议重转",
-            "多个源文件映射到同一个 txt ⇒ 同名冲突，不能只按文件名判断",
+            "多个源文件映射到同一个 txt ⇒ 同名冲突，不能只按文件名判断（v1.28.3 起主程序自动加短哈希分开命名）",
             "输出目录里找不到源的 txt ⇒ 孤立产物，单独统计",
             "身份用完整路径 + 大小，绝不用文件名当主键",
         ],
@@ -184,7 +186,7 @@ def scan(root: str = "", out_dir: str = "", limit: int = 24) -> dict:
             st = p.stat()
         except OSError:
             continue
-        txt = (out_path / p.stem).with_suffix(".txt")
+        txt = Path(str(out_path / p.stem) + ".txt")
         txt_ok = txt.exists() and txt.stat().st_size > 0
         if txt_ok:
             used_txt.add(str(txt).lower())
