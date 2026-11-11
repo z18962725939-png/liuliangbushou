@@ -110,3 +110,6 @@ tcvenv/
 /bot/.data/
 /.edgeone/
 /.workbuddy/
+
+# 原型截图中间产物（对比图本体 samples/界面对比_Qt与网页.png 要提交）
+/samples/prototype/_web_shot.png

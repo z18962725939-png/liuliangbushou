@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>流量捕手 · 工作台原型（TDesign 令牌 + WebView2）</title>
+<style id="tokens">
+/* 自动生成，请勿手改。唯一真源：design_tokens.json → python build_tokens.py */
+:root{
+  --brand:#0052D9;
+  --brand-hover:#366EF4;
+  --brand-soft:#ECF2FE;
+  --on-brand:#FFFFFF;
+  --bg-page:#F3F4F6;
+  --bg-container:#FFFFFF;
+  --bg-hover:#F7F8FA;
+  --bg-sunken:#FAFAFB;
+  --text-1:rgba(0,0,0,.90);
+  --text-2:rgba(0,0,0,.60);
+  --text-3:rgba(0,0,0,.40);
+  --line:#E7E8EC;
+  --line-soft:#F0F1F3;
+  --success:#2BA471;
+  --success-soft:#E8F8F0;
+  --warning:#E37318;
+  --warning-soft:#FFF3E8;
+  --danger:#D54941;
+  --danger-soft:#FDECEC;
+  --shadow:0 1px 2px rgba(0,0,0,.04),0 4px 14px rgba(0,0,0,.03);
+  --radius-sm:6px;
+  --radius:9px;
+  --radius-lg:12px;
+  --space-xs:4px;
+  --space-sm:8px;
+  --space-md:12px;
+  --space-lg:16px;
+  --space-xl:24px;
+  --font-sans:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --size-xs:11px;
+  --size-sm:12px;
+  --size-base:13px;
+  --size-h2:14px;
+  --size-h1:22px;
+}
+html[data-theme="dark"]{
+  --brand:#C8F751;
+  --brand-hover:#D9FF78;
+  --brand-soft:rgba(200,247,81,.13);
+  --on-brand:#0B0E14;
+  --bg-page:#0B0E14;
+  --bg-container:#121722;
+  --bg-hover:#1A2130;
+  --bg-sunken:#0E131C;
+  --text-1:#EAEEF7;
+  --text-2:#A2ACC3;
+  --text-3:#6B7590;
+  --line:rgba(255,255,255,.09);
+  --line-soft:rgba(255,255,255,.055);
+  --success:#4ADE80;
+  --success-soft:rgba(74,222,128,.12);
+  --warning:#FBBF24;
+  --warning-soft:rgba(251,191,36,.12);
+  --danger:#FF7A4A;
+  --danger-soft:rgba(255,122,74,.12);
+  --shadow:0 1px 2px rgba(0,0,0,.24),0 4px 18px rgba(0,0,0,.18);
+}
+</style>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-page);color:var(--text-1);font-family:var(--font-sans);font-size:var(--size-base);line-height:1.6;-webkit-font-smoothing:antialiased}
+button,input{font-family:inherit;font-size:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+.app{display:flex;min-height:100vh}
+.sidebar{width:220px;flex:none;background:var(--bg-container);border-right:1px solid var(--line);display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.brand{height:60px;display:flex;align-items:center;gap:10px;padding:0 18px;border-bottom:1px solid var(--line-soft)}
+.brand-mark{width:28px;height:28px;border-radius:8px;background:var(--brand);color:var(--on-brand);display:grid;place-items:center;font-weight:700;font-size:14px}
+.brand-name{font-size:15px;font-weight:600}
+.brand-ver{margin-left:auto;font-size:var(--size-xs);color:var(--text-3);padding:2px 6px;border:1px solid var(--line);border-radius:4px}
+.nav{flex:1;overflow-y:auto;padding:12px 10px 20px}
+.nav-group{margin-bottom:6px}
+.nav-head{width:100%;display:flex;align-items:center;gap:8px;padding:7px 10px;color:var(--text-3);font-size:var(--size-xs);letter-spacing:.6px;border-radius:var(--radius-sm)}
+.nav-head:hover{background:var(--bg-hover);color:var(--text-2)}
+.nav-head .chev{margin-left:auto;width:12px;height:12px;transition:transform .18s}
+.nav-group.collapsed .chev{transform:rotate(-90deg)}
+.nav-group.collapsed .nav-items{display:none}
+.nav-items{display:flex;flex-direction:column;gap:2px;margin:2px 0 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-sm);color:var(--text-2);font-size:var(--size-base);width:100%;text-align:left}
+.nav-item:hover{background:var(--bg-hover);color:var(--text-1)}
+.nav-item.active{background:var(--brand-soft);color:var(--brand);font-weight:500}
+.side-foot{padding:12px 18px;border-top:1px solid var(--line-soft);font-size:var(--size-xs);color:var(--text-3);display:flex;align-items:center;gap:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex:none}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{height:60px;flex:none;background:var(--bg-container);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:14px;padding:0 26px;position:sticky;top:0;z-index:5}
+.crumb{display:flex;align-items:center;gap:8px;color:var(--text-3);font-size:var(--size-sm)}
+.crumb b{color:var(--text-1);font-weight:500}
+.top-spacer{flex:1}
+.mode{display:flex;align-items:center;gap:6px;font-size:var(--size-xs);color:var(--text-3);padding:4px 9px;border:1px solid var(--line);border-radius:20px}
+.theme-btn{display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:var(--radius-sm);color:var(--text-2);font-size:var(--size-sm)}
+.theme-btn:hover{background:var(--bg-hover);color:var(--text-1)}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--brand-soft);color:var(--brand);display:grid;place-items:center;font-size:var(--size-sm);font-weight:600}
+.content{padding:22px 26px 36px;max-width:1280px;width:100%;margin:0 auto}
+.demo-note{display:flex;gap:10px;padding:11px 14px;border:1px solid var(--line);border-left:3px solid var(--brand);border-radius:var(--radius-sm);background:var(--bg-container);color:var(--text-2);font-size:var(--size-sm);margin-bottom:20px}
+.demo-note b{color:var(--text-1);font-weight:500}
+.page-head{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px}
+.page-head h1{font-size:var(--size-h1);font-weight:600;letter-spacing:-.2px;line-height:1.35}
+.page-head p{color:var(--text-2);margin-top:3px}
+.head-actions{margin-left:auto;display:flex;gap:10px;flex:none}
+.btn{display:inline-flex;align-items:center;gap:7px;height:34px;padding:0 14px;border-radius:var(--radius-sm);border:1px solid var(--line);background:var(--bg-container);font-size:var(--size-base)}
+.btn:hover{background:var(--bg-hover);border-color:var(--text-3)}
+.btn-primary{background:var(--brand);color:var(--on-brand);border-color:var(--brand);font-weight:500}
+.btn-primary:hover{background:var(--brand-hover);border-color:var(--brand-hover)}
+.panel{background:var(--bg-container);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+.panel-head{display:flex;align-items:center;gap:10px;padding:14px 18px 10px}
+.panel-head h2{font-size:var(--size-h2);font-weight:600}
+.panel-head .sub{font-size:var(--size-xs);color:var(--text-3)}
+.panel-head .right{margin-left:auto}
+.bridge{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:16px}
+.bridge-col{padding:2px 18px 18px}
+.bridge-col+.bridge-col{border-left:1px solid var(--line-soft)}
+.kv{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line-soft);font-size:var(--size-sm)}
+.kv:last-child{border-bottom:0}
+.kv span{color:var(--text-3);min-width:96px}
+.kv b{font-weight:500}
+.swatch{display:inline-block;width:14px;height:14px;border-radius:4px;vertical-align:-2px;margin-right:6px;border:1px solid var(--line)}
+.hint{font-size:var(--size-xs);color:var(--text-3);margin-top:8px;line-height:1.5}
+.live-row{display:flex;align-items:center;gap:10px;margin:6px 0 12px}
+.live-row b{font-size:var(--size-sm);font-weight:500}
+.tag{display:inline-flex;align-items:center;font-size:var(--size-xs);padding:2px 8px;border-radius:4px;background:var(--brand-soft);color:var(--brand)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.bar>span{display:block;height:100%;width:0;border-radius:3px;background:var(--brand);transition:width .1s linear}
+.log{margin-top:12px;height:76px;overflow:auto;background:var(--bg-sunken);border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:8px 10px;font-family:Consolas,Monaco,monospace;font-size:var(--size-xs);color:var(--text-2);line-height:1.7}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.metric{background:var(--bg-container);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);min-height:104px;position:relative;overflow:hidden}
+.metric-top{display:flex;align-items:center;gap:8px;color:var(--text-2);font-size:var(--size-sm)}
+.metric-value{font-size:26px;font-weight:600;letter-spacing:-.5px;line-height:1.3;margin-top:6px}
+.metric-value small{font-size:var(--size-sm);font-weight:400;color:var(--text-3);margin-left:4px}
+.metric-foot{font-size:var(--size-xs);color:var(--text-3)}
+.trend-up{color:var(--success);font-weight:500}
+.spark{position:absolute;right:12px;bottom:10px;width:76px;height:28px;color:var(--brand);opacity:.8}
+.quick-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:0 18px 18px}
+.quick{display:flex;gap:12px;padding:13px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-container);text-align:left;transition:border-color .12s,background .12s,transform .12s}
+.quick:hover{border-color:var(--brand);background:var(--bg-hover);transform:translateY(-1px)}
+.quick-ico{width:32px;height:32px;border-radius:8px;background:var(--brand-soft);color:var(--brand);display:grid;place-items:center;flex:none}
+.quick b{display:block;font-weight:500;margin-bottom:2px}
+.quick span{display:block;font-size:var(--size-xs);color:var(--text-3);line-height:1.5}
+.foot{margin-top:18px;text-align:center;color:var(--text-3);font-size:var(--size-xs)}
+@media (max-width:1000px){.metrics{grid-template-columns:repeat(2,1fr)}.bridge{grid-template-columns:1fr}.bridge-col+.bridge-col{border-left:0;border-top:1px solid var(--line-soft)}.quick-grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:780px){.sidebar{display:none}.topbar{padding:0 14px}.content{padding:16px 14px 30px}.quick-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="12" r="4"/><path d="M12 12h9m-3 0v3m-3-3v2"/></symbol>
+<symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 18v3h16v-3"/></symbol>
+<symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 12h18"/></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/></symbol>
+<symbol id="i-live" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9l2.1 2.1m10 10 2.1 2.1m0-14.2-2.1 2.1m-10 10-2.1 2.1"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.5 1.5m11.2 11.2 1.5 1.5m0-14.2-1.5 1.5M6.4 17.6l-1.5 1.5"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-6 7-6s7 2.5 7 6M17 5a3.5 3.5 0 0 1 0 7m1 3c2.5.5 4 2.5 4 5"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4v16M4 12h16"/></symbol>
+</svg>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">流</div><div class="brand-name">流量捕手</div><div class="brand-ver">原型</div></div>
+    <nav class="nav" id="nav">
+      <div class="nav-group"><button class="nav-head" data-group>开始<svg class="i chev" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+        <div class="nav-items"><button class="nav-item active"><svg class="i"><use href="#i-home"/></svg>工作台</button></div></div>
+      <div class="nav-group"><button class="nav-head" data-group>常用<svg class="i chev" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+        <div class="nav-items">
+          <button class="nav-item"><svg class="i"><use href="#i-compass"/></svg>选题挖掘</button>
+          <button class="nav-item"><svg class="i"><use href="#i-key"/></svg>关键词抓取</button>
+          <button class="nav-item"><svg class="i"><use href="#i-doc"/></svg>文案仿写</button>
+          <button class="nav-item"><svg class="i"><use href="#i-download"/></svg>视频下载</button>
+          <button class="nav-item"><svg class="i"><use href="#i-film"/></svg>短剧成片</button>
+        </div></div>
+      <div class="nav-group collapsed"><button class="nav-head" data-group>分析<svg class="i chev" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+        <div class="nav-items">
+          <button class="nav-item"><svg class="i"><use href="#i-chart"/></svg>竞品体检</button>
+          <button class="nav-item"><svg class="i"><use href="#i-chat"/></svg>评论区截流</button>
+          <button class="nav-item"><svg class="i"><use href="#i-chart"/></svg>数据趋势</button>
+        </div></div>
+      <div class="nav-group collapsed"><button class="nav-head" data-group>更多工具<svg class="i chev" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+        <div class="nav-items">
+          <button class="nav-item"><svg class="i"><use href="#i-bolt"/></svg>批量采集</button>
+          <button class="nav-item"><svg class="i"><use href="#i-live"/></svg>直播监控</button>
+          <button class="nav-item"><svg class="i"><use href="#i-doc"/></svg>音视频转文本</button>
+        </div></div>
+      <div class="nav-group collapsed"><button class="nav-head" data-group>设置<svg class="i chev" style="width:12px;height:12px"><use href="#i-chev"/></svg></button>
+        <div class="nav-items"><button class="nav-item"><svg class="i"><use href="#i-settings"/></svg>设置</button></div></div>
+    </nav>
+    <div class="side-foot"><span class="dot"></span>Python 业务层已连接</div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb">开始 <span>/</span> <b>工作台</b></div>
+      <div class="top-spacer"></div>
+      <div class="mode"><span class="dot"></span><span id="bridge-mode">连接中…</span></div>
+      <button class="theme-btn" id="themeBtn"><svg class="i" id="themeIcon" style="width:14px;height:14px"><use href="#i-moon"/></svg><span id="themeText">深色</span></button>
+      <div class="avatar">轩</div>
+    </header>
+
+    <main class="content">
+      <div class="demo-note"><svg class="i" style="margin-top:2px"><use href="#i-bolt"/></svg>
+        <div><b>可运行原型 · 不是截图</b>　这一页由系统 WebView2 渲染，配色来自 design_tokens.json 唯一真源；下方「桥接验证」里的数据由 Python 业务层实时给出。不联网、不占端口、不调用付费接口，主程序与线上版本均未改动。</div>
+      </div>
+
+      <div class="page-head">
+        <div><h1>工作台</h1><p>下午好，轩总。这一页在验证「网页画界面、Python 做业务」能不能真跑通。</p></div>
+        <div class="head-actions">
+          <button class="btn" id="stopBtn"><svg class="i"><use href="#i-clock"/></svg>停止</button>
+          <button class="btn btn-primary" id="runBtn"><svg class="i"><use href="#i-play"/></svg>启动演示任务</button>
+        </div>
+      </div>
+
+      <section class="panel bridge">
+        <div class="bridge-col" style="padding-top:0">
+          <div class="panel-head" style="padding-left:0"><h2>桥接验证 · 网页读 Python</h2><span class="sub">JS → Python</span></div>
+          <div class="kv"><span>软件版本</span><b id="api-version">读取中…</b></div>
+          <div class="kv"><span>Qt 页面数</span><b class="num" id="api-pages">—</b></div>
+          <div class="kv"><span>官网页数</span><b class="num" id="api-site">—</b></div>
+          <div class="kv"><span>设计令牌</span><b><i class="swatch" id="api-swatch"></i><span id="api-token">—</span></b></div>
+          <div class="kv"><span>数据时间</span><b class="num" id="api-time">—</b></div>
+          <div class="hint" id="api-source">由 Python 侧读取 branding.py、页面目录与官网产物，非写死数据。</div>
+        </div>
+        <div class="bridge-col" style="padding-top:0">
+          <div class="panel-head" style="padding-left:0"><h2>实时推送 · Python 推网页</h2><span class="sub">Python → JS</span></div>
+          <div class="live-row"><b id="live-name">等待任务</b><span class="tag" id="live-state">待机</span><b class="num" id="live-pct" style="margin-left:auto;font-size:12px;color:var(--text-3)">0%</b></div>
+          <div class="bar"><span id="live-bar"></span></div>
+          <div class="log" id="bridge-log">等待 Python 推送进度…</div>
+        </div>
+      </section>
+
+      <section class="metrics">
+        <div class="metric"><div class="metric-top">今日解析量 <svg class="i" style="margin-left:auto"><use href="#i-bolt"/></svg></div><div class="metric-value num">1,284<small>条</small></div><div class="metric-foot"><span class="trend-up">↑ 18.6%</span> 较昨日</div><svg class="spark" viewBox="0 0 76 28" preserveAspectRatio="none"><polyline points="0,23 11,19 22,21 33,14 44,17 55,9 65,12 76,4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="metric"><div class="metric-top">进行中任务 <svg class="i" style="margin-left:auto"><use href="#i-download"/></svg></div><div class="metric-value num">8<small>个</small></div><div class="metric-foot">3 个排队中</div></div>
+        <div class="metric"><div class="metric-top">监控账号 <svg class="i" style="margin-left:auto"><use href="#i-users"/></svg></div><div class="metric-value num">24<small>个</small></div><div class="metric-foot">2 个正在直播</div></div>
+        <div class="metric"><div class="metric-top">剩余额度 <svg class="i" style="margin-left:auto"><use href="#i-chart"/></svg></div><div class="metric-value num">8,420<small>次</small></div><div class="bar" style="margin-top:8px"><span style="width:42%"></span></div></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>天天要用的功能</h2><span class="sub">6 个高频入口 · 名称取自现有软件</span></div>
+        <div class="quick-grid">
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-compass"/></svg></div><div><b>选题挖掘</b><span>找低粉高赞的爆款，今天发什么看它</span></div></button>
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-key"/></svg></div><div><b>关键词抓取</b><span>一个词，把这个赛道数据最好的视频抓全</span></div></button>
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-doc"/></svg></div><div><b>文案仿写</b><span>粘链接就能扒出文案，按体裁仿写成能拍的分镜</span></div></button>
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-download"/></svg></div><div><b>视频下载</b><span>批量下载无水印视频，留着做素材</span></div></button>
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-chart"/></svg></div><div><b>竞品体检</b><span>看同行最近在发什么、哪条跑起来了</span></div></button>
+          <button class="quick" data-demo><div class="quick-ico"><svg class="i"><use href="#i-chat"/></svg></div><div><b>评论区截流</b><span>挖同行评论区里正在问怎么买的人</span></div></button>
+        </div>
+      </section>
+      <div class="foot">原型仅用于架构评审 · 指标卡为演示数据 · 软件仍为 v1.28.2，无需升级</div>
+    </main>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement,btn=document.getElementById('themeBtn'),
+      icon=document.getElementById('themeIcon'),txt=document.getElementById('themeText'),
+      logEl=document.getElementById('bridge-log'),bar=document.getElementById('live-bar'),
+      stateEl=document.getElementById('live-state'),nameEl=document.getElementById('live-name'),
+      pctEl=document.getElementById('live-pct'),logLines=[];
+  function paintTheme(){
+    var dark=root.getAttribute('data-theme')==='dark';
+    icon.firstElementChild.setAttribute('href',dark?'#i-sun':'#i-moon');
+    txt.textContent=dark?'浅色':'深色';
+  }
+  btn.addEventListener('click',function(){
+    root.setAttribute('data-theme',root.getAttribute('data-theme')==='dark'?'light':'dark');paintTheme();
+  });
+  paintTheme();
+
+  function log(msg){
+    var d=new Date();
+    logLines.push('['+d.toLocaleTimeString('zh-CN',{hour12:false})+'] '+msg);
+    if(logLines.length>18){logLines.shift();}
+    logEl.textContent=logLines.join('\n');
+    logEl.scrollTop=logEl.scrollHeight;
+  }
+  window.onProgress=function(p){
+    bar.style.width=p.percent+'%';
+    stateEl.textContent=p.state;
+    nameEl.textContent=p.name;
+    pctEl.textContent=p.percent+'%';
+    if(p.percent%20===0){log('进度 '+p.percent+'% · '+p.state);}
+  };
+  window.onTaskDone=function(p){
+    bar.style.width=p.percent+'%';
+    stateEl.textContent=p.state;
+    pctEl.textContent=p.percent+'%';
+    log('任务结束 · '+p.state);
+  };
+  function paintSnapshot(s){
+    window.__apiSnapshot=s;
+    document.getElementById('api-version').textContent='v'+s.version;
+    document.getElementById('api-pages').textContent=s.qt_pages+' 个页面';
+    document.getElementById('api-site').textContent=s.site_pages+' 个页面';
+    document.getElementById('api-token').textContent='v'+s.token_version+' · 深色主色 '+s.brand_dark;
+    document.getElementById('api-swatch').style.background=s.brand_dark;
+    document.getElementById('api-time').textContent=s.time;
+    document.getElementById('api-source').textContent=s.source;
+    document.getElementById('bridge-mode').textContent='WebView2 ↔ Python 已连接';
+    log('JS 调 Python 成功：get_snapshot() 返回 v'+s.version);
+  }
+  function fallback(){
+    document.getElementById('bridge-mode').textContent='静态预览（无 Python）';
+    document.getElementById('api-version').textContent='预览 v1.28.2';
+    document.getElementById('api-pages').textContent='19 个页面';
+    document.getElementById('api-site').textContent='12 个页面';
+    document.getElementById('api-token').textContent='v1.0 · 深色主色 #C8F751';
+    document.getElementById('api-swatch').style.background='#C8F751';
+    document.getElementById('api-time').textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    log('当前是无头浏览器静态预览，桥接数据留空');
+  }
+  function api(){return window.pywebview&&window.pywebview.api?window.pywebview.api:null;}
+  function startTask(){
+    logLines=[];stateEl.textContent='运行中';bar.style.width='0%';
+    log('启动演示任务');
+    if(api()){
+      api().start_demo_task('桥接自检').then(function(r){
+        if(!r.started){log(r.reason);return;}
+        log('Python 已接收任务：'+r.name);
+      });
+    }else{
+      var p=0;
+      var timer=setInterval(function(){
+        p+=5;
+        window.onProgress({name:'本地模拟',percent:Math.min(p,100),state:p>=100?'已完成':'运行中'});
+        if(p>=100){clearInterval(timer);window.onTaskDone({state:'已完成',percent:100});}
+      },120);
+    }
+  }
+  document.getElementById('runBtn').addEventListener('click',startTask);
+  document.getElementById('stopBtn').addEventListener('click',function(){
+    if(api()){api().stop_demo_task();log('已请求 Python 停止');}
+    stateEl.textContent='已停止';log('任务已停止');
+  });
+  document.querySelectorAll('[data-group]').forEach(function(h){
+    h.addEventListener('click',function(){h.parentElement.classList.toggle('collapsed');});
+  });
+  document.querySelectorAll('.nav-item,.quick').forEach(function(el){
+    el.addEventListener('click',function(){log('界面动作：'+el.textContent.trim().slice(0,12));});
+  });
+  window.addEventListener('pywebviewready',function(){
+    if(!api()){fallback();return;}
+    api().get_snapshot().then(paintSnapshot).catch(function(e){log('读取失败：'+e);fallback();});
+  });
+  setTimeout(function(){if(!window.__apiSnapshot&&!api()){fallback();}},700);
+})();
+</script>
+</body>
+</html>

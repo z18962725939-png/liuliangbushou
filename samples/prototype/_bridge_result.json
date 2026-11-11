@@ -1,0 +1,49 @@
+{
+  "mode": "pywebview + WebView2 真实窗口",
+  "dom_ready": true,
+  "js_to_python": {
+    "js_received": true,
+    "version": "1.28.2",
+    "qt_pages": 19,
+    "site_pages": 12,
+    "brand_dark": "#C8F751",
+    "python_version": "1.28.2"
+  },
+  "python_to_js": {
+    "progress_width": "35%",
+    "log_has_running": true,
+    "state": "运行中",
+    "final_state": "已完成"
+  },
+  "checks": [
+    [
+      "JS 拿到 Python 真实数据",
+      true
+    ],
+    [
+      "版本号来自 branding.py",
+      true
+    ],
+    [
+      "Python 进度推到网页 DOM",
+      true
+    ],
+    [
+      "网页日志记录推送事件",
+      true
+    ],
+    [
+      "任务终态回传网页",
+      true
+    ],
+    [
+      "网页与 Python 令牌同源",
+      true
+    ]
+  ],
+  "token_source": {
+    "web": "#0052D9",
+    "python": "#0052D9"
+  },
+  "ok": true
+}
