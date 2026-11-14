@@ -375,6 +375,16 @@ def main() -> int:
             print("[中止] TikTok 提取链路退化（客户会看到「无法提取」却不知道换完整链接），先修好再发版。")
             return 1
 
+        # ★ 2026-11-14 客户「短剧解析点看热榜一直显示正在拉取热榜」：
+        #   4 处 on_error=self._status.set 在参数求值时就抛 AttributeError，
+        #   Worker 从未启动、状态栏永远停在上一句；且整页没有凭证入口。
+        #   编译/冒烟都查不出，只能靠「离屏 Qt 真点按钮」钉住。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_drama_rank.py")],
+                      "短剧解析热榜（guarded 回调 / 凭证入口 / 真点按钮不卡死）")
+        if code != 0:
+            print("[中止] 短剧解析页又会「一直正在拉取」，先修好再发版。")
+            return 1
+
         # ★ 2026-11-10 客户「官网配图全丢」：官网素材/ui/ 整个目录不在，
         #   build_site.py 遇缺图只 continue，产物里一排 <img src="">，
         #   curl 返回 200 也照样满屏破图。同轮加的全站背景音乐还要防

@@ -51,19 +51,78 @@ _NAME_ALIASES: dict[str, str] = {
 }  # 占位：tags 直接保留源站字符串，不做强映射
 
 
+# 显式调用 configure() 之后，不许 _load_from_config() 再把旧值回补回来
+# （否则「清空凭证」清不掉，界面显示已清除、下次请求却仍带着旧 secret）。
+_CONFIG_OVERRIDE = False
+
+
 def configure(project_id: str = "", secret: str = "") -> None:
-    """由启动逻辑 / 设置页注入凭证（优先于模块级默认值）。"""
-    global PROJECT_ID, PROJECT_SECRET
-    if project_id:
-        PROJECT_ID = project_id.strip()
-    if secret:
-        PROJECT_SECRET = secret.strip()
+    """由启动逻辑 / 凭证设置弹窗注入凭证（覆盖模块级默认值）。
+
+    ★ 2026-11-14：原来只在参数非空时才赋值 ⇒ 用户在界面里「清空凭证」
+      清不掉内存里的旧值。改为无条件覆盖，并标记 _CONFIG_OVERRIDE，
+      避免随后的 _load_from_config() 又从 config.json 把旧值读回来。
+    """
+    global PROJECT_ID, PROJECT_SECRET, _CONFIG_OVERRIDE
+    _CONFIG_OVERRIDE = True
+    PROJECT_ID = (project_id or "").strip()
+    PROJECT_SECRET = (secret or "").strip()
+
+
+def credentials_ready() -> bool:
+    """界面调用：是否已有可用凭证（env 或 config.json 任一来源）。"""
+    _load_from_config()
+    return bool(PROJECT_ID and PROJECT_SECRET)
+
+
+def current_credentials() -> tuple[str, str]:
+    """凭证设置弹窗回填用；只在本机读取，不外发。"""
+    _load_from_config()
+    return PROJECT_ID, PROJECT_SECRET
+
+
+def credential_source() -> str:
+    """给界面显示凭证来自哪里，避免用户以为没保存上。"""
+    _load_from_config()
+    if not (PROJECT_ID and PROJECT_SECRET):
+        return ""
+    if os.getenv("TRAFFIC_XIAOYING_PROJECT", "").strip() and \
+            os.getenv("TRAFFIC_XIAOYING_SECRET", "").strip():
+        return "环境变量"
+    return "本机配置"
+
+
+def save_credentials(project_id: str, secret: str) -> tuple[bool, str]:
+    """把凭证写进 config.json 的 xiaoying_api 段并即时生效。
+
+    ★ 只改这一个键，其它设置（Cookie / 转写 / 保存目录…）原样保留。
+      凭证属于客户自己的项目账号，只存本机，不进日志、不上传。
+    """
+    pid = (project_id or "").strip()
+    sec = (secret or "").strip()
+    try:
+        import json
+        from justoneapi_collector import branding
+        cfg = branding.app_data_dir() / "config.json"
+        data: dict = {}
+        if cfg.exists():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8")) or {}
+            except Exception:  # noqa: BLE001  配置损坏时不要连累其它键一起丢
+                data = {}
+        data["xiaoying_api"] = {"project_id": pid, "secret": sec}
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return False, f"凭证保存失败（{type(e).__name__}）：{e}"
+    configure(pid, sec)          # 统一走显式覆盖，清不掉旧值的老毛病一并堵住
+    return True, "凭证已保存到本机并立即生效"
 
 
 def _load_from_config() -> None:
     """若 env 没给，则从 config.json 的 xiaoying_api 段读取（只补空的）。"""
     global PROJECT_ID, PROJECT_SECRET
-    if PROJECT_ID and PROJECT_SECRET:
+    if _CONFIG_OVERRIDE or (PROJECT_ID and PROJECT_SECRET):
         return
     try:
         from justoneapi_collector import branding
@@ -114,7 +173,7 @@ def _request(path: str, params: dict[str, Any] | None = None,
     """统一 GET 请求 + 签名 + 包络解析。失败返回 (None, 人话原因)。不抛异常。"""
     _load_from_config()
     if not PROJECT_ID or not PROJECT_SECRET:
-        return None, "未配置短剧解析凭证（在项目控制台拿到 project id / secret 后，设置环境变量 TRAFFIC_XIAOYING_PROJECT / TRAFFIC_XIAOYING_SECRET，或在设置页填写）"
+        return None, "尚未配置短剧解析凭证 —— 请在「短剧解析」页点「设置凭证」，填入项目控制台的 project id / secret（与软件授权码不是同一套）"
 
     params = dict(params or {})
     # 鉴权四参数走【查询串】（非请求头）：app_id / timestamp / nonce / sign
