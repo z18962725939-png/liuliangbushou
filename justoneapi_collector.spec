@@ -198,6 +198,8 @@ hiddenimports = [
     # 页面也是新增页，打包后曾多次出现「只见状态栏不动」的静默缺失。
     "gui_qt.pages.drama_parse_page",
     "justoneapi_collector.drama_api",
+    # 2026-11-14 免凭证公开热榜降级源（httpx 在函数体内 import，显式登记防裁）。
+    "justoneapi_collector.drama_public_rank",
     # 评论区截流核心（页面里 import，静态分析可能漏）
     "justoneapi_collector.comment_mining",
     # 引导条组件与「使用教程」对话框（被各页面 main_window 动态引用）

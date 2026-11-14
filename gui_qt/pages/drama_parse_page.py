@@ -18,6 +18,16 @@
   同时该页从上线起就没有凭证入口（错误文案却写「在设置页填写」），
   drama_api.configure() 全库无调用方 ⇒ 即使回调修好也只会显示「未配置凭证」。
   本轮一并补齐：unified guarded 回调 + 凭证设置弹窗 + 未配置时的前置引导。
+
+★ 2026-11-14 22:20 增补「免凭证公开热榜」降级：
+  调查 PhoenixReadApi 后确认现状同源（小影 API 的 drama/hongguo 就是红果），
+  缺的只是客户自备凭证。为让没凭证的客户也能「看热榜」找选题，新增
+  drama_public_rank：只取红果官网首页 SSR 的公开元数据（剧名/名次/集数/
+  分类/封面），不解析播放直链、不碰 CENC 解密、不登录、不翻页。
+  链路：有凭证 → drama_api.rank()（完整热榜 + 集数 + 下载）；
+        无凭证 → drama_public_rank.fetch_rank()（仅选题参考）。
+  ★ 公开源条目一律不许拿去调 detail / 下载：series_id 用途不同，
+    且会重演「点了没反应」。_public_mode 下前置拦截并给出可操作提示。
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ from PySide6.QtWidgets import (
 
 from ._base import StatusLine, Worker, connect_guarded
 from gui_qt.widgets.progress import FlowProgressBar
-from justoneapi_collector import drama_api
+from justoneapi_collector import drama_api, drama_public_rank
 
 _COMPLIANCE_HINT = (
     "本功能仅用于「自有 / 已授权」短剧的二创素材获取，或找选题 / 预览参考。"
@@ -44,6 +54,7 @@ _CRED_HINT = (
     "短剧解析使用独立的 XiaoYingAPI 项目凭证，与软件授权码不是同一套。"
     "请在项目控制台创建项目，把 project id / secret 填在下面；"
     "凭证只保存在本机 config.json，不会上传。"
+    "不配置也能看免凭证公开热榜（仅选题参考）；配置后才有搜索、集数与下载。"
 )
 
 
@@ -54,6 +65,7 @@ class DramaParsePage(QWidget):
         self._series: list[dict] = []     # 当前搜索 / 热榜结果（归一化）
         self._eps: list[dict] = []        # 当前选中剧集的集列表（归一化）
         self._authorized = False          # 会话内授权确认标记
+        self._public_mode = False         # 当前列表是否来自免凭证公开榜（仅选题参考）
         self._save_dir = self._default_save_dir()
         self._build()
         self.apply_theme("light")
@@ -127,6 +139,11 @@ class DramaParsePage(QWidget):
         self._wire_btn(b_search, self._do_search, "搜索短剧")
         row.addWidget(b_search, 1)
         b_hot = QPushButton("看热榜")
+        b_hot.setToolTip(
+            "已配置凭证：拉取完整热榜，可查看集数并下载。\n"
+            "未配置凭证：自动改用红果官网公开热榜，免凭证看选题，"
+            "但只提供剧名 / 名次 / 集数 / 分类等元数据。"
+        )
         self._wire_btn(b_hot, self._do_rank, "看热榜")
         row.addWidget(b_hot, 1)
         root.addLayout(row)
@@ -191,7 +208,8 @@ class DramaParsePage(QWidget):
             self._cred_label.setText(f"短剧解析凭证：已配置（来源：{src}）")
         else:
             self._cred_label.setText(
-                "短剧解析凭证：未配置 —— 点右侧「设置凭证」填写项目 id / secret 后才能拉取热榜"
+                "短剧解析凭证：未配置 —— 「看热榜」可用免凭证公开数据（仅选题参考）；"
+                "搜索、集数与下载需点右侧「设置凭证」"
             )
 
     def _edit_credentials(self) -> bool:
@@ -228,7 +246,10 @@ class DramaParsePage(QWidget):
         return ok
 
     def _ensure_credentials(self) -> bool:
-        """搜索 / 热榜前置：没凭证就当场引导配置，不发注定失败的请求。"""
+        """搜索前置：没凭证就当场引导配置，不发注定失败的请求。
+
+        ★ 热榜不走这里：无凭证时改走 drama_public_rank 的免凭证公开榜。
+        """
         if drama_api.credentials_ready():
             return True
         self._say("尚未配置短剧解析凭证 —— 请在弹窗里填写项目 id / secret", "warn")
@@ -256,16 +277,25 @@ class DramaParsePage(QWidget):
         return ("search", data, err)
 
     def _do_rank(self):
-        if not self._ensure_credentials():
+        """有凭证 → 完整热榜；没凭证 → 自动降级到免凭证公开榜（仅选题参考）。"""
+        if drama_api.credentials_ready():
+            self._say("正在拉取热榜…")
+            w = Worker(self._run_rank)
+            self._wire_worker(w, self._on_search_done, "拉取失败", "热榜结果")
+            w.start()
             return
-        self._say("正在拉取热榜…")
-        w = Worker(self._run_rank)
-        self._wire_worker(w, self._on_search_done, "拉取失败", "热榜结果")
+        self._say("正在拉取公开热榜（免凭证，仅供选题参考）…")
+        w = Worker(self._run_public_rank)
+        self._wire_worker(w, self._on_search_done, "公开热榜拉取失败", "公开热榜")
         w.start()
 
     def _run_rank(self, worker):
         data, err = drama_api.rank()
         return ("rank", data, err)
+
+    def _run_public_rank(self, worker):
+        items, err = drama_public_rank.fetch_rank()
+        return ("public-rank", {"results": items}, err)
 
     def _on_search_done(self, payload):
         kind, data, err = payload
@@ -273,26 +303,53 @@ class DramaParsePage(QWidget):
             self._say(err, "error")
             return
         results = []
-        if kind == "search" and isinstance(data, dict):
-            results = data.get("results") or []
-        elif kind == "rank" and isinstance(data, dict):
+        if kind in ("search", "rank", "public-rank") and isinstance(data, dict):
             results = data.get("results") or []
         if not results:
             self._say("没有找到相关短剧")
             self._list.clear()
+            self._public_mode = False
             return
+        self._public_mode = (kind == "public-rank")
         self._series = [drama_api.normalize_series(r) for r in results]
         self._list.clear()
+        # 换一批结果就清空集数与选中态，避免上一部剧残留导致误下载
+        self._eps = []
+        self._eps_list.clear()
+        if self._public_mode:
+            self._detail_label.setText(
+                "公开热榜只提供选题 / 预览参考的元数据 —— "
+                "配置凭证后再点「看热榜」，才能查看集数与下载"
+            )
+        else:
+            self._detail_label.setText("选择上方一部剧，可查看集数并下载")
         for s in self._series:
-            item = QListWidgetItem(f"{s['name']}  ｜ {s['score'] or '—'}分  ｜ {s['heat'] or '—'}热度")
+            if self._public_mode:
+                tags = " / ".join(s["tags"][:3]) or "公开榜单"
+                label = f"{s['name']}  ｜ {s['heat'] or '—'}  ｜ {tags}"
+            else:
+                label = f"{s['name']}  ｜ {s['score'] or '—'}分  ｜ {s['heat'] or '—'}热度"
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, s["series_id"])
             self._list.addItem(item)
-        self._say(f"找到 {len(self._series)} 部短剧，点击查看集数", "ok")
+        if self._public_mode:
+            self._say(
+                f"公开热榜 {len(self._series)} 部（免凭证，仅供选题参考；"
+                "看集数与下载请先点「设置凭证」再点「看热榜」）", "ok")
+        else:
+            self._say(f"找到 {len(self._series)} 部短剧，点击查看集数", "ok")
 
     # ------------------------------------------------------------------
     #  选剧 → 加载集列表
     # ------------------------------------------------------------------
     def _on_series_clicked(self, item: QListWidgetItem):
+        # ★ 公开榜的 series_id 不是小影 API 的取集凭证，拿去调 detail 必然失败。
+        #   点了必须当场说清，绝不许退化成「点了没反应」。
+        if self._public_mode:
+            self._say(
+                "公开热榜仅提供选题参考的元数据；要看集数或下载，"
+                "请先点「设置凭证」，再点「看热榜」拉取完整热榜", "warn")
+            return
         sid = item.data(Qt.UserRole)
         if not sid:
             return

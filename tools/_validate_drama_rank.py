@@ -80,8 +80,8 @@ for _p in (ROOT / "gui_qt" / "pages").glob("*.py"):
 chk("全库 gui_qt/pages 无同类无效回调", not _bad_all, str(_bad_all[:5]))
 chk("无裸 .clicked.connect（槽抛异常会静默卡死）",
     ".clicked.connect(" not in DP)
-chk("四个 Worker 统一走 _wire_worker",
-    DP.count("self._wire_worker(") == 4,
+chk("全部 Worker 统一走 _wire_worker（含新增的公开热榜 Worker）",
+    DP.count("self._wire_worker(") == 5,
     f"实际 {DP.count('self._wire_worker(')} 处")
 chk("_wire_worker 的 done 与 error 都 guarded 且带 on_error",
     DP.count("connect_guarded(w.done") == 1 and
@@ -89,9 +89,14 @@ chk("_wire_worker 的 done 与 error 都 guarded 且带 on_error",
     "on_error=lambda m: self._say(m, \"error\")" in DP)
 _seg_search = DP.split("def _do_search", 1)[1].split("def _run_search", 1)[0]
 _seg_rank = DP.split("def _do_rank", 1)[1].split("def _run_rank", 1)[0]
-chk("搜索与热榜都前置凭证检查（不再发注定失败的请求）",
-    DP.count("self._ensure_credentials()") == 2 and
-    "_ensure_credentials()" in _seg_search and "_ensure_credentials()" in _seg_rank)
+chk("搜索仍前置凭证检查（不发注定失败的签名请求）",
+    DP.count("self._ensure_credentials()") == 1 and
+    "_ensure_credentials()" in _seg_search)
+chk("热榜无凭证时改走免凭证公开源，有凭证时仍走 drama_api.rank",
+    "drama_api.credentials_ready()" in _seg_rank and
+    "Worker(self._run_public_rank)" in _seg_rank and
+    "Worker(self._run_rank)" in _seg_rank and
+    "_ensure_credentials()" not in _seg_rank)
 chk("凭证设置弹窗存在且 secret 用密码回显",
     "def _edit_credentials" in DP and "QLineEdit.EchoMode.Password" in DP)
 chk("凭证标签会在构造时刷新（一进页就能看见状态）",
@@ -116,6 +121,7 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 from PySide6.QtCore import QTimer                        # noqa: E402
 from gui_qt.pages.drama_parse_page import DramaParsePage  # noqa: E402
 from justoneapi_collector import drama_api               # noqa: E402
+from justoneapi_collector import drama_public_rank       # noqa: E402
 
 
 class _Ctx:
@@ -134,17 +140,26 @@ def pump(ms: int = 900) -> None:
     app.exec()
 
 
-# --- A：未配置凭证 → 应当明确提示 / 引导，绝不发请求、绝不留在「正在拉取热榜」
+# --- A：未配置凭证 → 自动降级到免凭证公开榜；不发签名请求、不卡「正在拉取」
+_pub_fake = [
+    {"series_id": "p1", "name": "公开剧甲", "heat": "热榜第 1 名", "tags": ["玄幻", "全30集"]},
+    {"series_id": "p2", "name": "公开剧乙", "heat": "热榜第 2 名", "tags": ["都市", "全60集"]},
+]
 with mock.patch.object(drama_api, "credentials_ready", return_value=False), \
-     mock.patch.object(page, "_edit_credentials", return_value=False), \
-     mock.patch.object(drama_api, "rank", side_effect=AssertionError("不该发请求")) as m_rank:
+     mock.patch.object(drama_api, "rank", side_effect=AssertionError("不该发签名请求")) as m_rank, \
+     mock.patch.object(drama_public_rank, "fetch_rank",
+                       return_value=(_pub_fake, "")) as m_pub:
     btn.click()
-    pump(400)
-    chk("[A] 未配置凭证：状态栏不再停在「正在拉取热榜…」",
-        "正在拉取热榜" not in page._status.text(), repr(page._status.text()))
-    chk("[A] 未配置凭证：确实没有发出 rank 请求", m_rank.call_count == 0)
-    chk("[A] 未配置凭证：给了可操作提示",
-        "凭证" in page._status.text(), repr(page._status.text()))
+    pump(900)
+    chk("[A] 未配置凭证：状态栏不再停在「正在拉取…」",
+        "正在拉取" not in page._status.text(), repr(page._status.text()))
+    chk("[A] 未配置凭证：没有发出 drama_api.rank 签名请求", m_rank.call_count == 0)
+    chk("[A] 未配置凭证：改走免凭证公开榜", m_pub.call_count == 1)
+    chk("[A] 未配置凭证：列表渲染出 2 条公开结果",
+        page._list.count() == 2, f"实际 {page._list.count()} 条")
+    chk("[A] 未配置凭证：状态栏标明来源并给出可操作提示",
+        "公开热榜" in page._status.text() and "凭证" in page._status.text(),
+        repr(page._status.text()))
 
 # --- B：有凭证 + 正常返回 → 列表出数据
 fake = {"results": [{"series_id": "s1", "name": "测试短剧", "score": "9.2", "heat": "12万"}]}
