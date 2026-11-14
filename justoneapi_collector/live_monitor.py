@@ -1,5 +1,9 @@
 """
-Live stream monitor & recorder for Douyin.
+Live stream monitor & recorder for Douyin + TikTok.
+
+★ TikTok 走独立适配层 tiktok_live.py：CDP 真浏览器过 WAF 取 roomId →
+  webcast 查状态/流地址 → 带代理的 ffmpeg 录制。它不调 JustOneAPI、
+  不进付费闸门，免费版同样可用；客户机需自备可用海外出口（代理可配置）。
 
 Capabilities:
   - Monitor:  Poll user-profile-v3 for live_status == 1 (live now).
@@ -37,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import tiktok_live
 from .client import JustOneAPICollector
 from .douyin_live_stream import DouyinLiveStreamInfo, DouyinLiveStreamResolver
 
@@ -65,6 +70,9 @@ class LiveStatus:
     #   监控目标一多，光看昵称根本想不起来这个号是干嘛的 —— 备注随目标一起
     #   落盘（live_targets.json），重启不丢。新字段一律追加在末尾。
     note: str = ""
+    # ★ v1.28.5：直播间平台。"douyin"（默认，兼容旧名单）/ "tiktok"。
+    #   TikTok 不走 user-profile-v3，也不走抖音 webcast/a_bogus 签名。
+    platform: str = "douyin"
 
 
 def _safe_filename(text: str, max_len: int = 50) -> str:
@@ -192,7 +200,7 @@ class LiveMonitor:
 
     def __init__(self, client: JustOneAPICollector, save_dir: Path | None = None,
                  auto_record: bool = True, ffmpeg_path: str | None = None,
-                 douyin_cookie: str = ""):
+                 douyin_cookie: str = "", tiktok_proxy: str | None = None):
         self.client = client
         if save_dir is None:
             desktop = Path.home() / "Desktop"
@@ -209,6 +217,12 @@ class LiveMonitor:
         # 抖音登录 Cookie（内置浏览器扫码登录得到）：带上它解析直播流更稳
         self.douyin_cookie = (douyin_cookie or "").strip()
         self._resolver = DouyinLiveStreamResolver(cookie=self.douyin_cookie)
+        # ★ TikTok 代理：None = 自动探测本机常见端口（客户机都装了代理，但
+        #   端口各家不同，绝不写死 7897）；空串 = 用户明确不用代理。
+        self.tiktok_proxy = (tiktok_live.detect_proxy() if tiktok_proxy is None
+                             else str(tiktok_proxy or "").strip())
+        # 浏览器会话懒加载且复用，避免每个轮询周期都重过一次 WAF 挑战
+        self._tiktok_browser: tiktok_live.TikTokLiveBrowser | None = None
 
         self._targets: dict[str, LiveStatus] = {}   # sec_uid -> LiveStatus
         self._polling = False
@@ -290,6 +304,10 @@ class LiveMonitor:
                     input_type=str(it.get("input_type") or "昵称"),
                     live_url=str(it.get("live_url") or ""),
                     note=str(it.get("note") or ""),
+                    # 旧版名单没有 platform 字段：从伪 ID 反推，绝不丢目标
+                    platform=str(it.get("platform") or
+                                 ("tiktok" if sec_uid.startswith("tiktok:")
+                                  else "douyin")),
                 )
                 n += 1
             except Exception:               # noqa: BLE001
@@ -304,7 +322,8 @@ class LiveMonitor:
             data = {"saved": int(time.time()), "targets": [
                 {"sec_uid": t.sec_uid, "nickname": t.nickname,
                  "input_type": t.input_type, "room_id": t.room_id,
-                 "live_url": t.live_url, "note": t.note}
+                 "live_url": t.live_url, "note": t.note,
+                 "platform": t.platform}
                 for t in self._targets.values()
             ]}
             tmp = path.with_suffix(".json.tmp")
@@ -354,6 +373,18 @@ class LiveMonitor:
     #  Monitoring
     # ==================================================================
 
+    def set_tiktok_proxy(self, proxy: str | None) -> str:
+        """界面改完代理立即生效；重建浏览器会话，避免旧会话还走老出口。"""
+        self.tiktok_proxy = (tiktok_live.detect_proxy() if proxy is None
+                             else str(proxy or "").strip())
+        try:
+            if self._tiktok_browser:
+                self._tiktok_browser.close()
+        except Exception:                   # noqa: BLE001
+            pass
+        self._tiktok_browser = None
+        return self.tiktok_proxy
+
     def add_target(self, sec_uid: str, nickname: str = "", input_type: str = "昵称",
                    note: str = ""):
         """Add a blogger to monitor by sec_uid.
@@ -366,6 +397,33 @@ class LiveMonitor:
             input_type=input_type, note=str(note or ""),
         )
         self._save_state()
+
+    def _add_tiktok_target(self, raw: str, note: str = "") -> tuple[bool, str, str]:
+        """TikTok 目标：零网络快路径，只登记 handle + 归一化链接。
+
+        真实昵称 / roomId / 开播状态由 _check_tiktok 异步回填（首次会过一次
+        浏览器 WAF 挑战，约 10~20 秒），绝不在这里阻塞「添加」这个动作。
+        """
+        handle = tiktok_live.normalize_handle(raw)
+        if not handle:
+            return False, "TikTok 链接里没认出主播号，请贴完整直播间链接或 @主播号", ""
+        sec_uid = f"tiktok:{handle}"
+        url = tiktok_live.live_url(handle)
+        if sec_uid in self._targets:
+            st = self._targets[sec_uid]
+            st.platform = "tiktok"
+            st.live_url = url
+            if note:                       # 重复添加只补备注，不覆盖空备注
+                st.note = str(note)
+            self._save_state()
+            return True, f"@{handle}", sec_uid
+        self.add_target(sec_uid, f"@{handle}", input_type="链接", note=note)
+        st = self._targets[sec_uid]
+        st.platform = "tiktok"
+        st.live_url = url
+        st.room_id = ""                   # 由 _check_tiktok 首次回填
+        self._save_state()
+        return True, f"@{handle}", sec_uid
 
     def add_target_by_link(self, live_url: str, note: str = "") -> tuple[bool, str, str]:
         """
@@ -381,6 +439,10 @@ class LiveMonitor:
         import re
 
         s = (live_url or "").strip()
+        # ★ TikTok 直播间链接 / @主播号走独立适配层，绝不丢给抖音解析器
+        #   （旧行为会把链接原样交给抖音 webcast，客户只看到「无法提取 web_rid」）。
+        if tiktok_live.is_tiktok_input(s):
+            return self._add_tiktok_target(s, note)
         web_rid = ""
         nickname = ""
         # ★ 2026-11-05 客户现场「点添加监控无反应」另一半根因：添加这个动作
@@ -436,6 +498,10 @@ class LiveMonitor:
         """Single-shot check of one blogger's live status."""
         st = self._targets.get(sec_uid)
 
+        # ★ TikTok 目标走独立链路：不调 JustOneAPI、不进付费闸门
+        if sec_uid.startswith("tiktok:") or (st is not None and st.platform == "tiktok"):
+            return self._check_tiktok(sec_uid, st)
+
         # 链接方式添加的目标：sec_uid 是伪 ID（web_rid:xxx），user-profile-v3
         # 查不到它。改走直播间解析路径——既能判断开播，又能顺带拿到真实
         # 昵称并缓存流地址（供开播自动录制直接使用）。
@@ -463,6 +529,63 @@ class LiveMonitor:
         st.avatar_url = urls[0] if urls else st.avatar_url
         st.follower_count = int(user.get("follower_count", 0) or 0)
         st.last_checked = time.time()
+        return st
+
+    def _check_tiktok(self, sec_uid: str, st: LiveStatus | None) -> LiveStatus | None:
+        """TikTok 状态检查：必要时先过 WAF 取 roomId，再查 webcast。
+
+        三态约定沿用抖音链路：接口失败 / 状态未知一律**保留上次 is_live**，
+        写「状态检查失败：…」让界面显示「状态未知」，绝不冒充「未开播」。
+        下播后 /live 页仍给 roomId 且标题仍写「正在直播」，故状态只认接口。
+        """
+        if st is None:
+            return None
+        handle = sec_uid.split(":", 1)[-1]
+        if not st.room_id or st.room_id == "0":
+            try:
+                if self._tiktok_browser is None:
+                    self._tiktok_browser = tiktok_live.TikTokLiveBrowser(
+                        proxy=self.tiktok_proxy)
+                html = self._tiktok_browser.fetch_live_page(handle)
+                info = tiktok_live.extract_page_info(html)
+                if not info.ok:
+                    st.stream_error = ("状态检查失败：直播间页里没找到 roomId"
+                                       "（可能需要登录或页面结构改版）")
+                    st.last_checked = time.time()
+                    return st
+                st.room_id = info.room_id
+                if info.nickname:
+                    st.nickname = info.nickname
+            except Exception as exc:                        # noqa: BLE001
+                st.stream_error = f"状态检查失败：{exc}"
+                st.last_checked = time.time()
+                return st                                  # 保留上次 is_live
+
+        snap = tiktok_live.fetch_room(st.room_id, self.tiktok_proxy)
+        st.last_checked = time.time()
+        if snap.error or snap.status == tiktok_live.STATUS_UNKNOWN:
+            st.stream_error = (f"状态检查失败：{snap.error or '接口没给出明确的在播/下播状态'}")
+            if snap.status_code == tiktok_live.ROOM_INVALID:
+                st.room_id = ""                            # 换了一场直播，下轮重取
+            return st                                      # 保留上次 is_live
+
+        live = snap.is_live
+        st.is_live = live
+        st.live_status = 1 if live else 0
+        st.stream_error = ""
+        if live:
+            st.stream_url = snap.stream_url
+            st.hls_urls = {f"hls_{i}": u for i, u in enumerate(snap.stream_urls)}
+            st.flv_urls = {}
+            if not st.stream_url:
+                st.stream_error = "正在直播，但接口没给可用的流地址；可点「录制选中主播」重试"
+        else:
+            # ★ 实测 11-14：下播后旧流地址立刻 404（sign/expire 没过期也没用）
+            st.stream_url = ""
+            st.hls_urls = {}
+            st.flv_urls = {}
+        if snap.owner:
+            st.nickname = f"@{snap.owner}"
         return st
 
     def _check_by_link(self, sec_uid: str, st: LiveStatus | None) -> LiveStatus | None:
@@ -530,6 +653,31 @@ class LiveMonitor:
             st.nickname = info.anchor_name
         return st
 
+    def _tiktok_stream_url(self, sec_uid: str, st: LiveStatus) -> str | None:
+        """开录前现取流地址：缓存地址可能已因下播/换场失效（实测 404）。"""
+        if not st.room_id or st.room_id == "0":
+            self.check_once(sec_uid)                       # 先过 WAF 补 room_id
+        if not st.room_id or st.room_id == "0":
+            st.stream_error = (st.stream_error or
+                               "还没取到 TikTok 房间号，请先点「立即检查一次」")
+            return None
+        snap = tiktok_live.fetch_room(st.room_id, self.tiktok_proxy)
+        if snap.error:
+            st.stream_error = f"TikTok 流地址获取失败：{snap.error}"
+            return None
+        if not snap.is_live or not snap.stream_url:
+            # 下播瞬间 webcast 还会给一个已撤销的死链，明确说清原因，
+            # 别让客户以为是软件坏了（实测 11-15）
+            st.stream_error = ("主播刚下播，直播流已撤销，等下次开播会自动重试"
+                               if snap.is_offline else
+                               "主播当前未开播（或接口没给流地址），开播后会自动重试")
+            return None
+        st.stream_url = snap.stream_url
+        st.hls_urls = {f"hls_{i}": u for i, u in enumerate(snap.stream_urls)}
+        st.flv_urls = {}
+        st.stream_error = ""
+        return st.stream_url
+
     def resolve_stream_url(self, sec_uid: str) -> str | None:
         """
         Auto-resolve the no-watermark stream URL for a live blogger.
@@ -545,6 +693,10 @@ class LiveMonitor:
         st = self._targets.get(sec_uid)
         if not st:
             return None
+
+        # ★ TikTok 开录前一律重取流地址，绝不复用检查时缓存的旧地址
+        if st.platform == "tiktok":
+            return self._tiktok_stream_url(sec_uid, st)
 
         # 链接方式添加的主播：直接走 resolve_auto（web enter 优先 + HTML 兜底），最稳
         if getattr(st, "live_url", ""):
@@ -625,8 +777,10 @@ class LiveMonitor:
         if sec_uid in self._active_procs:
             return True, "already recording"
 
-        # Resolve stream URL
-        url = st.stream_url or self.resolve_stream_url(sec_uid)
+        # TikTok 一律重取（旧地址下播即 404）；抖音可复用刚检查时缓存的地址
+        url = (self.resolve_stream_url(sec_uid)
+               if st.platform == "tiktok"
+               else (st.stream_url or self.resolve_stream_url(sec_uid)))
         if not url:
             err = getattr(st, "stream_error", "") or "未返回可用的直播流地址"
             # 「尚未获取到房间号」本身就是可操作的引导语，原样返回
@@ -748,6 +902,9 @@ class LiveMonitor:
 
     # 启动健康检查最长等待秒数（确认 ffmpeg 真在写数据，而不是启动即失败）
     STARTUP_CHECK_WAIT = 6.0
+    # TikTok 经代理拉海外 HLS，首字节明显慢于抖音本地链路；实测 6 秒会把
+    # 正常起播误判成「流地址无效」。抖音仍用 6 秒，不受影响。
+    TIKTOK_STARTUP_WAIT = 15.0
     # 小于该体积视为"没录到东西"：mp4 空壳只有 ftyp 头，约 48 字节
     MIN_VALID_BYTES = 20 * 1024
     # 写 q 之后等待 ffmpeg 优雅退出的上限秒数
@@ -820,10 +977,21 @@ class LiveMonitor:
         if not self._ffmpeg:
             return False, "未找到 ffmpeg，请安装 ffmpeg 并加入 PATH，或在设置中指定路径。"
 
+        # ★ TikTok 拉流比抖音多三样：-http_proxy、Referer、浏览器 UA
+        #   （实测 11-14：直连 CDN 被重置，裸请求被拒）。手动粘贴 TikTok
+        #   流地址录制时按 CDN 域名识别，不要求目标一定在监控表里。
+        target = self._targets.get(sec_uid)
+        is_tiktok = ((target is not None and target.platform == "tiktok")
+                     or "tiktokcdn" in (stream_url or "")
+                     or "tiktok.com" in (stream_url or ""))
+        proxy = self.tiktok_proxy if is_tiktok else ""
+
         def _build(part_path: Path) -> list:
-            cmd = [
-                self._ffmpeg,
-                "-y",
+            cmd = [self._ffmpeg, "-y"]
+            if is_tiktok:
+                cmd += ["-loglevel", "warning"]
+                cmd += tiktok_live.ffmpeg_input_args(proxy)
+            cmd += [
                 "-i", stream_url,
                 "-c", "copy",       # no re-encode (fast)
                 "-bsf:a", "aac_adtstoasc",
@@ -835,7 +1003,10 @@ class LiveMonitor:
             cmd += ["-f", "mp4", str(part_path)]
             return cmd
 
-        return self._spawn(save_name, duration, sec_uid, startup_check, _build)
+        return self._spawn(save_name, duration, sec_uid, startup_check, _build,
+                           env_extra=tiktok_live.proxy_env(proxy) if is_tiktok else None,
+                           startup_wait=(self.TIKTOK_STARTUP_WAIT
+                                         if is_tiktok else None))
 
     # ------------------------------------------------------------------
     #  Screen region recording (屏幕区域录制)
@@ -917,7 +1088,9 @@ class LiveMonitor:
     #  Generic ffmpeg spawn（拉流录制与屏幕区域录制共用）
     # ------------------------------------------------------------------
     def _spawn(self, save_name: str, duration: int, sec_uid: str,
-               startup_check: bool, build_cmd) -> tuple[bool, str]:
+               startup_check: bool, build_cmd,
+               env_extra: dict | None = None,
+               startup_wait: float | None = None) -> tuple[bool, str]:
         """启动一个 ffmpeg 录制任务并登记，复用统一的健壮逻辑。
 
         Args:
@@ -926,6 +1099,9 @@ class LiveMonitor:
             sec_uid:   登记用的 key（主播录制传 sec_uid；区域录制传唯一 key）。
             startup_check: 是否做启动健康检查。
             build_cmd: 接收 part_path，返回完整 ffmpeg 命令列表的 callable。
+            env_extra: 额外环境变量（TikTok 录制注入代理；None = 继承父进程）。
+            startup_wait: 启动健康检查窗口；TikTok 经代理拉海外 HLS 比抖音慢，
+                需要更久才写出第一个字节，None = 用类常量（抖音 6 秒）。
 
         Returns: (success, message)
         """
@@ -949,12 +1125,17 @@ class LiveMonitor:
             log_fh = open(log_path, "w", encoding="utf-8", errors="replace")
         except Exception:
             log_fh = None
+        popen_env = None
+        if env_extra:
+            popen_env = os.environ.copy()
+            popen_env.update(env_extra)
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,                  # 必须：优雅停止靠它
                 stdout=subprocess.DEVNULL,
                 stderr=log_fh if log_fh else subprocess.DEVNULL,   # 绝不能是 PIPE
+                env=popen_env,                          # None = 继承（抖音链路不变）
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
             )
         except Exception as e:
@@ -978,8 +1159,9 @@ class LiveMonitor:
                                    "part": str(part_path)}
 
         if startup_check:
-            ok, reason = self._verify_started(proc, part_path, log_path,
-                                              wait=self.STARTUP_CHECK_WAIT)
+            ok, reason = self._verify_started(
+                proc, part_path, log_path,
+                wait=startup_wait or self.STARTUP_CHECK_WAIT)
             if not ok:
                 self._cleanup_failed(proc, key, part_path)
                 return False, reason

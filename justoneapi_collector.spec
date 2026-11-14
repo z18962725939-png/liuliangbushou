@@ -118,6 +118,9 @@ hiddenimports = [
     "justoneapi_collector.video_downloader",
     "justoneapi_collector.live_monitor",
     "justoneapi_collector.douyin_live_stream",
+    # v1.28.5 TikTok 直播适配层：live_monitor 顶层 import，但内部还用到
+    # browser_login 的 CDP 会话与 httpx，静态分析容易漏，必须显式登记。
+    "justoneapi_collector.tiktok_live",
     "justoneapi_collector.ab_sign",
     # v1.28.3 转写状态判定 / 输出去重 / 文稿映射清单（transcribe.py 顶层引用）
     "justoneapi_collector.transcribe_state",

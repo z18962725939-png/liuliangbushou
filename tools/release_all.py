@@ -441,6 +441,15 @@ def main() -> int:
             print("[中止] 直播状态判定退化（会把正在直播显示成未开播），先修好再发版。")
             return 1
 
+        # ★ 2026-11-15 客户「TikTok 直播监控以及录制不了」：整条直播链路原本
+        #   只做抖音，TikTok 链接被丢给抖音解析器。接入后必须钉死平台路由、
+        #   流地址重取、代理参数，以及抖音链路一个字节都不变。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_tiktok_live.py")],
+                      "TikTok 直播接入（平台路由 / 状态三态 / 代理录制）")
+        if code != 0:
+            print("[中止] TikTok 直播接入退化（会退回「只支持抖音」或拉不到流），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")

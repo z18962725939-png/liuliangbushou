@@ -23,6 +23,8 @@ from ._base import (StatusLine, Worker, _feature_ok, confirm_destructive, connec
 from gui_qt.widgets.progress import FlowProgressBar
 # ★ 2026-11-03：屏幕区域录制 —— 拖拽选矩形录屏（与直播拉流录制互补）。
 from gui_qt.widgets.region_picker import RegionPicker
+# TikTok 直播适配层（代理探测 / handle 判别）；打包 spec 已登记该模块
+from justoneapi_collector import tiktok_live
 
 
 class LivePage(QWidget):
@@ -48,12 +50,12 @@ class LivePage(QWidget):
 
         # 顶部输入
         top, top_l = vertical_card(
-            "粘贴直播间链接 → 点「添加监控」；正在直播时会自动开始录制", self)
+            "粘贴抖音 / TikTok 直播间链接 → 点「添加监控」；正在直播时会自动开始录制", self)
         r1 = QHBoxLayout()
         r1.addWidget(QLabel("昵称/链接："))
         self.input = QLineEdit()
         self.input.setPlaceholderText(
-            "粘贴直播间链接（如 https://live.douyin.com/123456789），或直接贴 sec_uid")
+            "抖音直播间链接 / sec_uid；TikTok 直播间链接或 @主播号（如 @dannkansai）")
         connect_guarded(self.input.returnPressed, self._add,
                         on_error=self._slot_failed, label="添加监控")
         r1.addWidget(self.input, 1)
@@ -101,6 +103,29 @@ class LivePage(QWidget):
         r3.addWidget(b_now)
         r3.addStretch()
         top_l.addLayout(r3)
+
+        # ★ TikTok 直播（2026-11-15）：客户机都装了代理，但端口各家不同。
+        #   自动探测后填进输入框、允许手改并落盘；页面/状态/CDN 全走这个出口。
+        r4 = QHBoxLayout()
+        r4.addWidget(QLabel("TikTok 代理："))
+        self.tiktok_proxy_edit = QLineEdit()
+        saved = self.ctx.get_setting("tiktok_live_proxy")
+        if saved is None:                       # 从未配置过 → 自动探测
+            saved = tiktok_live.detect_proxy()
+        self.tiktok_proxy_edit.setText(str(saved or ""))
+        self.tiktok_proxy_edit.setPlaceholderText(
+            "如 http://127.0.0.1:7897；TikTok 直播必需，留空=直连（国内不可用）")
+        r4.addWidget(self.tiktok_proxy_edit, 1)
+        b_detect = QPushButton("自动探测")
+        b_detect.setToolTip("扫描本机常见代理端口，填进输入框（不会自动保存）")
+        connect_guarded(b_detect.clicked, lambda *_: self._detect_tiktok_proxy(),
+                        on_error=self._slot_failed, label="探测 TikTok 代理")
+        b_save_proxy = QPushButton("保存代理")
+        b_save_proxy.setToolTip("保存后立即对监控引擎生效，重启也不会丢")
+        connect_guarded(b_save_proxy.clicked, lambda *_: self._save_tiktok_proxy(),
+                        on_error=self._slot_failed, label="保存 TikTok 代理")
+        r4.addWidget(b_detect); r4.addWidget(b_save_proxy)
+        top_l.addLayout(r4)
         root.addWidget(top)
 
         # 保存目录 + 录制控制
@@ -405,6 +430,26 @@ class LivePage(QWidget):
         return QColor("#666666")
 
     # --------------------------------------------------- 添加目标
+    def _detect_tiktok_proxy(self):
+        """扫描本机常见代理端口，只填输入框，不落盘。"""
+        found = tiktok_live.detect_proxy()
+        self.tiktok_proxy_edit.setText(found)
+        self.status.setText(
+            f"已探测到代理：{found}" if found
+            else "没探测到本机代理，请手动填写（TikTok 直播需要海外出口）")
+
+    def _save_tiktok_proxy(self):
+        """落盘 + 立即让监控引擎换出口（会重建 CDP 会话）。"""
+        val = self.tiktok_proxy_edit.text().strip()
+        self.ctx.set_setting("tiktok_live_proxy", val)
+        self.ctx.save_settings()
+        dm = self._daemon()
+        if dm is not None:
+            dm.set_tiktok_proxy(val)
+        self.status.setText(
+            f"TikTok 代理已保存并生效：{val}" if val
+            else "已设为空（直连）：TikTok 直播在国内直连会失败")
+
     def _add(self):
         text = self.input.text().strip()
         if not text:
@@ -424,7 +469,8 @@ class LivePage(QWidget):
             # add_target_by_link 的「昵称」当成了 sec_uid 存进表格，
             # 导致后续录制/停止/移除全都找不到目标。
             try:
-                if text.startswith("http") or "douyin.com" in text:
+                if (text.startswith("http") or "douyin.com" in text
+                        or tiktok_live.is_tiktok_input(text)):
                     ok, nick_or_err, sec_uid = dm.add_target_by_link(text, note=note)
                     if not ok:
                         return {"ok": False, "error": nick_or_err, "src": "链接",
@@ -486,7 +532,10 @@ class LivePage(QWidget):
         # Qt 控件只在主线程读，先取值再传给后台线程
         auto_on = bool(self.auto_rec.isChecked())
         name = display_name or sec_uid
-        self.status.setText(f"已添加「{name}」，正在检查是否直播中…")
+        # TikTok 首次要真浏览器过 WAF 挑战，耗时明显长于抖音，先说清楚
+        tip = ("（TikTok 首次需过浏览器校验，约 10~20 秒）"
+               if str(sec_uid).startswith("tiktok:") else "")
+        self.status.setText(f"已添加「{name}」，正在检查是否直播中…{tip}")
 
         def run(worker):
             try:

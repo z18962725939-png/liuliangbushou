@@ -537,12 +537,16 @@ class AppContext:
             save_dir = str(self.settings.get("lm_save_dir") or "").strip() or None
             ffmpeg_path = str(self.settings.get("ffmpeg_path") or "").strip() or None
             cookie = str(self.settings.get("douyin_cookie") or "").strip()
+            # 未配置时传 None ⇒ LiveMonitor 自动探测客户机代理端口；
+            # 用户显式存空串则代表「明确不用代理」，不再自动覆盖。
+            tk_proxy = self.settings.get("tiktok_live_proxy")
             self.daemon = LiveMonitor(
                 client,
                 save_dir=_P(save_dir) if save_dir else None,
                 auto_record=bool(self.settings.get("lm_auto_record", True)),
                 ffmpeg_path=ffmpeg_path,
                 douyin_cookie=cookie,
+                tiktok_proxy=tk_proxy,
             )
             print("[流量捕手] 直播监控引擎已就绪")
             return self.daemon
