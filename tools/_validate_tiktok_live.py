@@ -339,6 +339,26 @@ def test_source():
     check("CDP 真等真实时间", "time.sleep(self.wait)" in tk)
     check("CDP 会话可重建兜底", "self.close()" in tk)
 
+    # ── 官网口径：TikTok 直播免费、不进付费闸门 ──
+    #   客户端支持了但官网还写「只支持抖音」，客户照样不敢用；尤其旧版
+    #   FAQ 把「查直播状态」笼统算成付费次数，会让人以为 TikTok 要扣额度。
+    site = read("tools/build_site.py")
+    sub = read("tools/build_subpages.py")
+    seo = read("tools/site_seo.py")
+    check("★ 官网首页明确写 TikTok 直播免费不消耗额度",
+          "TikTok 直播能录吗" in site and "不消耗接口额度" in site
+          and "永久免费、不限次数" in site)
+    check("★ 官网不再把「查直播状态」笼统计入付费次数",
+          "查直播状态各算一次" not in site)
+    check("★ 首页免费版对照表含 TikTok 与代理说明",
+          "抖音 / TikTok 直播录制" in site and "TikTok 需本机代理可用" in site)
+    check("★ 直播栏目子页有 TikTok 专节（链接 / 代理 / 三态 / 重取）",
+          "TikTok 直播间也能一起盯" in sub
+          and all(k in sub for k in ("TikTok 代理", "状态未知", "重新取一次")))
+    check("★ 免费版落地页写清 TikTok 直播不花钱",
+          "抖音 / TikTok 直播间自动录制" in sub and "不消耗接口额度" in sub)
+    check("★ SEO 描述同步 TikTok（标题保留已收录搜索词）", "TikTok 直播" in seo)
+
 
 def main():
     print("=" * 62)
