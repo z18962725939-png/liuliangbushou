@@ -1,0 +1,6 @@
+# 运行态：不进版本库
+config.json
+recordings/
+*.log
+__pycache__/
+*.pyc
