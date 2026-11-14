@@ -428,7 +428,8 @@ class ScriptPage(QWidget):
         self.link_edit.setFixedHeight(66)
         self.link_edit.setTabChangesFocus(True)
         self.link_edit.setPlaceholderText(
-            "粘贴抖音 / 小红书 / 快手 / TikTok 作品链接，一行一个；"
+            "粘贴抖音 / 小红书 / 快手 / 视频号 作品链接，一行一个；"
+            "TikTok 请在浏览器打开视频后复制地址栏的完整链接；"
             "也支持整段分享文案和 19 位作品 ID。")
         l0.addWidget(self.link_edit)
 

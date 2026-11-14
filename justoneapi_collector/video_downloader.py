@@ -3420,8 +3420,19 @@ class VideoDownloader:
             return svc_video, ""
         label = cfg.get("label") or platform
         if cfg.get("domestic_blocked"):
-            tail = f"（服务端也没能打开：{svc_reason}）" if svc_reason else ""
-            return None, f"{label} 在国内被屏蔽，本机无法解析{tail}"
+            # ★ 2026-11-14：旧版那句「国内被屏蔽、本机无法解析」是服务端解析上线前的
+            #   旧结论。实测服务端能打开 TikTok 完整作品页并给出无水印直链，
+            #   真正打不开的只有 App「分享 → 复制链接」出来的短链。旧文案把客户
+            #   推去「这平台不支持」，而换一条链接就能用 —— 客户因此报「tk 无法提取」。
+            #   domestic_blocked 只保留作「不走付费接口」的闸门（详情/搜索等处），
+            #   解析失败这里改给可操作的换链指引，不甩锅给网络环境。
+            why = f"（{svc_reason}）" if svc_reason else ""
+            return None, (
+                f"这条{label}链接没能解析出来{why}。"
+                "请换成完整作品链接：在浏览器里打开视频，复制地址栏网址"
+                "（形如 tiktok.com/@作者/video/数字ID）。"
+                "App 分享出来的短链要先跳一次转，网络不通时解析服务打不开；"
+                "抖音 / 小红书 / 快手 / 视频号 的分享链接可以直接粘贴。")
         # 免费档解析不出来时，把服务端给的原因原样说清楚 —— 不甩锅给「没登录」
         # （下载走 CDN 直链，跟本机登录态无关），也不提「付费接口」这种客户听不懂的话。
         if not self._paid_resolve_ok():

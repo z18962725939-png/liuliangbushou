@@ -165,6 +165,54 @@ def extract_first_url(text: str) -> str:
 
 
 # ----------------------------------------------------------------------
+#  TikTok 分享短链 → 完整作品页（尽力而为，2026-11-14）
+# ----------------------------------------------------------------------
+# ★ 客户反馈「tk 无法提取」查实：服务端解析对
+#   https://www.tiktok.com/@作者/video/数字ID 这种完整链接实测可用
+#   （能拿到标题 / 封面 / 无水印直链），但 App「分享 → 复制链接」出来的
+#   vm.tiktok.com / vt.tiktok.com / www.tiktok.com/t/ 短链一律回「链接不可访问」。
+#   客户本机在国内直连 TikTok 会被重置，所以这里只做一次**不跟内容**的 302
+#   探测：有代理或海外网络的客户能当场展开，没有的 5 秒内放弃、原样交服务端。
+#   ★ 只跟短链这一跳，Location 指向长链就停 —— 绝不去 GET 长链页面。
+_TIKTOK_SHORT_HOSTS = ("vm.tiktok.com", "vt.tiktok.com", "t.tiktok.com")
+_TIKTOK_SHORT_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+)
+
+
+def is_tiktok_shortlink(url: str) -> bool:
+    u = str(url or "").lower()
+    if any(h in u for h in _TIKTOK_SHORT_HOSTS):
+        return True
+    return "tiktok.com" in u and "/t/" in u
+
+
+def expand_tiktok_shortlink(url: str, timeout: float = 5.0) -> str:
+    """短链 → 完整作品页 URL。展开不了原样返回，绝不抛异常、不拖慢主流程。"""
+    if not is_tiktok_shortlink(url):
+        return url
+    try:
+        import httpx  # 函数体内 import：非 TikTok 链接不该付这个代价
+        with httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=3.0),
+            follow_redirects=False,
+            headers={"User-Agent": _TIKTOK_SHORT_UA, "Accept": "*/*"},
+            trust_env=True,       # 有代理的客户靠它展开；没代理直连被重置即放弃
+        ) as c:
+            r = c.get(url)
+            loc = str(r.headers.get("location") or "").strip()
+        if loc.startswith("//"):
+            loc = "https:" + loc
+        low = loc.lower()
+        if loc.startswith("http") and "tiktok.com" in low and "/video/" in low:
+            return loc.split("?")[0].rstrip("/")
+    except Exception:            # noqa: BLE001
+        pass                     # 连不上 / 被重置 / 超时 —— 一律当没展开
+    return url
+
+
+# ----------------------------------------------------------------------
 #  结果结构
 # ----------------------------------------------------------------------
 # parse() 返回 (dict | None, reason)。dict 的键刻意做成纯数据 ——
@@ -190,6 +238,9 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
     payload_text = extract_first_url(text)
     if not payload_text:
         return None, "没有可解析的内容（请粘贴链接或包含链接的分享文案）"
+    # ★ TikTok 分享短链先尽力展开成完整作品页（能展开就直接救回这一条，
+    #   展开不了原样交给服务端，由调用方给可操作的换链提示）。
+    payload_text = expand_tiktok_shortlink(payload_text)
 
     key = (api_key or DEFAULT_API_KEY).strip()
     if not key:
@@ -200,8 +251,14 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
     body: dict[str, Any] | None = None
     # ★ 429（限流）单独给一次重试：批量导入几百条时，服务端对"每分钟多少次"
     #   有软限制，撞上就整条失败太亏 —— 而 429 意味着这次**没被处理**，
-    #   重试不会重复扣费。只重试 429，别把超时也重试（那会让批量变慢一倍）。
-    for attempt in (1, 2):
+    #   重试不会重复扣费。别把客户端超时也重试（那会让批量变慢一倍）。
+    # ★ 2026-11-14 客户「tk 无法提取」实测：服务端抓 TikTok 是**间歇性**的，
+    #   同一条完整链接连打 3 次里 2 次 200 成功、1 次 502「链接不可访问」。
+    #   客户试一次撞上 502 就以为软件不支持。只对 TikTok + 500/502 重发一次，
+    #   1.5 秒间隔；其它平台的失败多半是链接真失效，重试无益还拖慢批量。
+    _is_tk = "tiktok.com" in payload_text.lower()
+    _retried_5xx = False
+    for attempt in (1, 2, 3):
         try:
             with httpx.Client(
                 timeout=httpx.Timeout(timeout, connect=10.0),
@@ -229,6 +286,10 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
             _code = -1
         if _code == 429 and attempt == 1:
             time.sleep(2.5)
+            continue
+        if _is_tk and _code in (500, 502) and not _retried_5xx:
+            _retried_5xx = True
+            time.sleep(1.5)
             continue
         break
 

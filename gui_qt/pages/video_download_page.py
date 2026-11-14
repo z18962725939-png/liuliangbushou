@@ -383,7 +383,7 @@ class VideoDownloadPage(QWidget):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             if disabled:
                 b.setEnabled(False)
-                b.setToolTip("TikTok 在国内网络不可用，已置灰")
+                b.setToolTip("该平台不提供登录入口，作品链接直接粘贴即可解析")
             b.clicked.connect(lambda _checked=False, p=plat, d=disabled: self._login(p, d))
             lr.addWidget(b)
         # ★ 2026-10-25（v1.24.6）：作品解析改成**服务端解析**之后，抖音 /
@@ -392,10 +392,12 @@ class VideoDownloadPage(QWidget):
         #   ① 支持哪些平台；② 为什么这里只有一个登录按钮（因为用不着）。
         # ★ 2026-10-25（v1.24.7）：补上微信视频号。它跟小红书 / 快手是同一类：
         #   本机拿不到（微信不给抓），服务端能拿到，且同样不用登录。
-        _only = QLabel("抖音 / 小红书 / 快手 / 视频号 都支持，都不用登录")
+        _only = QLabel("抖音 / 小红书 / 快手 / 视频号 直接粘贴分享链接；TikTok 粘贴完整作品链接")
         _only.setObjectName("Caption")
         _only.setToolTip("作品链接是由服务端去打开解析的，跟本机有没有登录态无关，"
-                         "所以四个平台都直接支持。\n"
+                         "所以这几个平台都不用登录。\n"
+                         "TikTok 请用浏览器地址栏里的完整网址"
+                         "（形如 tiktok.com/@作者/video/数字ID）。\n"
                          "这里唯一的「抖音」按钮是给「拉取列表」用的 —— "
                          "拉博主作品列表要走浏览器会话，那个必须有抖音登录态。")
         lr.addWidget(_only)
@@ -740,7 +742,7 @@ class VideoDownloadPage(QWidget):
 
     def _login(self, platform, disabled):
         if disabled:
-            self.status.setText("TikTok 国内网络不可用，已禁用")
+            self.status.setText("该平台不提供登录入口，作品链接直接粘贴即可解析")
             return
         self.status.setText(f"打开内置浏览器登录 {platform}：请到「设置」页扫码登录")
 

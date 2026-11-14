@@ -259,6 +259,20 @@ def _platform_label(key: str) -> str:
         return key
 
 
+# ★ 2026-11-14：TikTok 作品绝大多数不是中文，而界面把转写语言写死成 "zh"。
+#   即使链接解析、视频下载都成功，whisper 被强制按中文识别英文口播 ⇒
+#   输出乱码或空文本，客户看到的就是「tk 提取不出来」。海外平台让引擎自动判
+#   语言；国内平台继续沿用 zh，中文准确率不受影响（auto 偶尔把中文认成繁/日）。
+_NON_CN_PLATFORMS = frozenset({"tiktok", "youtube", "instagram", "facebook"})
+
+
+def lang_for_platform(platform: str, default: str = "zh") -> str:
+    """按平台决定 whisper 的 -l 参数：海外平台自动识别，其余沿用界面设置。"""
+    if str(platform or "").strip().lower() in _NON_CN_PLATFORMS:
+        return "auto"
+    return str(default or "zh")
+
+
 def split_links(text: str) -> list[str]:
     """一行一个链接；也支持从分享文案里抠（抖音常带 emoji 和说明文字）。"""
     raw = str(text or "").strip()
@@ -432,8 +446,12 @@ class ScriptExtractor:
 
     def transcribe(self, media: Path, stem: str,
                    progress: Callable[[int, str], None] | None = None,
-                   log: Callable[[str], None] | None = None):
-        """跑 whisper，返回 (txt_path, srt_path|None, err)。"""
+                   log: Callable[[str], None] | None = None,
+                   lang: str | None = None):
+        """跑 whisper，返回 (txt_path, srt_path|None, err)。
+
+        lang 由调用方按平台给（见 lang_for_platform）；不传则沿用 opt.lang。
+        """
         from .transcribe import (bootstrap_engine, engine_problem,
                                  engine_ready, model_ready)
 
@@ -461,7 +479,7 @@ class ScriptExtractor:
             self._transcriber = Transcriber(ffmpeg=ff, work_dir=tmp_dir())
             res = self._transcriber.run(
                 TranscribeTask(src=media, model=self.opt.model, device=self.opt.device,
-                               lang=self.opt.lang, out_dir=out, want_srt=True),
+                               lang=(lang or self.opt.lang), out_dir=out, want_srt=True),
                 progress=lambda p: progress(p, "语音转写中") if progress else None,
                 log=log)
             if getattr(res, "txt", None) and Path(res.txt).exists():
@@ -569,7 +587,8 @@ class ScriptExtractor:
         _txt, srt_file, terr = self.transcribe(
             media, stem,
             progress=lambda p, m: emit(42 + p * 0.55, f"语音转写 {p}%"),
-            log=log)
+            log=log,
+            lang=lang_for_platform(res.platform, self.opt.lang))
         txt_file = cache_dir() / f"{stem}.txt"
         if terr or (not txt_file.exists()):
             res.fail_stage = "transcribe"
