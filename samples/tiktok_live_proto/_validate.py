@@ -336,8 +336,45 @@ def test_monitor() -> None:
     check("没有误报成片", not any(k == "done" for k, _t in events3))
 
 
+def test_duration_report() -> None:
+    print("\n[8] 录制时长口径（真实在播房间实测后补）")
+    from datetime import datetime                                 # noqa: PLC0415
+    import tiktok_live_proto.recorder as rec_mod                   # noqa: PLC0415
+    from tiktok_live_proto.monitor import _duration_label         # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as d:
+        cfg = ProtoConfig(handle="ofdwex9", save_dir=d, ffmpeg="", proxy="")
+        rec = Recorder(cfg)
+        fake = Path(d) / "fake.mp4"
+        fake.write_bytes(b"0" * 2048)
+        rec.out_path = fake
+        rec.started_at = datetime(2026, 1, 1)
+        original = rec_mod.probe_media_duration
+        try:
+            rec_mod.probe_media_duration = lambda *_a, **_k: 10.07
+            info = rec.result()
+            check("优先报媒体真实时长", info["seconds"] == 10.07,
+                  str(info["seconds"]))
+            check("来源标为 media", info["duration_source"] == "media")
+            check("媒体时长不带墙钟后缀",
+                  "墙钟" not in _duration_label(info))
+            rec_mod.probe_media_duration = lambda *_a, **_k: None
+            info2 = rec.result()
+            check("读不到时回退墙钟", info2["duration_source"] == "wall")
+            check("墙钟来源明确标注", "墙钟" in _duration_label(info2))
+            check("墙钟另存 wall_seconds", isinstance(info2.get("wall_seconds"), float))
+        finally:
+            rec_mod.probe_media_duration = original
+
+    mon_src = (ROOT / "samples" / "tiktok_live_proto" / "monitor.py").read_text(
+        encoding="utf-8", errors="ignore")
+    check("日志文本不再重复 CLI 标签符号",
+          'f"● 开始录制' not in mon_src and 'f"■ 一段录制完成' not in mon_src)
+    check("达到段数上限时不再提示续录", "reached_limit" in mon_src)
+
+
 def test_isolation() -> None:
-    print("\n[8] 独立原型边界")
+    print("\n[9] 独立原型边界")
     release = ROOT / "tools" / "release_all.py"
     text = release.read_text(encoding="utf-8", errors="ignore") if release.is_file() else ""
     check("未挂进 release_all 发版链", "tiktok_live_proto" not in text)
@@ -355,6 +392,7 @@ def main() -> int:
     test_cmd()
     test_recorder_lifecycle()
     test_monitor()
+    test_duration_report()
     test_isolation()
     total = PASSED + len(FAILED)
     print(f"\n结果：{PASSED}/{total} 通过")

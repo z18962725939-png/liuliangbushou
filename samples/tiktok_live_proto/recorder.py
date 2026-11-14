@@ -18,6 +18,42 @@ from .config import ProtoConfig
 from .core import build_ffmpeg_cmd, new_record_path
 
 
+def probe_media_duration(path: Path, ffmpeg: str = "") -> float | None:
+    """用工程自带 ffprobe 读成片真实时长；读不到返回 None。
+
+    实测教训：轮询间隔 15 秒时，墙钟时间会被误当成「录了 15 秒」，
+    而 ffmpeg 的 -t 10 实际只产出 10.07 秒。摘要必须报媒体真实时长。
+    """
+    if not path or not Path(path).is_file():
+        return None
+    probe = None
+    if ffmpeg and Path(ffmpeg).is_file():
+        cand = Path(ffmpeg).parent / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        if cand.is_file():
+            probe = cand
+    if probe is None:
+        import shutil                                        # noqa: PLC0415
+        found = shutil.which("ffprobe")
+        if not found:
+            return None
+        probe = Path(found)
+    cmd = [str(probe), "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=nw=1:nk=1", str(path)]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, errors="replace", timeout=6,
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                           if os.name == "nt" else 0),
+        )
+        if r.returncode != 0:
+            return None
+        lines = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+        val = float(lines[0]) if lines else 0.0
+        return val if val > 0 else None
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 class RecorderError(RuntimeError):
     """录制启动失败。"""
 
@@ -140,13 +176,22 @@ class Recorder:
         self.proc = None
 
     def result(self) -> dict:
-        """一段录制的结果摘要，给界面/日志用。"""
+        """一段录制的结果摘要，给界面/日志用。
+
+        seconds 优先给 ffprobe 读出的媒体真实时长；读不到才退回墙钟，
+        并用 duration_source 标明来源，避免把轮询间隔误报成录制时长。
+        """
         size = self.out_path.stat().st_size if self.out_path and self.out_path.exists() else 0
+        wall = (round((datetime.now() - self.started_at).total_seconds(), 1)
+                if self.started_at else 0)
+        media = (probe_media_duration(self.out_path, self.cfg.ffmpeg)
+                 if size > 0 else None)
         return {
             "file": str(self.out_path or ""),
             "size": size,
             "started_at": self.started_at.strftime("%Y-%m-%d %H:%M:%S")
                           if self.started_at else "",
-            "seconds": round((datetime.now() - self.started_at).total_seconds(), 1)
-                       if self.started_at else 0,
+            "seconds": round(media, 2) if media else wall,
+            "wall_seconds": wall,
+            "duration_source": "media" if media else "wall",
         }

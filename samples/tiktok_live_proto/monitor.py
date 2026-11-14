@@ -23,6 +23,13 @@ from .recorder import Recorder, RecorderError
 Emit = Callable[[str, str, dict], None]
 
 
+def _duration_label(info: dict) -> str:
+    """给日志用的时长文案：媒体真实时长优先，墙钟则明确标注。"""
+    sec = info.get("seconds", 0) or 0
+    suffix = "" if info.get("duration_source") == "media" else "（墙钟）"
+    return f"{sec:g} 秒{suffix}"
+
+
 @dataclass
 class MonitorState:
     """界面直接读的快照，避免在线程里直接碰控件。"""
@@ -172,7 +179,7 @@ class ProtoMonitor:
         self.state.phase = "录制中"
         self.state.recording_file = str(out)
         self.state.segments = self.seq
-        self._emit("record", f"● 开始录制：{out.name}", {"file": str(out)})
+        self._emit("record", f"开始录制：{out.name}", {"file": str(out)})
 
     def _stop_recording(self, reason: str) -> None:
         if not self.recorder.proc:
@@ -183,8 +190,8 @@ class ProtoMonitor:
         self.state.phase = "等待开播"
         self.state.recording_file = ""
         self._emit("done",
-                   f"■ 已停止（{reason}）：{Path(info['file']).name} "
-                   f"{size_mb} MB / {info['seconds']} 秒 / ffmpeg 退出码 {rc}",
+                   f"已停止（{reason}）：{Path(info['file']).name} "
+                   f"{size_mb} MB / {_duration_label(info)} / ffmpeg 退出码 {rc}",
                    {"file": info["file"], "size": info["size"]})
 
     def _handle_live(self, snap: RoomSnapshot) -> None:
@@ -229,10 +236,11 @@ class ProtoMonitor:
         else:
             self.abnormal_exits = 0
             self._emit("done",
-                       f"■ 一段录制完成：{Path(info['file']).name} "
-                       f"{round(size / 1024 / 1024, 2)} MB / {info['seconds']} 秒",
+                       f"一段录制完成：{Path(info['file']).name} "
+                       f"{round(size / 1024 / 1024, 2)} MB / {_duration_label(info)}",
                        {"file": info["file"], "size": size})
-        if not self.stopped:
+        reached_limit = bool(self.max_segments and self.seq >= self.max_segments)
+        if not self.stopped and not reached_limit:
             self._emit("warn", "若仍在播将自动重取流地址续录", {})
         self.recorder.reset()
         self.state.recording_file = ""
