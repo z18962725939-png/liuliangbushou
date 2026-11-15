@@ -18,6 +18,7 @@ TikTok 链接被原样丢给抖音 webcast 解析器。本门禁钉死接入后�
 用法：python tools/_validate_tiktok_live.py
 """
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -333,6 +334,7 @@ def test_source():
     check("★ 引擎层不写死 7897 为唯一出口",
           not any("127.0.0.1:7897" in c for c in lm_consts))
     detect_fn = tk.split("def detect_proxy(", 1)[-1].split("\ndef ", 1)[0]
+    egress_fn = tk.split("def detect_egress(", 1)[-1].split("\ndef ", 1)[0]
     cand_fn = tk.split("def proxy_candidates()", 1)[-1].split("\ndef ", 1)[0]
     quick_fn = tk.split("def quick_proxy()", 1)[-1].split("\ndef ", 1)[0]
     fetch_fn = tk.split("def fetch_room(", 1)[-1].split("\ndef ", 1)[0]
@@ -345,7 +347,7 @@ def test_source():
           "Internet Settings" in tk and "ProxyEnable" in tk
           and "ProxyServer" in tk)
     check("★ 探测必须真连通验证，不能只看端口开着",
-          "def proxy_works" in tk and "proxy_works(p)" in detect_fn)
+          "def proxy_works" in tk and "proxy_works(p" in egress_fn)
     check("★ proxy_works 不走环境变量（避免被 IDE 代理带偏）",
           "trust_env=False" in tk.split("def proxy_works(", 1)[-1]
           .split("\ndef ", 1)[0])
@@ -359,7 +361,23 @@ def test_source():
     check("★ 失败文案给可操作指引（端口 7897 / 自动探测）",
           "127.0.0.1:7897" in tk and "自动探测" in tk
           and "def _outage_hint" in tk)
-    check("★ 界面探测走验证版", "detect_proxy(verify=True)" in page)
+    check("★ 界面探测走验证版（三态：代理 / 直连 / 全不通）",
+          "detect_egress()" in page and 'mode == "direct"' in page)
+    _m_ports = re.search(r"_COMMON_PROXY_PORTS\s*=\s*\(([^)]*)\)", tk)
+    _ports = ([int(x) for x in re.findall(r"\d+", _m_ports.group(1))]
+              if _m_ports else [])
+    check("★ 10808（Clash mixed 端口）在清单里且排在 10809 前",
+          10808 in _ports and 10809 in _ports
+          and _ports.index(10808) < _ports.index(10809))
+    check("★ 直连也当候选验证（客户开 TUN / 全局时直连就通）",
+          "def direct_works" in tk and 'return "", "direct"' in tk
+          and "direct_works(" in egress_fn)
+    check("★ detect_proxy 不再自己扫端口，统一走 detect_egress",
+          "detect_egress()" in detect_fn)
+    check("★ 界面区分「可直连（TUN）」与「全不通」",
+          "TUN" in page and "代理留空即可" in page)
+    check("★ 自动模式下空代理会重扫（客户先开软件后开代理）",
+          "_tiktok_proxy_auto" in lm and "_tiktok_rescan_at" in lm)
     check("★ 状态未知带悬浮原因", 'tip=(getattr(s, "stream_error"' in page)
     check("★ 禁止虚拟时间参数（会跑废 WAF 挑战）",
           not any(c.startswith("--virtual-time-budget") for c in consts))
@@ -445,6 +463,22 @@ def test_egress_fallback():
     check("★ 运行时：全出口失败时给可操作文案，不是异常堆栈",
           bad.status == tkm.STATUS_UNKNOWN and "自动探测" in bad.error
           and "127.0.0.1:7897" in bad.error)
+
+    # ── 场景三：TUN / 全局模式（客户 11-15 截图：Tun 绿色 + mixed:10808）──
+    #   代理候选全不通，但进程直连能出网 ⇒ 必须判 direct，界面才好提示「留空」
+    real_cands, real_pw, real_dw = (tkm.proxy_candidates, tkm.proxy_works,
+                                    tkm.direct_works)
+    tkm.proxy_candidates = lambda: ["http://127.0.0.1:1"]
+    tkm.proxy_works = lambda p, timeout=4.0: False      # noqa: ARG005
+    tkm.direct_works = lambda timeout=5.0: True         # noqa: ARG005
+    try:
+        p3, m3 = tkm.detect_egress()
+        p4, m4 = tkm.detect_egress()                     # 幂等，别只对一次
+    finally:
+        (tkm.proxy_candidates, tkm.proxy_works,
+         tkm.direct_works) = real_cands, real_pw, real_dw
+    check("★ 运行时：代理全不通但直连通 → 判为 direct（TUN 可留空）",
+          p3 == "" and m3 == "direct" and p4 == "" and m4 == "direct")
 
 
 def main():

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication          # noqa: E402
 from gui_qt.main_window import MainWindow           # noqa: E402
 from gui_qt.pages._base import AppContext           # noqa: E402
 from gui_qt.theme import apply_theme                # noqa: E402
+from justoneapi_collector import tiktok_live as tk  # noqa: E402
 
 OUT = ROOT / "samples"
 
@@ -54,15 +55,28 @@ def run(mode="light", click=True):
         page.detect_proxy_btn.click()               # 真点
         out["click_ms"] = round((time.time() - t0) * 1000)
         out["btn_disabled_right_after_click"] = not page.detect_proxy_btn.isEnabled()
-        settle(app, 9000)                           # 等后台探测回来
+        settle(app, 16000)                          # 等后台探测回来（含直连超时）
         out["status"] = page.status.text()
         out["edit"] = page.tiktok_proxy_edit.text()
         out["btn_enabled_after"] = page.detect_proxy_btn.isEnabled()
 
+        # ★ 再模拟客户实际形态：TUN / 全局模式（代理全不通、直连能出网）。
+        #   这时界面必须说「留空即可」，而不是继续催客户填端口。
+        real = tk.detect_egress
+        tk.detect_egress = lambda *a, **k: ("", "direct")
+        try:
+            page.detect_proxy_btn.click()
+            settle(app, 8000)                   # 端口扫描本身也要几秒
+            out["tun_status"] = page.status.text()
+            out["tun_edit"] = page.tiktok_proxy_edit.text()
+            out["tun_btn_enabled"] = page.detect_proxy_btn.isEnabled()
+        finally:
+            tk.detect_egress = real
+
     # 状态格 tooltip：造一行「状态未知」看能否带原因
     page._add_row("测试主播", "链接", "状态未知", "7708236...", "-", "-",
                   sec_uid="tiktok:test",
-                  tip="状态检查失败：连不上 TikTok（本机没找到可用代理）")
+                  tip="状态检查失败：连不上 TikTok（代理和直连都不通）")
     page._add_row("正常主播", "链接", "未开播", "123", "-", "-",
                   sec_uid="tiktok:ok2")
     settle(app, 500)

@@ -223,6 +223,11 @@ class LiveMonitor:
         #   真正的可用性由 fetch_room 的「给定代理 → 系统代理 → 直连」兜底。
         self.tiktok_proxy = (tiktok_live.quick_proxy() if tiktok_proxy is None
                              else str(tiktok_proxy or "").strip())
+        # ★ 是否为「自动探测」状态：客户常常先开软件、后开代理。自动模式下
+        #   代理为空不能一次定死，失败时每 2 分钟重扫一次端口（毫秒级、
+        #   不联网），否则得让客户重启软件才认。用户手动保存过就不再干预。
+        self._tiktok_proxy_auto = tiktok_proxy is None
+        self._tiktok_rescan_at = 0.0
         # 实际走通的出口：配置为空但靠「系统代理」连通时记在这里。
         # ★ ffmpeg 不读 Windows 系统代理，录制必须显式拿到这个值，
         #   否则状态查得到、流却拉不下来。
@@ -383,6 +388,7 @@ class LiveMonitor:
         """界面改完代理立即生效；重建浏览器会话，避免旧会话还走老出口。"""
         self.tiktok_proxy = (tiktok_live.quick_proxy() if proxy is None
                              else str(proxy or "").strip())
+        self._tiktok_proxy_auto = proxy is None   # 手动保存后不再自动改
         self._tiktok_via = ""               # 换了出口，旧记录作废
         try:
             if self._tiktok_browser:
@@ -562,6 +568,17 @@ class LiveMonitor:
         if st is None:
             return None
         handle = sec_uid.split(":", 1)[-1]
+        # ★ 自动模式 + 上次失败 + 当前没代理：客户可能刚把代理软件打开。
+        #   每 2 分钟重扫一次端口（只是 connect_ex，不联网），扫到就换出口。
+        if (self._tiktok_proxy_auto and not self.tiktok_proxy
+                and st.stream_error
+                and time.time() - self._tiktok_rescan_at > 120):
+            self._tiktok_rescan_at = time.time()
+            found = tiktok_live.quick_proxy()
+            if found:
+                self.tiktok_proxy = found
+                self._tiktok_via = ""
+                st.stream_error = ""        # 换了出口，重新给一次机会
         if not st.room_id or st.room_id == "0":
             try:
                 if self._tiktok_browser is None:

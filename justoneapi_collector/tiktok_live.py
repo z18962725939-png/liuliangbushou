@@ -56,7 +56,11 @@ STATUS_UNKNOWN = 0
 ROOM_INVALID = 10011           # 换了一场直播，需要重新解析 roomId
 
 # 只用于「自动探测后填进输入框」，绝不写死为唯一出口
-_COMMON_PROXY_PORTS = (7897, 7890, 7891, 10809, 10808, 1080, 2080, 20171)
+# ★ 顺序有讲究：混合端口（同时吃 HTTP/SOCKS）排前面，纯 SOCKS 端口排后面。
+#   10808 是 Clash for Windows 把 mixed 端口改成 10808 的常见写法（v2rayN 风格），
+#   实测 2026-11-15 客户机就是 `本地:[mixed:10808]`。
+_COMMON_PROXY_PORTS = (7897, 7890, 7891, 7892, 10808, 10809, 1087, 1080,
+                       2080, 8889, 6152, 8118, 20171, 33210)
 
 _HANDLE_RE = re.compile(r"^@?([A-Za-z0-9._]{2,24})$")
 _ROOM_ID_RE = re.compile(r'"roomId"\s*:\s*"?(\d{10,})"?')
@@ -255,6 +259,48 @@ def proxy_works(proxy: str, timeout: float = 4.0) -> bool:
         return False
 
 
+def direct_works(timeout: float = 5.0) -> bool:
+    """不开任何代理直连 TikTok 是否通 —— 客户开 TUN / 全局模式时通。
+
+    ★ 2026-11-15 客户截图：Clash for Windows「启用 Tun」变绿、本地 mixed:10808、
+      右侧仍是「自动配置系统代理」。TUN 是网卡层接管，**进程不带代理也能出网**，
+      包括 ffmpeg。所以「直连」必须当成一等公民验证，不能默认它一定失败。
+    """
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True,
+                          trust_env=False) as c:
+            r = c.get(f"{WEBCAST_URL}?aid={AID}&room_id=1",
+                      headers={"User-Agent": CHROME_UA,
+                               "Accept": "application/json, text/plain, */*"})
+        return r.status_code < 500 and r.status_code != 407
+    except Exception:                           # noqa: BLE001
+        return False
+
+
+def detect_egress(timeout: float = 4.0,
+                  budget: float = 10.0) -> tuple[str, str]:
+    """实测出网方式，返回 (代理URL, 模式)。模式 = proxy / direct / none。
+
+    逐个真发请求验证，不靠「端口开着」猜。三种客户机形态都要覆盖：
+      ① 系统代理（Clash「自动配置系统代理」写注册表）
+      ② TUN / 全局（进程无需代理，直连即出网）
+      ③ 界面里手填的端口
+    ★ TUN 场景返回 ("", "direct")：界面据此提示「可留空」，录制也不加
+      -http_proxy（TUN 走路由表，加了反而可能多绕一跳）。
+    ★ budget 是总时间上限：候选最多十几个，每个都等满 4 秒的话界面按钮
+      会僵住近一分钟。超预算就不再试端口，直接判直连。
+    """
+    started = time.monotonic()
+    for p in proxy_candidates():
+        if time.monotonic() - started > budget:
+            break
+        if proxy_works(p, min(timeout, 3.0)):
+            return p, "proxy"
+    if direct_works(min(timeout + 1.0, 5.0)):
+        return "", "direct"
+    return "", "none"
+
+
 def quick_proxy() -> str:
     """毫秒级取一个出口候选，供启动/设置注入用（不联网验证）。
 
@@ -277,17 +323,14 @@ def quick_proxy() -> str:
 def detect_proxy(verify: bool = True) -> str:
     """探测一个**真能连上 TikTok** 的代理；没有就返回空串。
 
-    顺序同 proxy_candidates；verify=True 时逐个真发请求验证，只认验证通过的
-    那个（界面「自动探测」按钮用这条）。全部不通返回 ""，让请求走直连 ——
-    客户开 TUN 模式时直连本来就通。
+    verify=True 时逐个真发请求验证（沿用 detect_egress 的判据）。
+    返回空串有两种含义：直连就通（TUN / 全局），或者根本没出口 ——
+    要区分就用 detect_egress() 拿模式。
     """
-    cands = proxy_candidates()
     if not verify:
+        cands = proxy_candidates()
         return cands[0] if cands else ""
-    for p in cands:
-        if proxy_works(p):
-            return p
-    return ""
+    return detect_egress()[0]
 
 
 def proxy_env(proxy: str) -> dict:
@@ -558,13 +601,14 @@ def _outage_hint(given: str, reasons: list[str]) -> str:
     """把「多个出口全失败」翻译成客户看得懂、能动手的一句话。"""
     if given:
         head = (f"连不上 TikTok（当前代理 {given} 不通）。"
-                "请到「TikTok 代理」改成 Clash Verge 的端口，"
-                "通常是 127.0.0.1:7897；改完点「保存代理」")
+                "请核对端口：在代理软件里开「系统代理」或「TUN」，"
+                "再到「TikTok 代理」点「自动探测」后保存；手填一般是 "
+                "127.0.0.1:7897（Clash Verge）或 127.0.0.1:10808（mixed 端口）")
     else:
-        head = ("连不上 TikTok（本机没找到可用代理）。"
-                "请先打开代理软件并开启「系统代理」，"
-                "再到「TikTok 代理」点「自动探测」后保存"
-                "（Clash Verge 默认 127.0.0.1:7897）")
+        head = ("连不上 TikTok（代理和直连都不通）。"
+                "请确认代理软件的「系统代理」或「TUN」已打开（TUN 模式下"
+                "代理可以留空），再到「TikTok 代理」点「自动探测」后保存"
+                "（Clash Verge 常用 127.0.0.1:7897，mixed 端口可能是 10808）")
     tail = "；".join(reasons[:2])
     return f"{head}｜{tail}" if tail else head
 

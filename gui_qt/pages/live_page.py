@@ -114,7 +114,8 @@ class LivePage(QWidget):
             saved = tiktok_live.quick_proxy()
         self.tiktok_proxy_edit.setText(str(saved or ""))
         self.tiktok_proxy_edit.setPlaceholderText(
-            "如 http://127.0.0.1:7897；TikTok 直播必需，留空=自动（系统代理/直连）")
+            "如 http://127.0.0.1:7897 或 127.0.0.1:10808；"
+            "留空=自动（系统代理 / 直连，开 TUN 的可留空）")
         r4.addWidget(self.tiktok_proxy_edit, 1)
         self.detect_proxy_btn = QPushButton("自动探测")
         self.detect_proxy_btn.setToolTip(
@@ -447,8 +448,8 @@ class LivePage(QWidget):
 
         def run(_worker):
             cands = tiktok_live.proxy_candidates()
-            return {"good": tiktok_live.detect_proxy(verify=True),
-                    "count": len(cands)}
+            proxy, mode = tiktok_live.detect_egress()
+            return {"good": proxy, "mode": mode, "count": len(cands)}
 
         w = Worker(run)
         self._wire_worker(w, self._on_detect_proxy_done, "代理探测失败", "代理探测")
@@ -457,16 +458,26 @@ class LivePage(QWidget):
     def _on_detect_proxy_done(self, p):
         p = p if isinstance(p, dict) else {}
         good = str(p.get("good") or "")
+        mode = str(p.get("mode") or "none")
         self.detect_proxy_btn.setEnabled(True)
         if good:
             self.tiktok_proxy_edit.setText(good)
             self.status.setText(
                 f"已找到可用代理：{good}（试连 TikTok 成功）；点「保存代理」生效")
-        else:
+            return
+        if mode == "direct":
+            # ★ TUN / 全局模式：进程不带代理也能出网（ffmpeg 也吃路由表），
+            #   留空就是最优解，别硬塞一个端口给它。
             self.tiktok_proxy_edit.setText("")
             self.status.setText(
-                "没找到能连 TikTok 的代理。请先打开代理软件并开启「系统代理」，"
-                "或手动填端口（Clash Verge 默认 127.0.0.1:7897）后点「保存代理」")
+                "检测到本机可直连 TikTok（TUN / 全局模式）：代理留空即可，"
+                "点「保存代理」确认")
+            return
+        self.tiktok_proxy_edit.setText("")
+        self.status.setText(
+            "代理和直连都连不上 TikTok。请确认代理软件已开启「系统代理」或「TUN」，"
+            "再点「自动探测」；手填一般是 127.0.0.1:7897（Verge）"
+            "或 127.0.0.1:10808（mixed 端口）")
 
     def _save_tiktok_proxy(self):
         """落盘 + 立即让监控引擎换出口（会重建 CDP 会话），并异步验证可用性。"""
