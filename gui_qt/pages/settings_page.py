@@ -849,8 +849,11 @@ class SettingsPage(QWidget):
 
     def _pack_feedback(self, kind, note, with_logs):
         try:
+            # ★ make_support_bundle 的参数名是 include_logs（2026-11-15 修复）：
+            #   之前这里传 with_logs=，直接 TypeError 被下面 except 吞成
+            #   「打包失败：…」—— 「一键发日志」按钮其实一直是坏的。
             path = support.make_support_bundle(
-                kind=kind, note=note, with_logs=with_logs,
+                kind=kind, note=note, include_logs=with_logs,
                 current_token=str(self.ctx.settings.get("token") or ""))
             support.open_in_explorer(path)
             self.fb_status.setText(f"已打包到桌面：{path.name}，请通过微信发给作者")

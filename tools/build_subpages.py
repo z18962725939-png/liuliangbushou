@@ -488,7 +488,10 @@ def body_live(version: str, size_mb: str) -> str:
         ]),
         _cta_download(version, size_mb),
     ]), kick="场景")
-    s2b = section("TikTok 直播间也能一起盯", "\n".join([
+    # ★ 标题里不要出现「也」：官网字体是按**旧标题字符集**打的子集，
+    #   而 tools/fonts_src 的源 woff2 已缺失、无法重建 —— 新字会掉回雅黑，
+    #   同一个标题出现两种字体（_validate_theme.py 会直接报错）。
+    s2b = section("TikTok 直播间一起盯", "\n".join([
         para("直播监控同时支持抖音和 TikTok。TikTok 那边不采集数据、不调用付费接口，"
              "走的是本机直连 + 本地 ffmpeg 录制，<b>和抖音直播一样永久免费、"
              "不限次数、不消耗接口额度</b>。"),

@@ -111,6 +111,14 @@ _TRASH_INNER = (
     '<path d="M13.8 11v6"/>'
 )
 
+# 导出（「导出日志」导航项）：向下的箭头落进托盘 —— 与「下载」同语义，
+# 客户一眼就知道点下去会得到一个文件。
+_EXPORT_INNER = (
+    '<path d="M12 3.5v10.2"/>'
+    '<path d="M8.2 10.2L12 14l3.8-3.8"/>'
+    '<path d="M4.5 16.4v2.1A1.5 1.5 0 006 20h12a1.5 1.5 0 001.5-1.5v-2.1"/>'
+)
+
 # 展开箭头（引导条「详细步骤」）
 _CHEVRON_DOWN_INNER = '<path d="M6 9.5l6 6 6-6"/>'
 _CHEVRON_UP_INNER = '<path d="M6 14.5l6-6 6 6"/>'
@@ -200,3 +208,8 @@ def group_caret_icon(color: str, size: int = 12, collapsed: bool = False) -> QIc
 def book_icon(color: str, size: int = 20) -> QIcon:
     """书本：使用教程对话框。"""
     return make_icon(_svg(_BOOK_INNER), color, size)
+
+
+def export_icon(color: str, size: int = 18) -> QIcon:
+    """下载箭头入托盘：侧栏「导出日志」入口（2026-11-15）。"""
+    return make_icon(_svg(_EXPORT_INNER), color, size)

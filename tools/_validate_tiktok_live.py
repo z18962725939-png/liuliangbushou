@@ -329,9 +329,12 @@ def test_source():
           "hls_urls" in lm and "已自动换备用地址" in lm)
     check("★ 页面无 roomId 时区分「没在播」与「要登录/改版」",
           "def looks_offline_page" in tk and "looks_offline_page(html)" in lm)
+    # ★ 2026-11-15：详情窗从 QMessageBox 换成自绘 LogDialog（Qt 的
+    #   「Show Details...」是硬编码英文），但语义不变：状态栏只放短句，
+    #   全文进 tooltip + 可复制的详情窗。
     check("★ 录制失败：状态栏只放结论短句，全文进 tooltip/详情窗",
-          "def _short_fail_reason" in page and "setDetailedText" in page
-          and "_short_fail_reason(text)" in page)
+          "def _short_fail_reason" in page and "_short_fail_reason(text)" in page
+          and "_open_fail_dialog" in page and "setToolTip" in page)
     check("抖音默认窗口 6s 不变", "STARTUP_CHECK_WAIT = 6.0" in lm)
     check("开录前重取（不复用缓存）", "st.platform == \"tiktok\"" in lm)
     check("状态未知保留上次", "保留上次 is_live" in lm)

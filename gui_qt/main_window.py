@@ -744,6 +744,20 @@ class MainWindow(QMainWindow):
         self._guide_btn.clicked.connect(lambda: open_guide(self, None))
         nv.addWidget(self._guide_btn)
 
+        # ★ 一键导出日志（2026-11-15）：常驻侧栏底部，任何页面都能点。
+        #   背景：出口原来只在「设置 → 系统档」里，客户遇到问题时（如
+        #   TikTok 录制失败）根本找不到 —— 拿不到日志只能来回猜。
+        self._log_export_btn = QPushButton("导出日志")
+        self._log_export_btn.setObjectName("NavItem")
+        self._log_export_btn.setIconSize(QSize(18, 18))
+        self._log_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._log_export_btn.setToolTip(
+            "把最近的运行日志和环境信息打包成压缩包放到桌面，\n"
+            "发给作者即可精准定位问题（遇到任何报错都建议先点这里）")
+        self._log_export_btn.clicked.connect(
+            lambda *_: self._export_logs())
+        nv.addWidget(self._log_export_btn)
+
         # 版本号：大公司软件的侧栏底部都有这一行（Slack / Linear / Raycast）。
         # 它的作用是「客户报问题时能直接说出来」，顺带让界面看起来是正式版。
         try:
@@ -769,6 +783,13 @@ class MainWindow(QMainWindow):
     def switch_to(self, name: str):
         """切到指定页面（对外：工作台卡片与跨页跳转用）。页面不存在时忽略。"""
         self._switch(name)
+
+    # ------------------------------------------------------------ 一键导出日志
+    def _export_logs(self):
+        """侧栏「导出日志」：打包诊断报告 + 最近日志到桌面（Worker 后台跑）。"""
+        from gui_qt.widgets.log_export import export_logs
+        export_logs(self, self.ctx, kind="日志",
+                    success_note="作者微信见「设置 → 系统档 → 反馈与日志」。")
 
     def page(self, name: str):
         """取页面实例（跨页传参用，例如把爆款链接送到文案仿写页）。"""
@@ -1036,6 +1057,14 @@ class MainWindow(QMainWindow):
         if self._guide_btn is not None:
             # 问号圈图标：与导航文字同色，保持低调
             self._guide_btn.setIcon(help_icon(normal))
+        # 「导出日志」：与教程按钮同色，主题切换后必须跟着重画（否则深色下
+        # 会留一枚浅色描边图标，和旁边两个不一样）
+        if getattr(self, "_log_export_btn", None) is not None:
+            try:
+                from gui_qt.icons import export_icon
+                self._log_export_btn.setIcon(export_icon(normal))
+            except Exception:                                # noqa: BLE001
+                pass
         # 分组的展开/收起箭头也是画上去的，同样漏了就会留在旧主题色
         for _g in self._group_heads:
             self._refresh_group_icon(_g)

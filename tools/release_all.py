@@ -450,6 +450,15 @@ def main() -> int:
             print("[中止] TikTok 直播接入退化（会退回「只支持抖音」或拉不到流），先修好再发版。")
             return 1
 
+        # ★ 2026-11-15 一键导出日志：侧栏常驻入口 + 失败详情窗现场入口 +
+        #   settings_page 参数名 bug（with_logs→include_logs）回归。这扇门
+        #   坏掉的后果是「客户报问题、作者拿不到日志」，只能来回猜。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_log_export.py")],
+                      "一键导出日志（入口 / 参数名 / 真打包内容）")
+        if code != 0:
+            print("[中止] 一键导出日志退化（客户报问题时拿不到日志），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")

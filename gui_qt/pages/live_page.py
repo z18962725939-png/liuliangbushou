@@ -711,17 +711,10 @@ class LivePage(QWidget):
             except Exception:                   # noqa: BLE001
                 pass
             if len(text.splitlines()) > 1:
-                try:
-                    box = QMessageBox(self)
-                    box.setIcon(QMessageBox.Warning)
-                    box.setWindowTitle("录制没有启动起来")
-                    box.setText("点「显示详细信息」能看到完整原因，可直接复制发给我们。")
-                    box.setDetailedText(text)
-                    box.setModal(False)
-                    box.show()
-                    self._fail_box = box
-                except Exception:               # noqa: BLE001
-                    pass
+                self._fail_box = self._open_fail_dialog(
+                    "录制没有启动起来",
+                    "检测到正在直播，但录制没能启动。",
+                    text)
         elif kind == "offline":
             self.status.setText("已添加，当前未开播；点「开始监控」后开播会自动录制")
         elif kind == "unknown":
@@ -948,18 +941,30 @@ class LivePage(QWidget):
         except Exception:                       # noqa: BLE001
             pass
         if details and ok_n == 0:
-            try:
-                box = QMessageBox(self)
-                box.setIcon(QMessageBox.Warning)
-                box.setWindowTitle("录制没有启动起来")
-                box.setText("录制没有启动起来。点「显示详细信息」可看到完整原因，"
-                            "能直接复制发给我们。")
-                box.setDetailedText("\n\n".join(details))
-                box.setModal(False)
-                box.show()                      # 非模态：不阻塞界面与自动化测试
-                self._fail_box = box            # 持引用，避免被回收
-            except Exception:                   # noqa: BLE001
-                pass
+            self._fail_box = self._open_fail_dialog(
+                "录制没有启动起来",
+                f"录制启动 {ok_n}/{len(results)}，全部失败。",
+                "\n\n".join(details))
+
+    # --------------------------------------------------- 失败详情窗
+    def _open_fail_dialog(self, title: str, summary: str, detail: str):
+        """录制失败详情窗：结论 + 可复制的完整原因 +「📋 一键导出日志」。
+
+        ★ 2026-11-15 换成自绘 LogDialog：原来用 QMessageBox 时
+          「Show Details...」是 Qt 硬编码英文（客户看不懂），窗里也没有
+          「确定」，而且导出按钮在部分布局下会被挤到正文上。现在按钮中文、
+          详情可全选复制、出口就在窗里 —— 客户遇到问题的第一现场。
+        """
+        try:
+            from gui_qt.widgets.log_export import show_failure_dialog
+            return show_failure_dialog(
+                self, title=title, summary=summary,
+                body="完整原因点「显示详细信息」查看，可全选复制发给我们；"
+                     "也可以直接点「一键导出日志」，把日志和环境信息一起打包。",
+                detail=detail, kind="录制失败",
+                note="作者微信见「设置 → 系统档 → 反馈与日志」。")
+        except Exception:                       # noqa: BLE001
+            return None
 
     # --------------------------------------------------- 屏幕区域录制
     def _start_region(self):
