@@ -313,7 +313,9 @@ def test_source():
     check("spec 登记 tiktok_live", '"justoneapi_collector.tiktok_live"' in spec)
     check("ensure_monitor 传代理", "tiktok_proxy=tk_proxy" in base)
     check("直播页有代理输入框", "tiktok_proxy_edit" in page)
-    check("代理按钮走 connect_guarded", "connect_guarded(b_detect.clicked" in page)
+    check("代理按钮走 connect_guarded",
+          "connect_guarded(self.detect_proxy_btn.clicked" in page
+          and "connect_guarded(self.save_proxy_btn.clicked" in page)
     check("保存代理立即生效", "dm.set_tiktok_proxy(val)" in page)
     check("TikTok 输入走链接路径", "tiktok_live.is_tiktok_input(text)" in page)
     check("TikTok 首次检查有耗时提示", "首次需过浏览器校验" in page)
@@ -330,9 +332,35 @@ def test_source():
                  if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     check("★ 引擎层不写死 7897 为唯一出口",
           not any("127.0.0.1:7897" in c for c in lm_consts))
-    detect_fn = tk.split("def detect_proxy()", 1)[-1].split("\ndef ", 1)[0]
-    check("★ 端口探测优先于系统环境变量（客户机装的多是 Clash）",
-          detect_fn.index("_COMMON_PROXY_PORTS") < detect_fn.index("HTTPS_PROXY"))
+    detect_fn = tk.split("def detect_proxy(", 1)[-1].split("\ndef ", 1)[0]
+    cand_fn = tk.split("def proxy_candidates()", 1)[-1].split("\ndef ", 1)[0]
+    quick_fn = tk.split("def quick_proxy()", 1)[-1].split("\ndef ", 1)[0]
+    fetch_fn = tk.split("def fetch_room(", 1)[-1].split("\ndef ", 1)[0]
+    check("★ 端口探测优先于环境变量（客户机装的多是 Clash）",
+          cand_fn.index("_COMMON_PROXY_PORTS") < cand_fn.index("env_proxy"))
+    # ── 「状态未知」整片出现（客户 11-15 反馈）的防回归 ──
+    #   真因：探测只验端口 listening，不验能否出海；且没读 Windows 系统代理，
+    #   选中一条死代理后 webcast 请求 502，界面就整片「状态未知」。
+    check("★ 读 Windows 系统代理（Clash 的「系统代理」写这里）",
+          "Internet Settings" in tk and "ProxyEnable" in tk
+          and "ProxyServer" in tk)
+    check("★ 探测必须真连通验证，不能只看端口开着",
+          "def proxy_works" in tk and "proxy_works(p)" in detect_fn)
+    check("★ proxy_works 不走环境变量（避免被 IDE 代理带偏）",
+          "trust_env=False" in tk.split("def proxy_works(", 1)[-1]
+          .split("\ndef ", 1)[0])
+    check("★ 快取候选不读环境变量（IDE 注入的临时端口会误导客户）",
+          "env_proxy(" not in quick_fn)
+    check("★ 状态接口多出口回退：给定代理 → 系统代理 → 直连",
+          "system_proxy()" in fetch_fn and 'tries.append("")' in fetch_fn)
+    check("★ 记录实际走通的出口（ffmpeg 不读系统代理）",
+          "out.via = p or" in tk and "def _tiktok_egress" in lm
+          and "self._tiktok_egress() if is_tiktok" in lm)
+    check("★ 失败文案给可操作指引（端口 7897 / 自动探测）",
+          "127.0.0.1:7897" in tk and "自动探测" in tk
+          and "def _outage_hint" in tk)
+    check("★ 界面探测走验证版", "detect_proxy(verify=True)" in page)
+    check("★ 状态未知带悬浮原因", 'tip=(getattr(s, "stream_error"' in page)
     check("★ 禁止虚拟时间参数（会跑废 WAF 挑战）",
           not any(c.startswith("--virtual-time-budget") for c in consts))
     check("webcast 路径带尾斜杠", tk.count('webcast/room/info/"') >= 1)
@@ -360,6 +388,65 @@ def test_source():
     check("★ SEO 描述同步 TikTok（标题保留已收录搜索词）", "TikTok 直播" in seo)
 
 
+def test_egress_fallback():
+    """运行时验证出口回退链 —— 源码字符串匹配抓不到「逻辑跑错」。
+
+    场景（对应 2026-11-15 客户反馈「能取到直播间但状态未知」）：
+      给定代理端口开着却连不出去 → 必须自动退到 Windows 系统代理。
+    """
+    from justoneapi_collector import tiktok_live as tkm       # noqa: PLC0415
+
+    real_sys, real_client = tkm.system_proxy, tkm.httpx.Client
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"status_code": 0,
+                    "data": {"status": 2, "title": "t", "stream_url": {}}}
+
+    class _Client:
+        def __init__(self, **kw):
+            self.proxy = kw.get("proxy", "")
+            calls.append(self.proxy)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, headers=None):       # noqa: ARG002
+            if self.proxy == "http://127.0.0.1:1":
+                raise RuntimeError("502 Bad Gateway")
+            return _Resp()
+
+    tkm.system_proxy = lambda: "http://127.0.0.1:9"
+    tkm.httpx.Client = _Client
+    try:
+        snap = tkm.fetch_room("7708051583588141845", "http://127.0.0.1:1")
+        calls_a = list(calls)
+        calls.clear()
+
+        # 第二个场景：全都不通 → 错误必须是人话（含端口示例与「自动探测」）
+        tkm.system_proxy = lambda: ""
+        tkm.httpx.Client = type("C", (_Client,), {
+            "get": lambda self, url, headers=None: (_ for _ in ()).throw(
+                RuntimeError("ConnectTimeout"))})
+        bad = tkm.fetch_room("7708051583588141845", "")
+    finally:
+        tkm.system_proxy, tkm.httpx.Client = real_sys, real_client
+
+    check("★ 运行时：给定代理不通会自动退到系统代理",
+          snap.via == "http://127.0.0.1:9")
+    check("★ 先试给定代理，再试系统代理（顺序不能反）",
+          calls_a[:2] == ["http://127.0.0.1:1", "http://127.0.0.1:9"])
+    check("★ 运行时：全出口失败时给可操作文案，不是异常堆栈",
+          bad.status == tkm.STATUS_UNKNOWN and "自动探测" in bad.error
+          and "127.0.0.1:7897" in bad.error)
+
+
 def main():
     print("=" * 62)
     print("TikTok 直播监控接入 · 离线回归门禁")
@@ -368,6 +455,7 @@ def main():
     test_routing()
     test_persistence()
     test_source()
+    test_egress_fallback()
     total = len(PASS) + len(FAIL)
     print(f"\n结果：{len(PASS)}/{total} 通过")
     if FAIL:

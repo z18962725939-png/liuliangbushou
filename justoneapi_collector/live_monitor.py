@@ -217,10 +217,16 @@ class LiveMonitor:
         # 抖音登录 Cookie（内置浏览器扫码登录得到）：带上它解析直播流更稳
         self.douyin_cookie = (douyin_cookie or "").strip()
         self._resolver = DouyinLiveStreamResolver(cookie=self.douyin_cookie)
-        # ★ TikTok 代理：None = 自动探测本机常见端口（客户机都装了代理，但
-        #   端口各家不同，绝不写死 7897）；空串 = 用户明确不用代理。
-        self.tiktok_proxy = (tiktok_live.detect_proxy() if tiktok_proxy is None
+        # ★ TikTok 代理：None = 自动探测（显式配置 → Windows 系统代理 →
+        #   本机常见端口）；空串 = 用户明确不用代理。这里用 quick_proxy()
+        #   毫秒级取候选、**不联网验证**，否则构造会在 UI 线程卡好几秒；
+        #   真正的可用性由 fetch_room 的「给定代理 → 系统代理 → 直连」兜底。
+        self.tiktok_proxy = (tiktok_live.quick_proxy() if tiktok_proxy is None
                              else str(tiktok_proxy or "").strip())
+        # 实际走通的出口：配置为空但靠「系统代理」连通时记在这里。
+        # ★ ffmpeg 不读 Windows 系统代理，录制必须显式拿到这个值，
+        #   否则状态查得到、流却拉不下来。
+        self._tiktok_via = ""
         # 浏览器会话懒加载且复用，避免每个轮询周期都重过一次 WAF 挑战
         self._tiktok_browser: tiktok_live.TikTokLiveBrowser | None = None
 
@@ -375,8 +381,9 @@ class LiveMonitor:
 
     def set_tiktok_proxy(self, proxy: str | None) -> str:
         """界面改完代理立即生效；重建浏览器会话，避免旧会话还走老出口。"""
-        self.tiktok_proxy = (tiktok_live.detect_proxy() if proxy is None
+        self.tiktok_proxy = (tiktok_live.quick_proxy() if proxy is None
                              else str(proxy or "").strip())
+        self._tiktok_via = ""               # 换了出口，旧记录作废
         try:
             if self._tiktok_browser:
                 self._tiktok_browser.close()
@@ -384,6 +391,20 @@ class LiveMonitor:
             pass
         self._tiktok_browser = None
         return self.tiktok_proxy
+
+    def _tiktok_egress(self) -> str:
+        """录制该用的出口：优先用户配置，其次上次真走通的那个。
+
+        ★ 客户没填代理、但系统代理能出海时，`tiktok_proxy` 是空的；
+          ffmpeg 又不读 Windows 系统代理，不把这个补上就会「状态查得到、
+          录制拉不到流」。
+        """
+        return (self.tiktok_proxy or self._tiktok_via or "").strip()
+
+    def _remember_egress(self, snap) -> None:
+        """记住本次真走通的出口；「直连」表示不需要代理（TUN / 全局模式）。"""
+        via = str(getattr(snap, "via", "") or "")
+        self._tiktok_via = "" if via in ("", "直连") else via
 
     def add_target(self, sec_uid: str, nickname: str = "", input_type: str = "昵称",
                    note: str = ""):
@@ -573,6 +594,7 @@ class LiveMonitor:
         st.is_live = live
         st.live_status = 1 if live else 0
         st.stream_error = ""
+        self._remember_egress(snap)                        # 录制侧要复用同一出口
         if live:
             st.stream_url = snap.stream_url
             st.hls_urls = {f"hls_{i}": u for i, u in enumerate(snap.stream_urls)}
@@ -676,6 +698,7 @@ class LiveMonitor:
         st.hls_urls = {f"hls_{i}": u for i, u in enumerate(snap.stream_urls)}
         st.flv_urls = {}
         st.stream_error = ""
+        self._remember_egress(snap)
         return st.stream_url
 
     def resolve_stream_url(self, sec_uid: str) -> str | None:
@@ -984,7 +1007,7 @@ class LiveMonitor:
         is_tiktok = ((target is not None and target.platform == "tiktok")
                      or "tiktokcdn" in (stream_url or "")
                      or "tiktok.com" in (stream_url or ""))
-        proxy = self.tiktok_proxy if is_tiktok else ""
+        proxy = self._tiktok_egress() if is_tiktok else ""
 
         def _build(part_path: Path) -> list:
             cmd = [self._ffmpeg, "-y"]

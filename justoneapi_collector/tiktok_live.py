@@ -130,24 +130,163 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.25) -> boo
         return s.connect_ex((host, port)) == 0
 
 
-def detect_proxy() -> str:
-    """探测一个可用的 HTTP 代理。所有值都可由用户在界面里改。
+def normalize_proxy(value: str) -> str:
+    """把各种写法统一成 `http://host:port`。
 
-    顺序：显式 TIKTOK_LIVE_PROXY → 本机常见代理端口 → 系统环境变量兜底。
-    ★ 客户机装的多是 Clash Verge（默认 7897）；系统环境变量可能是 IDE /
-      企业软件注入的临时端口，未必能出海，所以**端口探测要排在环境变量
-      前面**，否则自动探测会填进一个连不上 TikTok 的出口。界面始终可改。
+    认这几种：`127.0.0.1:7897`、`http://127.0.0.1:7897`、
+    以及 Windows 的分段写法 `http=127.0.0.1:7897;https=127.0.0.1:7897`。
+    socks5 原样保留（Chrome 直接吃，httpx 需装 socks 支持）。
     """
-    explicit = (os.environ.get("TIKTOK_LIVE_PROXY") or "").strip()
+    s = (value or "").strip()
+    if not s:
+        return ""
+    if "=" in s:
+        picked = ""
+        for part in s.split(";"):
+            if "=" not in part:
+                continue
+            key, val = part.split("=", 1)
+            key, val = key.strip().lower(), val.strip()
+            if not val:
+                continue
+            if key.startswith("https"):
+                picked = val
+                break
+            if key == "http":
+                picked = picked or val
+        s = picked or s
+    if "://" in s:
+        return s
+    return f"http://{s}"
+
+
+def system_proxy() -> str:
+    """读 Windows 系统代理（Clash Verge / v2rayN 的「系统代理」就写这里）。
+
+    ★ 客户机上最可靠的一条线索：浏览器能打开 TikTok 直播间，通常就是
+      因为它跟随了系统代理，而我们的 httpx 默认不读这一项。
+    """
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+    except Exception:                           # noqa: BLE001
+        return ""
+    path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)
+    except OSError:
+        return ""
+    try:
+        try:
+            enabled = winreg.QueryValueEx(key, "ProxyEnable")[0]
+        except FileNotFoundError:
+            return ""
+        if not enabled:
+            return ""
+        try:
+            server = winreg.QueryValueEx(key, "ProxyServer")[0]
+        except FileNotFoundError:
+            return ""
+    finally:
+        try:
+            winreg.CloseKey(key)
+        except Exception:                       # noqa: BLE001
+            pass
+    return normalize_proxy(str(server or ""))
+
+
+def env_proxy() -> str:
+    """环境变量里的代理；IDE / 企业软件常注入这种东西，未必能出海。"""
+    for key in ("TIKTOK_LIVE_PROXY", "HTTPS_PROXY", "https_proxy",
+                "HTTP_PROXY", "http_proxy"):
+        val = normalize_proxy(os.environ.get(key) or "")
+        if val:
+            return val
+    return ""
+
+
+def proxy_candidates() -> list[str]:
+    """按「最可能可用」排序的候选出口，已去重。
+
+    顺序：显式 TIKTOK_LIVE_PROXY → Windows 系统代理 → 本机常见端口 → 环境变量。
+    ★ 环境变量排最后：它可能是开发工具注入的临时端口，连 TikTok 必 502。
+    """
+    out: list[str] = []
+    explicit = normalize_proxy(os.environ.get("TIKTOK_LIVE_PROXY") or "")
     if explicit:
-        return explicit if "://" in explicit else f"http://{explicit}"
+        out.append(explicit)
+    sys_p = system_proxy()
+    if sys_p:
+        out.append(sys_p)
+    for port in _COMMON_PROXY_PORTS:
+        if _port_open(port):
+            out.append(f"http://127.0.0.1:{port}")
+    env_p = env_proxy()
+    if env_p:
+        out.append(env_p)
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for p in out:
+        if p and p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def proxy_works(proxy: str, timeout: float = 4.0) -> bool:
+    """真发一次请求，确认这个代理能把我们带到 TikTok。
+
+    ★ 只测端口是否 listening 远远不够：本机随便一个软件、开发工具注入的
+      临时端口都会「开着」，但连 TikTok 一律 502 / CONNECT 被拒。选中这种
+      出口，界面就会整片「状态未知」。
+    """
+    p = normalize_proxy(proxy)
+    if not p:
+        return False
+    try:
+        with httpx.Client(proxy=p, timeout=timeout, follow_redirects=True,
+                          trust_env=False) as c:
+            r = c.get(f"{WEBCAST_URL}?aid={AID}&room_id=1",
+                      headers={"User-Agent": CHROME_UA,
+                               "Accept": "application/json, text/plain, */*"})
+        return r.status_code < 500 and r.status_code != 407
+    except Exception:                           # noqa: BLE001
+        return False
+
+
+def quick_proxy() -> str:
+    """毫秒级取一个出口候选，供启动/设置注入用（不联网验证）。
+
+    只看「显式配置 → 系统代理 → 常见端口」，**不看环境变量**：那是 IDE
+    注入的临时端口，填进界面只会误导客户。真正的可用性由 fetch_room 的
+    多出口回退来兜底，所以这里取错也不会造成「状态未知」。
+    """
+    explicit = normalize_proxy(os.environ.get("TIKTOK_LIVE_PROXY") or "")
+    if explicit:
+        return explicit
+    sys_p = system_proxy()
+    if sys_p:
+        return sys_p
     for port in _COMMON_PROXY_PORTS:
         if _port_open(port):
             return f"http://127.0.0.1:{port}"
-    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-        val = (os.environ.get(key) or "").strip()
-        if val:
-            return val if "://" in val else f"http://{val}"
+    return ""
+
+
+def detect_proxy(verify: bool = True) -> str:
+    """探测一个**真能连上 TikTok** 的代理；没有就返回空串。
+
+    顺序同 proxy_candidates；verify=True 时逐个真发请求验证，只认验证通过的
+    那个（界面「自动探测」按钮用这条）。全部不通返回 ""，让请求走直连 ——
+    客户开 TUN 模式时直连本来就通。
+    """
+    cands = proxy_candidates()
+    if not verify:
+        return cands[0] if cands else ""
+    for p in cands:
+        if proxy_works(p):
+            return p
     return ""
 
 
@@ -290,6 +429,7 @@ class RoomSnapshot:
     expires_at: float = 0.0
     error: str = ""
     payload_size: int = 0
+    via: str = ""               # 本次实际走通的出口（代理 URL / 「直连」）
 
     @property
     def is_live(self) -> bool:
@@ -405,40 +545,71 @@ def parse_room(payload: dict | str | bytes) -> RoomSnapshot:
     return snap
 
 
+def _room_headers(room_id: str, user_agent: str = CHROME_UA) -> dict:
+    return {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://www.tiktok.com/@/live?room_id={room_id}",
+    }
+
+
+def _outage_hint(given: str, reasons: list[str]) -> str:
+    """把「多个出口全失败」翻译成客户看得懂、能动手的一句话。"""
+    if given:
+        head = (f"连不上 TikTok（当前代理 {given} 不通）。"
+                "请到「TikTok 代理」改成 Clash Verge 的端口，"
+                "通常是 127.0.0.1:7897；改完点「保存代理」")
+    else:
+        head = ("连不上 TikTok（本机没找到可用代理）。"
+                "请先打开代理软件并开启「系统代理」，"
+                "再到「TikTok 代理」点「自动探测」后保存"
+                "（Clash Verge 默认 127.0.0.1:7897）")
+    tail = "；".join(reasons[:2])
+    return f"{head}｜{tail}" if tail else head
+
+
 def fetch_room(room_id: str, proxy: str = "", user_agent: str = CHROME_UA,
-               timeout: float = 20.0) -> RoomSnapshot:
-    """查房间状态 + 流地址。永远返回 RoomSnapshot，不把异常抛给轮询线程。"""
+               timeout: float = 10.0) -> RoomSnapshot:
+    """查房间状态 + 流地址。永远返回 RoomSnapshot，不把异常抛给轮询线程。
+
+    ★ 出口按「给定代理 → 系统代理 → 直连」依次退让。客户机最常见的是
+      Clash 的**系统代理**（浏览器能开直播间就是靠它），也有 TUN 模式的
+      （直连即可出网）。只有全部失败才判「状态未知」，并把每个出口的
+      失败原因写进 error，让界面显示可操作的提示。
+    """
     snap = RoomSnapshot()
     rid = str(room_id or "").strip()
     if not rid.isdigit():
         snap.error = "room_id 为空或不是数字，需要先过浏览器取直播间页"
         return snap
     url = f"{WEBCAST_URL}?aid={AID}&room_id={rid}"
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": f"https://www.tiktok.com/@/live?room_id={rid}",
-    }
-    kwargs: dict = dict(headers=headers, timeout=timeout,
-                        follow_redirects=True, trust_env=False)
-    if proxy:
-        kwargs["proxy"] = proxy
-    last: Exception | None = None
-    for attempt in range(2):                               # 抖一次自动重试
+    given = normalize_proxy(proxy)
+    tries: list[str] = []
+    for p in (given, system_proxy()):
+        if p and p not in tries:
+            tries.append(p)
+    tries.append("")                                   # 直连：TUN / 全局模式
+    reasons: list[str] = []
+    for p in tries:
         try:
+            kwargs: dict = dict(headers=_room_headers(rid, user_agent),
+                                timeout=timeout, follow_redirects=True,
+                                trust_env=False)
+            if p:
+                kwargs["proxy"] = p
             with httpx.Client(**kwargs) as c:
                 r = c.get(url)
+            if r.status_code == 407:
+                raise RuntimeError("代理需要认证（407）")
             if r.status_code >= 500:
                 raise RuntimeError(f"服务端 HTTP {r.status_code}")
-            return parse_room(r.json())
-        except Exception as exc:                            # noqa: BLE001
-            last = exc
-            if attempt == 0:
-                time.sleep(1.0)
-    msg = f"{type(last).__name__}: {last}" if last else "未知错误"
-    hint = "" if proxy else "（当前没配代理，国内直连 TikTok 会被重置）"
-    snap.error = f"房间状态接口请求失败{hint}：{msg[:170]}"
+            out = parse_room(r.json())
+            out.via = p or "直连"
+            return out
+        except Exception as exc:                       # noqa: BLE001
+            reasons.append(f"{p or '直连'}：{type(exc).__name__} {str(exc)[:70]}")
+    snap.error = _outage_hint(given, reasons)
     return snap
 
 
@@ -557,6 +728,11 @@ class TikTokLiveBrowser:
             raise BrowserError(
                 f"只拿到 {last_size} 字节的校验页；本机没配置海外出口，"
                 "TikTok 页面在国内直连会被重置，请先在直播监控页填代理")
+        if not proxy_works(self.proxy, 4.0):
+            raise BrowserError(
+                f"代理 {self.proxy} 连不上 TikTok（端口开着但出不去）。"
+                "请核对端口（Clash Verge 默认 127.0.0.1:7897），"
+                "或到「TikTok 代理」点「自动探测」后保存")
         raise BrowserError(
             f"等了 {self.rounds} 轮仍是 {last_size} 字节的校验页；"
             "可能是代理 IP 被风控，或该直播间需要登录/年龄验证")

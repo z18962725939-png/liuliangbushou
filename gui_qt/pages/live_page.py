@@ -110,21 +110,23 @@ class LivePage(QWidget):
         r4.addWidget(QLabel("TikTok 代理："))
         self.tiktok_proxy_edit = QLineEdit()
         saved = self.ctx.get_setting("tiktok_live_proxy")
-        if saved is None:                       # 从未配置过 → 自动探测
-            saved = tiktok_live.detect_proxy()
+        if saved is None:                       # 从未配置过 → 取候选（毫秒级，不联网）
+            saved = tiktok_live.quick_proxy()
         self.tiktok_proxy_edit.setText(str(saved or ""))
         self.tiktok_proxy_edit.setPlaceholderText(
-            "如 http://127.0.0.1:7897；TikTok 直播必需，留空=直连（国内不可用）")
+            "如 http://127.0.0.1:7897；TikTok 直播必需，留空=自动（系统代理/直连）")
         r4.addWidget(self.tiktok_proxy_edit, 1)
-        b_detect = QPushButton("自动探测")
-        b_detect.setToolTip("扫描本机常见代理端口，填进输入框（不会自动保存）")
-        connect_guarded(b_detect.clicked, lambda *_: self._detect_tiktok_proxy(),
+        self.detect_proxy_btn = QPushButton("自动探测")
+        self.detect_proxy_btn.setToolTip(
+            "逐个试连 TikTok，只填验证通过的出口（不会自动保存）")
+        connect_guarded(self.detect_proxy_btn.clicked,
+                        lambda *_: self._detect_tiktok_proxy(),
                         on_error=self._slot_failed, label="探测 TikTok 代理")
-        b_save_proxy = QPushButton("保存代理")
-        b_save_proxy.setToolTip("保存后立即对监控引擎生效，重启也不会丢")
-        connect_guarded(b_save_proxy.clicked, lambda *_: self._save_tiktok_proxy(),
+        self.save_proxy_btn = QPushButton("保存代理")
+        self.save_proxy_btn.setToolTip("保存后立即对监控引擎生效，重启也不会丢")
+        connect_guarded(self.save_proxy_btn.clicked, lambda *_: self._save_tiktok_proxy(),
                         on_error=self._slot_failed, label="保存 TikTok 代理")
-        r4.addWidget(b_detect); r4.addWidget(b_save_proxy)
+        r4.addWidget(self.detect_proxy_btn); r4.addWidget(self.save_proxy_btn)
         top_l.addLayout(r4)
         root.addWidget(top)
 
@@ -347,10 +349,11 @@ class LivePage(QWidget):
         ]:
             self._add_row(nick, src, st, rid, rec, dur, sec_uid=f"demo_{rid}")
 
-    def _add_row(self, nick, src, st, rid, rec, dur, sec_uid="", note=""):
+    def _add_row(self, nick, src, st, rid, rec, dur, sec_uid="", note="", tip=""):
         """插入一行；sec_uid 挂在昵称单元格的 UserRole 上（表格操作一律以它为准）。
 
         note 是用户备注（赛道/用途），显示在第 7 列，可双击直接改。
+        tip 给「状态未知」用：悬浮显示具体失败原因（代理不通 / 风控 / 页面改版）。
         """
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -358,6 +361,8 @@ class LivePage(QWidget):
             item = QTableWidgetItem(v)
             if c == 2:
                 item.setForeground(self._color_for_status(st))
+                if tip:
+                    item.setToolTip(tip)
             if c == 0:
                 item.setData(Qt.UserRole, sec_uid or rid)
             if c == 6:
@@ -431,24 +436,72 @@ class LivePage(QWidget):
 
     # --------------------------------------------------- 添加目标
     def _detect_tiktok_proxy(self):
-        """扫描本机常见代理端口，只填输入框，不落盘。"""
-        found = tiktok_live.detect_proxy()
-        self.tiktok_proxy_edit.setText(found)
-        self.status.setText(
-            f"已探测到代理：{found}" if found
-            else "没探测到本机代理，请手动填写（TikTok 直播需要海外出口）")
+        """探测并**逐个试连验证**，只填验证通过的出口，不落盘。
+
+        ★ 只扫端口远远不够：本机上开着端口却连不上 TikTok 的出口（开发工具
+          注入的临时代理、别的软件占用）会选出一整片「状态未知」。所以这里
+          必须真发请求，验证不通过的绝不填。
+        """
+        self.status.setText("正在探测代理：逐个试连 TikTok，约几秒…")
+        self.detect_proxy_btn.setEnabled(False)
+
+        def run(_worker):
+            cands = tiktok_live.proxy_candidates()
+            return {"good": tiktok_live.detect_proxy(verify=True),
+                    "count": len(cands)}
+
+        w = Worker(run)
+        self._wire_worker(w, self._on_detect_proxy_done, "代理探测失败", "代理探测")
+        w.start()
+
+    def _on_detect_proxy_done(self, p):
+        p = p if isinstance(p, dict) else {}
+        good = str(p.get("good") or "")
+        self.detect_proxy_btn.setEnabled(True)
+        if good:
+            self.tiktok_proxy_edit.setText(good)
+            self.status.setText(
+                f"已找到可用代理：{good}（试连 TikTok 成功）；点「保存代理」生效")
+        else:
+            self.tiktok_proxy_edit.setText("")
+            self.status.setText(
+                "没找到能连 TikTok 的代理。请先打开代理软件并开启「系统代理」，"
+                "或手动填端口（Clash Verge 默认 127.0.0.1:7897）后点「保存代理」")
 
     def _save_tiktok_proxy(self):
-        """落盘 + 立即让监控引擎换出口（会重建 CDP 会话）。"""
-        val = self.tiktok_proxy_edit.text().strip()
+        """落盘 + 立即让监控引擎换出口（会重建 CDP 会话），并异步验证可用性。"""
+        raw = self.tiktok_proxy_edit.text().strip()
+        val = tiktok_live.normalize_proxy(raw) if raw else ""
         self.ctx.set_setting("tiktok_live_proxy", val)
         self.ctx.save_settings()
         dm = self._daemon()
         if dm is not None:
             dm.set_tiktok_proxy(val)
-        self.status.setText(
-            f"TikTok 代理已保存并生效：{val}" if val
-            else "已设为空（直连）：TikTok 直播在国内直连会失败")
+        if not val:
+            self.status.setText(
+                "已留空：按「系统代理 / 直连」自动尝试。开了 TUN 模式的客户可以这样用")
+            return
+        self.tiktok_proxy_edit.setText(val)
+        self.save_proxy_btn.setEnabled(False)
+        self.status.setText(f"代理已保存：{val}，正在试连 TikTok…")
+
+        def run(_worker):
+            return tiktok_live.proxy_works(val, timeout=6.0)
+
+        w = Worker(run)
+        self._wire_worker(w, lambda ok: self._on_proxy_checked(val, ok),
+                          "代理校验失败", "代理校验")
+        w.start()
+
+    def _on_proxy_checked(self, val: str, ok):
+        self.save_proxy_btn.setEnabled(True)
+        if ok:
+            self.status.setText(
+                f"代理已保存且验证可用：{val}；之前「状态未知」的目标点「立即检查一次」即可")
+        else:
+            self.status.setText(
+                f"代理已保存，但试连 TikTok 失败：{val}。请核对端口"
+                "（Clash Verge 默认 7897）并确认代理软件正在运行")
 
     def _add(self):
         text = self.input.text().strip()
@@ -515,10 +568,11 @@ class LivePage(QWidget):
                 return r
         return -1
 
-    def _set_cell(self, row: int, col: int, text: str):
+    def _set_cell(self, row: int, col: int, text: str, tip: str = ""):
         it = self.table.item(row, col)
         if it is not None:
             it.setText(text)
+            it.setToolTip(tip)
 
     def _probe_after_add(self, sec_uid: str, display_name: str = ""):
         """添加监控后立即检查一次；若正在直播且已开「开播自动录制」，直接开录。
@@ -590,7 +644,8 @@ class LivePage(QWidget):
                 unknown = (getattr(st, "stream_error", "") or "").startswith("状态检查失败")
                 # 这次没查到就别展示陈旧状态，明确标「状态未知」让客户重试
                 label = "状态未知" if unknown else ("直播中" if live else "未开播")
-                self._set_cell(row, 2, label)
+                self._set_cell(row, 2, label,
+                               (getattr(st, "stream_error", "") or "") if unknown else "")
                 it2 = self.table.item(row, 2)
                 if it2 is not None:
                     it2.setForeground(self._color_for_status(label))
@@ -753,12 +808,14 @@ class LivePage(QWidget):
                 "录制中" if s.is_recording else "-",
                 self._fmt_elapsed(s),
                 sec_uid=s.sec_uid,
+                tip=(getattr(s, "stream_error", "") or "") if unknown else "",
             )
         self._sync_actions()
         msg = f"检查完成：{len(statuses)} 个目标"
         if unknown_n:
-            msg += (f"，其中 {unknown_n} 个状态未知（不是未开播，可能是接口风控）；"
-                    "可点「立即检查一次」重试")
+            msg += (f"，其中 {unknown_n} 个状态未知（不是未开播）。"
+                    "把鼠标放到「状态未知」上能看到原因；TikTok 多数是代理连不上，"
+                    "到上方「TikTok 代理」点「自动探测」再保存即可")
         self.status.setText(msg)
 
     # --------------------------------------------------- 录制
