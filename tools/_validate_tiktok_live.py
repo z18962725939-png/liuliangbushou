@@ -427,7 +427,7 @@ def test_source():
     check("★ 首页免费版对照表含 TikTok 与代理说明",
           "抖音 / TikTok 直播录制" in site and "TikTok 需本机代理可用" in site)
     check("★ 直播栏目子页有 TikTok 专节（链接 / 代理 / 三态 / 重取）",
-          "TikTok 直播间也能一起盯" in sub
+          "TikTok 直播间一起盯" in sub
           and all(k in sub for k in ("TikTok 代理", "状态未知", "重新取一次")))
     check("★ 免费版落地页写清 TikTok 直播不花钱",
           "抖音 / TikTok 直播间自动录制" in sub and "不消耗接口额度" in sub)
