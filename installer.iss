@@ -1,5 +1,5 @@
 #define MyAppName "流量捕手"
-#define MyAppVersion "1.28.6"
+#define MyAppVersion "1.28.7"
 #define MyAppPublisher "流量捕手工作室"
 #define MyAppExeName "流量捕手.exe"
 
