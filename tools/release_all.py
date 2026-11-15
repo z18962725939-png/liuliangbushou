@@ -74,12 +74,13 @@ def find_iscc() -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────
-def run(cmd: list[str], title: str, tail_lines: int = 12) -> tuple[int, str]:
+def run(cmd: list[str], title: str, tail_lines: int = 12,
+        env: dict | None = None) -> tuple[int, str]:
     """跑命令并实时打印，返回 (退出码, 完整输出)。"""
     print(f"\n{'─' * 58}\n▶ {title}\n{'─' * 58}")
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,
-                            encoding="utf-8", errors="replace")
+                            encoding="utf-8", errors="replace", env=env)
     lines: list[str] = []
     for line in proc.stdout:  # type: ignore[union-attr]
         lines.append(line)
@@ -95,6 +96,80 @@ def read_version() -> str:
     if not m:
         raise SystemExit("[错误] branding.py 里读不到 APP_VERSION")
     return m.group(1)
+
+
+def gh_token() -> str:
+    """GitHub 令牌：环境变量优先，其次从 Windows 凭据管理器读（git credential）。
+
+    ★ 2026-11-15：PAT 已存凭据管理器（git credential approve 过），正常发版
+      环境里不需要手动设 GITHUB_TOKEN。读不到返回空串，调用方跳过建 Release。
+      ⚠ 严禁把令牌写进代码或日志——本仓库是公开的。
+    """
+    tok = os.environ.get("GITHUB_TOKEN", "").strip()
+    if tok:
+        return tok
+    try:
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="echo")
+        p = subprocess.run(["git", "credential", "fill"], cwd=str(ROOT),
+                           input="protocol=https\nhost=github.com\n\n",
+                           capture_output=True, text=True, timeout=20, env=env)
+        for line in p.stdout.splitlines():
+            if line.startswith("password="):
+                return line.split("=", 1)[1].strip()
+    except Exception:                                          # noqa: BLE001
+        pass
+    return ""
+
+
+def sync_github(new_ver: str, notes: str) -> None:
+    """发版链收尾（2026-11-15 起）：提交发版产物 → push → 建 GitHub Release。
+
+    尽力而为：线上发布（COS/官网）在本步之前已完成，这里失败只警告不阻断，
+    Release 创建脚本幂等，失败后手动重跑即可。
+    """
+    print(f"\n{'─' * 58}\n▶ GitHub 同步（提交 / push / Release）\n{'─' * 58}")
+    # 1) 提交：只收已跟踪文件的改动（branding / iss / 发卡印章 / 文档），
+    #    不碰未跟踪的产物（installer_output、日志都在 .gitignore 里）
+    subprocess.run(["git", "add", "-u"], cwd=str(ROOT), check=False)
+    st = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
+                        capture_output=True, text=True)
+    staged = [l for l in st.stdout.splitlines() if l and not l.startswith("??")]
+    if staged:
+        msg = f"release: v{new_ver}（{notes[:60]}）"
+        subprocess.run(["git", "commit", "-m", msg], cwd=str(ROOT), check=False)
+        print(f"   已提交 {len(staged)} 个文件：{msg[:60]}")
+    else:
+        print("   无待提交改动（可能已提交过），跳过 commit")
+
+    # 2) push：先按当前代理配置推，失败再清代理直连推
+    #    （Clash 没开时全局 http.proxy=127.0.0.1:7897 不通，得绕开）
+    pushed = False
+    for extra in ([], ["-c", "http.proxy=", "-c", "https.proxy="]):
+        try:
+            p = subprocess.run(["git", *extra, "push", "origin", "main"],
+                               cwd=str(ROOT), capture_output=True, text=True,
+                               timeout=300)
+        except subprocess.TimeoutExpired:
+            continue
+        if p.returncode == 0:
+            pushed = True
+            print("   已推送 origin/main")
+            break
+        print(f"   [重试] 换直连再推：{(p.stderr or p.stdout).strip()[:80]}")
+    if not pushed:
+        print("   [警告] push 失败，线上发布不受影响；稍后手动 git push origin main")
+
+    # 3) 建 Release（幂等；没有令牌就给手动指引）
+    tok = gh_token()
+    if not tok:
+        print("   [提醒] 未拿到 GITHUB_TOKEN（凭据管理器里也没有），Release 未建")
+        print(f"     手动补：GITHUB_TOKEN=ghp_xxx {PY} tools/make_gh_releases.py {new_ver}")
+        return
+    env = dict(os.environ, GITHUB_TOKEN=tok)
+    code, _ = run([PY, str(TOOLS / "make_gh_releases.py"), new_ver],
+                  f"GitHub Release v{new_ver}", tail_lines=6, env=env)
+    if code != 0:
+        print("   [警告] Release 创建失败，线上版本不受影响；脚本幂等，可重跑")
 
 
 def bump(version: str, kind: str) -> str:
@@ -591,6 +666,14 @@ def main() -> int:
             print("\n[提醒] 还没盖过功能位指纹章，建议跑一次 tools/build_keygen.py。")
     except Exception as _e:                                    # noqa: BLE001
         print(f"\n[提醒] 发卡工具新鲜度检查未执行：{_e}")
+
+    # ── 7b) GitHub 同步 ──
+    #   公开仓 z18962725939-png/liuliangbushou：发版提交 + push + Release。
+    #   放在摘要之前、线上发布之后：同步失败不影响本次发布，只提醒补跑。
+    try:
+        sync_github(new_ver, args.notes)
+    except Exception as _e:                                    # noqa: BLE001
+        print(f"\n[提醒] GitHub 同步未完成（线上发布不受影响）：{_e}")
 
     # ── 8) 摘要 ──
     print("\n" + "=" * 58)

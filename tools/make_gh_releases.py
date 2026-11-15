@@ -103,15 +103,14 @@ def main(argv: list[str]) -> int:
     print("现有 release:", have or "(无)")
 
     wanted = argv or list(TARGETS)
+    latest_ver = argv[0] if argv else LATEST   # 指定版本时，它就是最新
     for ver in wanted:
         tag = f"v{ver}"
         if tag in have:
             print("跳过（已存在）", tag)
             continue
-        short = TARGETS.get(ver)
-        if not short:
-            print("跳过（未配置提交）", tag)
-            continue
+        # 发版链调用时传新版本号：HEAD 就是发版提交，不需要手工维护映射
+        short = TARGETS.get(ver) or "HEAD"
         info = by_ver.get(ver)
         if not info:
             print("跳过（无更新日志）", tag)
@@ -123,7 +122,7 @@ def main(argv: list[str]) -> int:
             "body": build_body(ver, info["notes"]),
             "draft": False,
             "prerelease": False,
-            "make_latest": "true" if ver == LATEST else "false",
+            "make_latest": "true" if ver == latest_ver else "false",
         }
         res = call("POST", f"{API}/releases", payload)
         if "__error__" in res:
