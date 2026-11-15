@@ -5,6 +5,24 @@
 > 🔥 **内测招募中**：完整版免费试用，问题优先修、需求优先排。
 > 扫码进群 → [内测招募.md](内测招募.md)（二维码有效期至 2026-11-22）
 
+## 界面预览
+
+<img src="https://liuliangbushou-1258850027.cos.ap-guangzhou.myqcloud.com/trafficcatcher/github/workbench.png" width="760" alt="工作台">
+
+更多实机截图（选题挖掘 / 关键词抓取 / 文案仿写 / 视频下载 / 直播监控 / 转录 / 深色模式）→ **[界面截图.md](界面截图.md)**
+
+## 官网与下载
+
+| 入口 | 地址 |
+|---|---|
+| 官网首页 | [流量捕手.cn](https://xn--kpuzw91vr71b.cn/) |
+| 下载页（含版本说明） | [官网下载页](https://xn--kpuzw91vr71b.cn/) / [镜像站](https://liuliangbushou-1258850027.cos-website.ap-guangzhou.myqcloud.com/) |
+| 完整版安装包 | `流量捕手_Setup_v1.28.7.exe`（约 91 MB，需授权码解锁功能位） |
+| 免费版安装包 | `TrafficCatcher_Free_Setup_v1.28.7.exe`（无额度限制的基础功能，付费功能位显示解锁入口） |
+| 版本检查源 | [version.json](https://liuliangbushou-1258850027.cos.ap-guangzhou.myqcloud.com/trafficcatcher/version.json) |
+
+**免费版 vs 完整版**：免费版可长期使用，覆盖采集查看、单条解析等基础链路；完整版按功能位授权（采集 / 关键词 / 批量下载 / 直播 / 转录 / 导出 / 分析 / 评论 / 报表 / 地域 / 仿写 / 短剧等），用授权码在线解锁，换机可迁移。
+
 ## 功能一览
 
 | 模块 | 能做什么 |
@@ -32,7 +50,8 @@
 justoneapi_collector/   # 核心业务层（采集/解析/监控/转录）
 gui_qt/                 # PySide6 界面层（页面 / 组件 / 主题）
 tools/                   # 发版脚本与门禁（build_site / release_all / _validate_*）
-samples/                 # 界面截图与原型
+docs/screenshots/        # 界面截图（ASCII 命名，官网与 README 共用）
+samples/                 # 界面原型与阶段性验收截图
 ```
 
 ## 说明
