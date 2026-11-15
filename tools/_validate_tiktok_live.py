@@ -114,7 +114,16 @@ def test_core():
     args = tiktok_live.ffmpeg_input_args("http://127.0.0.1:7897")
     check("ffmpeg 带 -http_proxy", "-http_proxy" in args)
     check("headers 含 Referer", any("Referer" in str(a) for a in args))
-    check("headers 含浏览器 UA", any("User-Agent" in str(a) for a in args))
+    # ★ UA 走 -user_agent，不能塞进 -headers：否则请求里出现两个 User-Agent
+    #   （ffmpeg 自己的 Lavf/xx + 我们的），TikTok CDN 会拒。
+    check("★ UA 用 -user_agent 单独给", "-user_agent" in args)
+    check("★ -headers 里不再重复 User-Agent",
+          not any("User-Agent" in str(a) for a in args))
+    check("★ -headers 带 Origin（CDN 要）",
+          any("Origin" in str(a) for a in args))
+    check("★ 带 -rw_timeout（无数据不要无限等）", "-rw_timeout" in args)
+    check("socks 代理不塞给 -http_proxy",
+          "-http_proxy" not in tiktok_live.ffmpeg_input_args("socks5://127.0.0.1:1080"))
     env = tiktok_live.proxy_env("http://127.0.0.1:7897")
     check("子进程代理环境变量四件套",
           len(env) == 4 and all(v == "http://127.0.0.1:7897" for v in env.values()))
@@ -215,10 +224,11 @@ def test_routing():
     captured = {}
 
     def fake_spawn(name, duration, sec_uid, startup_check, build_cmd,
-                   env_extra=None, startup_wait=None):
+                   env_extra=None, startup_wait=None, probe_url=""):
         captured["cmd"] = build_cmd(Path("x.mp4.part"))
         captured["env"] = env_extra
         captured["wait"] = startup_wait
+        captured["probe_url"] = probe_url
         return True, "ok"
 
     dm._spawn = fake_spawn
@@ -231,8 +241,10 @@ def test_routing():
     check("TikTok 命令保留 -c copy", "-c" in cmd and "copy" in cmd)
     check("TikTok 子进程注入代理 env",
           bool(captured["env"]) and len(captured["env"]) == 4)
-    check("★ TikTok 启动检查窗口放宽到 15s", captured["wait"] == 15.0,
-          str(captured["wait"]))
+    check("★ TikTok 启动检查窗口放宽到 30s（自建节点首包更慢）",
+          captured["wait"] == 30.0, str(captured["wait"]))
+    check("★ 录制启动时把流地址带去做失败诊断",
+          captured.get("probe_url") == "https://pull-hls.tiktokcdn.com/a.m3u8")
 
     dm.start_recording("https://pull-hls.tiktokcdn.com/a.m3u8", "manual",
                        sec_uid="", startup_check=False)
@@ -306,7 +318,20 @@ def test_source():
     check("_spawn 支持 env_extra", "env_extra: dict | None = None" in lm)
     check("_spawn 支持 startup_wait", "startup_wait: float | None = None" in lm)
     check("Popen 传 env", "env=popen_env" in lm)
-    check("TikTok 单独启动窗口 15s", "TIKTOK_STARTUP_WAIT = 15.0" in lm)
+    check("TikTok 单独启动窗口 30s（抖音仍 6s）",
+          "TIKTOK_STARTUP_WAIT = 30.0" in lm)
+    check("★ 失败时用同一出口实测流地址（区分节点问题 / 参数问题）",
+          "def probe_stream" in tk and "def stream_diagnosis" in tk
+          and "stream_diagnosis(" in lm and "probe_url" in lm)
+    check("★ 日志出现 403/404/超时立刻失败，不傻等窗口",
+          "_FATAL_LOG_RE" in lm)
+    check("★ TikTok 主地址失败自动换备选档位",
+          "hls_urls" in lm and "已自动换备用地址" in lm)
+    check("★ 页面无 roomId 时区分「没在播」与「要登录/改版」",
+          "def looks_offline_page" in tk and "looks_offline_page(html)" in lm)
+    check("★ 录制失败：状态栏只放结论短句，全文进 tooltip/详情窗",
+          "def _short_fail_reason" in page and "setDetailedText" in page
+          and "_short_fail_reason(text)" in page)
     check("抖音默认窗口 6s 不变", "STARTUP_CHECK_WAIT = 6.0" in lm)
     check("开录前重取（不复用缓存）", "st.platform == \"tiktok\"" in lm)
     check("状态未知保留上次", "保留上次 is_live" in lm)

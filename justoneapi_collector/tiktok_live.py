@@ -333,6 +333,79 @@ def detect_proxy(verify: bool = True) -> str:
     return detect_egress()[0]
 
 
+def probe_stream(url: str, proxy: str = "",
+                 timeout: float = 8.0) -> tuple[bool, str]:
+    """用**同一个出口**探一下直播流地址，区分「地址/节点问题」和「ffmpeg 参数问题」。
+
+    2026-11-15 客户（自建节点）反馈：状态查得到，录制却 15 秒没数据。
+    光看 ffmpeg 的报错分不清是谁的错 —— 这里用 httpx 走同一条代理去拉
+    流地址的头几个字节：
+
+      · 读到了数据 ⇒ 出口和地址都通，问题在 ffmpeg 参数（该给我们看日志）
+      · HTTP 4xx    ⇒ CDN 拒了（地址过期 / 出口被风控）
+      · 超时 / 重置 ⇒ 这个出口到 TikTok 直播 CDN 根本不通 —— 自建节点最常见
+                      的原因是分流规则把 *.tiktokcdn.com 判成了直连
+
+    返回 (是否读到数据, 说明文字)。
+    """
+    p = normalize_proxy(proxy)
+    hdrs = {"User-Agent": CHROME_UA, "Referer": TIKTOK_REFERER,
+            "Origin": "https://www.tiktok.com",
+            "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9"}
+    try:
+        kwargs: dict = dict(headers=hdrs, timeout=timeout,
+                            follow_redirects=True, trust_env=False)
+        if p:
+            kwargs["proxy"] = p
+        with httpx.Client(**kwargs) as c:
+            with c.stream("GET", url) as r:
+                if r.status_code >= 400:
+                    return False, f"HTTP {r.status_code}"
+                got = 0
+                for chunk in r.iter_bytes(4096):
+                    got += len(chunk)
+                    if got >= 2048:
+                        break
+                return (got > 0,
+                        f"读到 {got} B" if got else "连上了但服务器没回数据")
+    except Exception as exc:                                # noqa: BLE001
+        return False, f"{type(exc).__name__}: {str(exc)[:90]}"
+
+
+def stream_diagnosis(url: str, proxy: str = "") -> str:
+    """把 probe_stream 的结果翻成客户能动手的一句话（拼在录制失败提示后面）。"""
+    ok, why = probe_stream(url, proxy)
+    via = proxy or "直连"
+    if ok:
+        return (f"诊断：用同一个出口（{via}）能读到直播流（{why}），"
+                "说明出口和地址都正常，问题在 ffmpeg 拉流参数。"
+                "请把这条提示连同录制目录里的 *_ffmpeg.log 发给我们。")
+    return (f"诊断：同一个出口（{via}）拉这个地址也失败（{why}）。"
+            "多数是代理软件的分流规则把 TikTok 直播 CDN 判成了直连 —— "
+            "把 *.tiktokcdn.com 加入代理规则，或临时切「全局模式」再试；"
+            "也可能是这个节点到 TikTok 的线路不好，换节点即可。")
+
+
+def looks_offline_page(html: str) -> bool:
+    """页面拿到了但没有 roomId：判断是不是「根本没在播」。
+
+    TikTok 下播后 /live 会落到主播主页，页面里没有 SIGI_STATE.LiveRoom。
+    用它把「没在播」和「要登录 / 结构改版」分开，别让客户对着
+    「可能需要登录」发懵。
+    """
+    h = (html or "").lower()
+    if not h:
+        return False
+    if "liveroom" in h:
+        return False                       # 有直播数据结构，是解析没命中
+    for key in ("is not currently live", "currently offline", "live has ended",
+                "该主播当前未开播", "当前不在直播", "这个账号当前没有直播"):
+        if key in h:
+            return True
+    return "roomid" not in h and ("user-detail" in h or "profile" in h or
+                                  "uniqueid" in h)
+
+
 def proxy_env(proxy: str) -> dict:
     """给 ffmpeg 子进程用的代理环境变量（部分构建只认环境变量）。"""
     if not proxy:
@@ -342,12 +415,26 @@ def proxy_env(proxy: str) -> dict:
 
 
 def ffmpeg_input_args(proxy: str = "", user_agent: str = CHROME_UA) -> list[str]:
-    """TikTok 拉流比抖音多出来的 ffmpeg 输入参数（放在 -i 之前）。"""
+    """TikTok 拉流比抖音多出来的 ffmpeg 输入参数（放在 -i 之前）。
+
+    ★★ UA 必须用 `-user_agent` 单独给，**不能塞进 -headers**：
+      ffmpeg 的 http 协议自己会先发一个 `User-Agent: Lavf/60.x`，-headers 里
+      再带一个同名头，请求里就出现两个 User-Agent，TikTok CDN 取到 Lavf 那个
+      直接不给数据（实测 tikcdn.io 非浏览器 UA 裸请求返回 204）。症状正是
+      「ffmpeg 起来了但 N 秒没写出任何数据」。Referer / Origin 用 -headers 追加。
+    ★ `-rw_timeout` 必须有：连接建起来但服务器不回数据时默认能挂很久，
+      客户只看到「N 秒没数据」，却不知道是 CDN 拒绝还是网络不通。
+    ★ socks5 代理不能塞给 -http_proxy（ffmpeg 只认 http 代理），给了反而
+      让 ffmpeg 直接报参数错，所以这里跳过，交给上层提示换 mixed 端口。
+    """
     out: list[str] = []
-    if proxy:
+    if proxy and not proxy.lower().startswith("socks"):
         out += ["-http_proxy", proxy]
-    headers = f"Referer: {TIKTOK_REFERER}\r\nUser-Agent: {user_agent}\r\n"
+    out += ["-user_agent", user_agent]
+    headers = (f"Referer: {TIKTOK_REFERER}\r\n"
+               "Origin: https://www.tiktok.com\r\n")
     out += ["-headers", headers]
+    out += ["-rw_timeout", "15000000"]          # 微秒：15 秒没数据就报错
     return out
 
 

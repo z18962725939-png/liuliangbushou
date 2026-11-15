@@ -587,8 +587,16 @@ class LiveMonitor:
                 html = self._tiktok_browser.fetch_live_page(handle)
                 info = tiktok_live.extract_page_info(html)
                 if not info.ok:
-                    st.stream_error = ("状态检查失败：直播间页里没找到 roomId"
-                                       "（可能需要登录或页面结构改版）")
+                    # 页面拿到了却没有直播数据结构：多半是根本没在播
+                    # （TikTok 下播后 /live 会落到主播主页）。有据可依才改状态。
+                    if tiktok_live.looks_offline_page(html):
+                        st.is_live = False
+                        st.live_status = 0
+                        st.room_id = "0"
+                        st.stream_error = "未开播（该主播当前没有直播）"
+                    else:
+                        st.stream_error = ("状态检查失败：直播间页里没找到 roomId"
+                                           "（可能需要登录或页面结构改版）")
                     st.last_checked = time.time()
                     return st
                 st.room_id = info.room_id
@@ -836,6 +844,18 @@ class LiveMonitor:
 
         name = f"直播_{st.nickname}_{int(time.time())}"
         ok, msg = self.start_recording(url, name, sec_uid=sec_uid)
+        # ★ TikTok 一次给出多个档位（HLS 各清晰度 / FLV）。单个档位被 CDN 拒
+        #   或拉不到数据很常见，换个地址往往就通了 —— 客户自建节点尤其明显。
+        if not ok and st.platform == "tiktok":
+            tried = {url}
+            for alt in list(getattr(st, "hls_urls", {}).values()):
+                if not alt or alt in tried:
+                    continue
+                tried.add(alt)
+                ok, msg = self.start_recording(alt, name, sec_uid=sec_uid)
+                if ok:
+                    msg = "（主地址拉不到数据，已自动换备用地址）" + msg
+                    break
         if ok:
             # 开始时间以登记表为准（ffmpeg 真实被拉起的时刻）。
             # 这里绝不能再用 time.time()：start_recording 内部的健康检查会阻塞
@@ -943,8 +963,11 @@ class LiveMonitor:
     # 启动健康检查最长等待秒数（确认 ffmpeg 真在写数据，而不是启动即失败）
     STARTUP_CHECK_WAIT = 6.0
     # TikTok 经代理拉海外 HLS，首字节明显慢于抖音本地链路；实测 6 秒会把
-    # 正常起播误判成「流地址无效」。抖音仍用 6 秒，不受影响。
-    TIKTOK_STARTUP_WAIT = 15.0
+    # 正常起播误判成「流地址无效」。客户自建节点绕路更远，15 秒仍会误杀
+    # （2026-11-15 客户反馈），所以放宽到 30 秒；同时 _verify_started 会在
+    # 日志出现 403/404/超时这类明确错误时立刻失败，不必等满窗口。
+    # 抖音仍用 6 秒，不受影响。
+    TIKTOK_STARTUP_WAIT = 30.0
     # 小于该体积视为"没录到东西"：mp4 空壳只有 ftyp 头，约 48 字节
     MIN_VALID_BYTES = 20 * 1024
     # 写 q 之后等待 ffmpeg 优雅退出的上限秒数
@@ -1046,7 +1069,8 @@ class LiveMonitor:
         return self._spawn(save_name, duration, sec_uid, startup_check, _build,
                            env_extra=tiktok_live.proxy_env(proxy) if is_tiktok else None,
                            startup_wait=(self.TIKTOK_STARTUP_WAIT
-                                         if is_tiktok else None))
+                                         if is_tiktok else None),
+                           probe_url=stream_url if is_tiktok else "")
 
     # ------------------------------------------------------------------
     #  Screen region recording (屏幕区域录制)
@@ -1130,7 +1154,8 @@ class LiveMonitor:
     def _spawn(self, save_name: str, duration: int, sec_uid: str,
                startup_check: bool, build_cmd,
                env_extra: dict | None = None,
-               startup_wait: float | None = None) -> tuple[bool, str]:
+               startup_wait: float | None = None,
+               probe_url: str = "") -> tuple[bool, str]:
         """启动一个 ffmpeg 录制任务并登记，复用统一的健壮逻辑。
 
         Args:
@@ -1201,7 +1226,8 @@ class LiveMonitor:
         if startup_check:
             ok, reason = self._verify_started(
                 proc, part_path, log_path,
-                wait=startup_wait or self.STARTUP_CHECK_WAIT)
+                wait=startup_wait or self.STARTUP_CHECK_WAIT,
+                tiktok=bool(startup_wait), probe_url=probe_url)
             if not ok:
                 self._cleanup_failed(proc, key, part_path)
                 return False, reason
@@ -1217,10 +1243,64 @@ class LiveMonitor:
         self._active_procs[key] = (key, proc, part_path)
         return True, str(final_path)
 
+    @staticmethod
+    def _explain_ffmpeg_failure(detail: str, tiktok: bool = False) -> str:
+        """把 ffmpeg 的报错翻成客户能照着做的一句话。"""
+        d = detail or ""
+        low = d.lower()
+        if "403" in d or "401" in d or "forbidden" in low or "unauthorized" in low:
+            return ("直播 CDN 拒绝了请求（403/401）：多半是当前代理出口被风控，"
+                    "或流地址已失效。换个节点后点「立即检查一次」再录。")
+        if "404" in d or "not found" in low:
+            return ("流地址已失效（404）：主播可能刚下播或换了场次。"
+                    "点「立即检查一次」刷新状态后再录。")
+        if ("timed out" in low or "timeout" in low
+                or "connection reset" in low or "broken pipe" in low):
+            return ("连不上直播 CDN（超时 / 连接被重置）：当前出口到 TikTok 不通。"
+                    "换个节点，或到「TikTok 代理」重新探测后保存。")
+        if "refused" in low:
+            return "代理端口拒绝连接：代理软件可能没开，或端口填错了。"
+        if tiktok:
+            return ("TikTok 拉流失败：常见原因是代理出口不稳、节点被风控，"
+                    "或主播刚下播。换节点后点「立即检查一次」重试。")
+        return ""
+
+    # 日志里出现这些就说明已经确定失败，没必要把 30 秒窗口等满
+    _FATAL_LOG_RE = re.compile(
+        r"HTTP error (4\d\d|5\d\d)|Server returned (4\d\d|5\d\d)"
+        r"|403 Forbidden|404 Not Found|Connection refused"
+        r"|Connection timed out|Name or service not known"
+        r"|Invalid data found|Immediate exit requested", re.I)
+
     def _verify_started(self, proc, part_path: Path, log_path: Path,
-                        wait: float) -> tuple[bool, str]:
-        """确认 ffmpeg 真的在录，而不是"启动即失败"或"卡住不写数据"。"""
+                        wait: float, tiktok: bool = False,
+                        probe_url: str = "") -> tuple[bool, str]:
+        """确认 ffmpeg 真的在录，而不是"启动即失败"或"卡住不写数据"。
+
+        ★ 不傻等：日志里一旦出现 403/404/超时这类确定失败，立刻返回并给出
+          可操作提示。客户自建节点慢的时候窗口要够长，但明确失败不该让客户
+          盯着进度条等 30 秒。
+        """
         deadline = time.time() + wait
+        tick = 0
+        diag_cache: list[str] = []
+
+        def _diag() -> str:
+            """失败时用同一出口探一次流地址，区分是节点问题还是参数问题。
+
+            ★ 客户（自建节点）只说「15 秒没数据」，光看 ffmpeg 日志没法定性。
+              这一步在客户机上实测，结论直接写进提示，客户照着改就行。
+            """
+            if not (tiktok and probe_url):
+                return ""
+            if not diag_cache:
+                try:
+                    diag_cache.append(tiktok_live.stream_diagnosis(
+                        probe_url, self._tiktok_egress()))
+                except Exception:                   # noqa: BLE001
+                    diag_cache.append("")
+            return diag_cache[0]
+
         while time.time() < deadline:
             rc = proc.poll()
             if rc is not None:
@@ -1232,21 +1312,52 @@ class LiveMonitor:
                 except OSError:
                     pass
                 detail = self._tail_log(log_path)
+                nice = self._explain_ffmpeg_failure(detail, tiktok)
+                d = _diag()
                 return False, (
-                    f"ffmpeg 启动后立即退出，未能录制（返回码 {rc}）。\n"
-                    + (f"\nffmpeg 报错：\n{detail}\n" if detail else "\n")
-                    + "\n常见原因：流地址无效或已过期、网络不通、该直播间不允许网页录制。"
+                    f"ffmpeg 启动后立即退出，未能录制（返回码 {rc}）。"
+                    + (f"\n{nice}" if nice else "")
+                    + (f"\n{d}" if d else "")
+                    + (f"\n\nffmpeg 报错：\n{detail}\n" if detail else "\n")
+                    + ("" if (nice or d) else
+                       "\n常见原因：流地址无效或已过期、网络不通、该直播间不允许网页录制。")
                 )
             try:
                 if part_path.exists() and part_path.stat().st_size > 0:
                     return True, ""
             except OSError:
                 pass
+            tick += 1
+            if tick % 2 == 0:                       # 每 0.6 秒看一次日志
+                early = self._tail_log(log_path, limit=800)
+                if early and self._FATAL_LOG_RE.search(early):
+                    try:
+                        grew = (part_path.exists()
+                                and part_path.stat().st_size > 0)
+                    except OSError:
+                        grew = False
+                    if not grew:
+                        nice = self._explain_ffmpeg_failure(early, tiktok)
+                        try:
+                            proc.terminate()
+                        except Exception:           # noqa: BLE001
+                            pass
+                        d = _diag()
+                        return False, (
+                            (nice or "ffmpeg 拉流失败。")
+                            + (f"\n{d}" if d else "")
+                            + f"\n\nffmpeg 输出：\n{early}"
+                        )
             time.sleep(0.3)
         detail = self._tail_log(log_path)
+        nice = self._explain_ffmpeg_failure(detail, tiktok)
+        d = _diag()
         return False, (
-            f"ffmpeg 已启动，但 {wait:.0f} 秒内没有写出任何数据，"
-            "流地址可能无效或网络不通。"
+            f"ffmpeg 已启动，但 {wait:.0f} 秒内没有写出任何数据"
+            + ("（TikTok 经代理拉流本来就慢，若频繁出现请换个节点）。"
+               if tiktok else "。")
+            + (f"\n{nice}" if nice else ("" if d else "流地址可能无效或网络不通。"))
+            + (f"\n{d}" if d else "")
             + (f"\n\nffmpeg 输出：\n{detail}" if detail else "")
         )
 

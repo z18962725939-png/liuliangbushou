@@ -27,6 +27,31 @@ from gui_qt.widgets.region_picker import RegionPicker
 from justoneapi_collector import tiktok_live
 
 
+def _short_fail_reason(msg: str) -> str:
+    """把录制失败原因压成一句能塞进状态栏的结论。
+
+    ★ 状态栏是单行、不换行、超宽直接被窗口边缘裁掉（实测 60 字就切）。
+      ffmpeg 的失败原因往往是好几十字的多行文本，只能在这里压短，
+      完整内容走 tooltip 与「显示详细信息」弹窗。
+    """
+    t = (msg or "").strip()
+    if not t:
+        return "录制未启动"
+    low = t.lower()
+    if "403" in t or "401" in t or "forbidden" in low:
+        return "CDN 拒绝（403），看详情"
+    if "404" in t or "not found" in low:
+        return "地址已失效（404），看详情"
+    if "timed out" in low or "timeout" in low or "超时" in t:
+        return "连不上 CDN（超时），看详情"
+    if "没有写出任何数据" in t:
+        return "无数据写出，看详情"
+    if "立即退出" in t:
+        return "ffmpeg 启动即退出，看详情"
+    first = (t.splitlines() or [""])[0]
+    return (first[:28] + "…") if len(first) > 28 else (first or "录制未启动")
+
+
 class LivePage(QWidget):
     def __init__(self, ctx):
         super().__init__()
@@ -676,7 +701,27 @@ class LivePage(QWidget):
             self.status.setText(
                 f"检测到正在直播，但{msg}；点「指定 ffmpeg...」选好 ffmpeg 后即可录制")
         elif kind == "rec_fail":
-            self.status.setText(f"检测到正在直播，但录制未启动：{msg}")
+            # 录制失败的完整原因常有多行（ffmpeg 报错 + 出口实测诊断），
+            # 状态栏放不下 —— 只放结论短句，全文进悬浮提示和可复制的详情窗。
+            text = (msg or "").strip()
+            self.status.setText(
+                f"检测到正在直播，但录制未启动：{_short_fail_reason(text)}")
+            try:
+                self.status.setToolTip(text)
+            except Exception:                   # noqa: BLE001
+                pass
+            if len(text.splitlines()) > 1:
+                try:
+                    box = QMessageBox(self)
+                    box.setIcon(QMessageBox.Warning)
+                    box.setWindowTitle("录制没有启动起来")
+                    box.setText("点「显示详细信息」能看到完整原因，可直接复制发给我们。")
+                    box.setDetailedText(text)
+                    box.setModal(False)
+                    box.show()
+                    self._fail_box = box
+                except Exception:               # noqa: BLE001
+                    pass
         elif kind == "offline":
             self.status.setText("已添加，当前未开播；点「开始监控」后开播会自动录制")
         elif kind == "unknown":
@@ -880,12 +925,41 @@ class LivePage(QWidget):
         w.start()
 
     def _on_record_done(self, results):
+        """录制结果：状态栏只放一行摘要，完整原因进悬浮提示，全失败再弹可复制的详情。
+
+        ★ TikTok 的失败原因会有好几行（ffmpeg 报错 + 出口实测诊断），
+          直接拼进状态栏会被窗口宽度截断，客户只看到半句话、没法照做。
+        """
         ok_n = sum(1 for _, ok, _ in results if ok)
-        parts = []
+        parts, details = [], []
         for uid, ok, msg in results:
             short = uid[:14] + ("…" if len(uid) > 14 else "")
-            parts.append(f"{'✔' if ok else '✘'} {short}：{'已开始录制' if ok else msg}")
-        self.status.setText(f"录制启动 {ok_n}/{len(results)} —— " + "；".join(parts))
+            text = (msg or "").strip()
+            if ok:
+                parts.append(f"✔ {short}：已开始录制")
+                continue
+            parts.append(f"✘ {short}：{_short_fail_reason(text)}")
+            if text:
+                details.append(f"【{short}】\n{text}")
+        line = f"录制启动 {ok_n}/{len(results)} —— " + "；".join(parts)
+        self.status.setText(line)
+        try:
+            self.status.setToolTip("\n\n".join(details))
+        except Exception:                       # noqa: BLE001
+            pass
+        if details and ok_n == 0:
+            try:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("录制没有启动起来")
+                box.setText("录制没有启动起来。点「显示详细信息」可看到完整原因，"
+                            "能直接复制发给我们。")
+                box.setDetailedText("\n\n".join(details))
+                box.setModal(False)
+                box.show()                      # 非模态：不阻塞界面与自动化测试
+                self._fail_box = box            # 持引用，避免被回收
+            except Exception:                   # noqa: BLE001
+                pass
 
     # --------------------------------------------------- 屏幕区域录制
     def _start_region(self):
