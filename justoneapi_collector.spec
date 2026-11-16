@@ -160,6 +160,7 @@ hiddenimports = [
     #   log_export 函数体内 import，两处都显式登记防止静态分析漏扫）。
     "justoneapi_collector.support",
     "gui_qt.widgets.log_export",
+    "gui_qt.diagnostics",
     # 运营功能子模块（ops_ui 已移除，理由见上方注释）
     "justoneapi_collector.projects",
     "justoneapi_collector.media_vault",

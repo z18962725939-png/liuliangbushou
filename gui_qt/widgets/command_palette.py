@@ -15,8 +15,9 @@
 - **键盘闭环**：↑↓ 选、Enter 打开、Esc 关闭，全程不用碰鼠标。
 - 颜色走 QSS 语义类，不内联写死。
 """
-from PySide6.QtCore import QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence,
+                           QPainter, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QStyle, QStyledItemDelegate, QVBoxLayout,
@@ -38,7 +39,51 @@ def _current_mode() -> str:
 def _glyph_color(mode: str) -> str:
     """条目图标色：跟随主题的"正文级"灰，不用强调色 —— 20 个条目全用柠檬，
     整屏就糊成一片绿。"""
-    return "#9AA4B2" if mode == "dark" else "#5B6472"
+    return "#9AA4B2" if mode == "dark" else "#566070"
+
+
+def _search_glyph(mode: str) -> QIcon:
+    """输入框左侧放大镜（v2 原型 .cmdk-input 的那支线性图标）。
+
+    ★ 自己画而不是找资源图：图标要跟主题变灰阶，而 nav_icon 里那支
+      「关键词抓取」是放大镜 + 关键词，语义不对、尺寸也不合适。
+    """
+    color = QColor("#6B7280" if mode != "dark" else "#9AA4B2")
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.GlobalColor.transparent)
+    q = QPainter(pm)
+    q.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    q.setPen(QPen(color, 2.2))
+    q.drawEllipse(QRectF(5, 5, 15, 15))
+    q.drawLine(QPointF(16.2, 16.2), QPointF(26, 26))
+    q.end()
+    return QIcon(pm)
+
+
+def _keycap_icon(mode: str, text: str = "Esc") -> QIcon:
+    """输入框右侧键帽：细边框 + 小圆角，本身就是「这里有个快捷键」的图示。"""
+    light = mode != "dark"
+    # ★ 浅色键帽不能用白底 + 极淡描边：输入框本身就是 #F4F5F7，
+    #   那样只剩一条若有若无的弧线（离屏截图复核才发现）。描边压深一档，
+    #   文字用正文级灰，键帽才读得出是一颗「键」。
+    fg = QColor("#566070" if light else "#9AA4B2")
+    bd = QColor("#B4BAC4" if light else "#2E3846")
+    bg = QColor("#FFFFFF" if light else "#1A212B")
+    pm = QPixmap(44, 26)
+    pm.fill(Qt.GlobalColor.transparent)
+    q = QPainter(pm)
+    q.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    q.setPen(QPen(bd, 1.2))
+    q.setBrush(bg)
+    q.drawRoundedRect(QRectF(1, 1, 42, 24), 6, 6)
+    q.setPen(fg)
+    f = QFont()
+    f.setPixelSize(13)
+    f.setWeight(QFont.Weight.DemiBold)
+    q.setFont(f)
+    q.drawText(QRectF(1, 1, 42, 24), Qt.AlignmentFlag.AlignCenter, text)
+    q.end()
+    return QIcon(pm)
 
 
 # --------------------------------------------------------------------------
@@ -124,9 +169,11 @@ class _RowDelegate(QStyledItemDelegate):
     和 widgets/empty.py 的做法一致。
     """
 
+    # ★ v2（2026-11-16）：浅色档与 light.qss 对齐（主文 #12161F、
+    #   装饰组名 #98A1AF、图标 #566070）；深色档保持原值。
     _PALETTE = {
-        "light": {"sel": "#F2FCD9", "title": "#1F2937", "group": "#8B93A1",
-                  "glyph": "#5B6472", "glyph_sel": "#0B0E14"},
+        "light": {"sel": "#F2FCD9", "title": "#12161F", "group": "#98A1AF",
+                  "glyph": "#566070", "glyph_sel": "#0B0E14"},
         "dark": {"sel": "#1B2410", "title": "#E6E9EF", "group": "#6B7480",
                  "glyph": "#9AA4B2", "glyph_sel": "#C8F751"},
     }
@@ -204,7 +251,7 @@ class CommandPalette(QDialog):
                             Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setModal(True)
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(560)     # v2 原型面板宽 560（原 480 偏窄，右侧分组名挤）
         self._build_ui()
         self.apply_theme(_current_mode())
 
@@ -222,7 +269,14 @@ class CommandPalette(QDialog):
 
         self._edit = QLineEdit()
         self._edit.setObjectName("CmdInput")
-        self._edit.setPlaceholderText("搜功能……  试试「爆款」「下载」「geo」「sz」")
+        self._edit.setPlaceholderText("搜功能、跳页面……  试试「爆款」「下载」「geo」「sz」")
+        # ★ v2（2026-11-16）：输入框左侧放大镜、右侧 Esc 键帽，跟原型一致。
+        #   用 QLineEdit 的 leading / trailing action，不套一层容器 —— 那样
+        #   CmdInput 的 QSS 边框、焦点态、选区色都得重写一遍。
+        self._act_search = QAction(self)
+        self._act_esc = QAction(self)
+        self._edit.addAction(self._act_search, QLineEdit.ActionPosition.LeadingPosition)
+        self._edit.addAction(self._act_esc, QLineEdit.ActionPosition.TrailingPosition)
         self._edit.textChanged.connect(self._refilter)
         self._edit.returnPressed.connect(self._pick_current)
         col.addWidget(self._edit)
@@ -237,7 +291,7 @@ class CommandPalette(QDialog):
         self._list.setAlternatingRowColors(False)
         col.addWidget(self._list, 1)
 
-        foot = QLabel("↑ ↓ 选择    Enter 打开    Esc 关闭")
+        foot = QLabel("↑↓ 选择　　回车 跳转　　Esc 关闭")
         foot.setObjectName("CmdFoot")
         col.addWidget(foot)
 
@@ -304,13 +358,15 @@ class CommandPalette(QDialog):
             print(f"[流量捕手] 命令面板跳转失败：{exc}")
 
     def apply_theme(self, mode: str = "light"):
-        """主题切换后重建条目（图标色写死在 QPixmap 上，必须重画）。"""
+        """主题切换后重建条目与图标（都是位图，不会自动变色）。"""
+        self._act_search.setIcon(_search_glyph(mode))
+        self._act_esc.setIcon(_keycap_icon(mode))
         self._refilter()
 
     def exec_at(self, window):
         """贴到窗口上方弹出（不是屏幕正中 —— 那样视线要跨一次全屏）。"""
         self.adjustSize()
-        self.resize(max(self.width(), 520), min(self.height(), 460))
+        self.resize(max(self.width(), 560), min(self.height(), 460))
         if window is not None:
             geo = window.frameGeometry()
             x = geo.x() + max(0, (geo.width() - self.width()) // 2)
@@ -329,7 +385,9 @@ def build_commands(nav_groups, extra=None):
         for name in items:
             out.append((name, group, _ALIASES.get(name, []), name))
     for name, aliases in (extra or _EXTRA_COMMANDS).items():
-        out.append((name, "", aliases, "设置"))
+        # ★ v2：快捷操作也要带分组名 —— 原来传空串，deletage 右侧什么都不画，
+        #   客户分不清这两条是「页面」还是「动作」。
+        out.append((name, "快捷操作", aliases, "设置"))
     return out
 
 

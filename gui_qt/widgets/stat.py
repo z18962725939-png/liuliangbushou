@@ -34,22 +34,28 @@ from ..theme import app_font_family
 #
 #   角色分工见 theme.py 顶部：墨=结构、柠檬=能量。这里多一个规则：
 #   图表里第一条序列用结构色（强调主指标），其余用区分色。
+# ★ v2 界面重构（2026-11-16）：浅色色板按设计方案重定。
+#   canvas #F5F6F8 / 文字主 #0B0E14 / 说明 #566070 / 装饰 #98A1AF，
+#   柠檬调深到 #C4F13E（白底上更实）。「sub」用 #566070 而不是方案的
+#   #98A1AF —— 它是 12px 的说明文字（承载信息），要过 WCAG AA。
 _LIGHT = {
-    "canvas": "#F6F7F9",
+    "canvas": "#F5F6F8",
     "card": "#FFFFFF",
     "card_hover": "#F2F3F5",
     "border": "#E6E8EC",
     "border_hover": "#C9CED6",
-    "title": "#8B93A1",          # 小标签（11px，拉开字距）
-    "label": "#5B6472",          # 行标题
+    "title": "#98A1AF",          # 小标签（纯装饰，不承载长句）
+    "label": "#566070",          # 行标题
     "value": "#0B0E14",
-    "sub": "#8B93A1",
+    "sub": "#566070",            # 副说明：正文级，保 4.5:1
     "accent": "#0B0E14",
-    "acid": "#C8F751",           # 能量色（badge / 激活）
+    "acid": "#C4F13E",           # 能量色（badge / 激活），浅色专用
+    "acid_soft": "#F2F7E3",      # v2 宫格图标底（柠檬 12% 叠白）
+    "acid_line": "#C6D8A1",      # v2 宫格 hover / 图标描边
     "track": "#EDEFF3",          # 槽：条形榜底、进度槽
     "icon_bg": "#F2F3F5",
-    "ok": "#0F9960",
-    "warn": "#C2740A",
+    "ok": "#18A05E",
+    "warn": "#C98A12",
     "bad": "#C42B2B",
     "bar": "#0B0E14",
 }
@@ -69,9 +75,11 @@ _DARK = {
     "sub": "#6A7280",
     "accent": "#C8F751",
     "acid": "#C8F751",
+    "acid_soft": "#202A18",      # v2 宫格图标底（柠檬 10% 叠面板）
+    "acid_line": "#3B4820",
     "track": "#1C2430",
     "icon_bg": "#1A212B",
-    "ok": "#34D399",
+    "ok": "#5EE39A",             # v2 方案值（原 #34D399，偏暗）
     "warn": "#FBBF24",
     "bad": "#F87171",
     "bar": "#C8F751",
@@ -299,9 +307,12 @@ class UsageBar(QWidget):
         q.setPen(Qt.PenStyle.NoPen)
         q.setBrush(QColor(p["track"]))
         q.drawRoundedRect(QRectF(0, bar_y, w, bar_h), 5, 5)
-        # 已用
-        q.setBrush(color)
-        q.drawRoundedRect(QRectF(0, bar_y, max(6, w * ratio), bar_h), 5, 5)
+        # 已用：占用率为 0 时**不画**填充。
+        # ★ 2026-11-16 v2：原来写 max(6, w * ratio)，0 也会画一颗 6px 的
+        #   小圆点粘在轨道左端 —— 截图里像加载失败的圆点，不像「还没用」。
+        if ratio > 0:
+            q.setBrush(color)
+            q.drawRoundedRect(QRectF(0, bar_y, max(6, w * ratio), bar_h), 5, 5)
 
         # 文字
         if self._unlimited:
@@ -558,25 +569,38 @@ class ActionCard(QFrame):
     clicked = Signal()
 
     def __init__(self, icon, title: str, desc: str, mode: str = "light",
-                 badge: str = "", parent=None):
+                 badge: str = "", parent=None, vertical: bool = False):
+        """vertical=True 时用 v2 的「功能宫格」布局：图标块在上、标题 + 说明在下。
+
+        ★ 为什么不另起一个 FuncCard 类
+          两套卡片共用同一套 hover 插值、徽标、点击信号、主题重刷逻辑，
+          拆成两个类只会让「改一处忘另一处」。布局差异用一个布尔量收口。
+        """
         super().__init__(parent)
         self._mode = mode
         self._pressed = False
+        self._vertical = bool(vertical)
         # 悬浮态用平滑插值 + 自绘，不用 QSS 的 :hover ——
         # QSS 悬停是瞬变的，白卡"闪"一下变灰白，看着像掉帧。
         self._hover_s = SmoothValue(self, duration=150,
                                     on_change=lambda _v: self.update())
         self.setObjectName("ActionCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(96)
+        self.setMinimumHeight(150 if self._vertical else 96)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(14)
+        if self._vertical:
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(18, 16, 18, 16)
+            lay.setSpacing(10)
+        else:
+            lay = QHBoxLayout(self)
+            lay.setContentsMargins(16, 14, 16, 14)
+            lay.setSpacing(14)
 
         self.icon_lab = QLabel()
-        self.icon_lab.setFixedSize(40, 40)
+        self.icon_lab.setFixedSize(38 if self._vertical else 40,
+                                   38 if self._vertical else 40)
         self.icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
         if icon is not None:
             # icon 传 QIcon = 图标；传字符串 = 用文字当图标（流程步骤的序号这么用）
@@ -584,32 +608,46 @@ class ActionCard(QFrame):
                 self.icon_lab.setText(icon)
                 self.icon_lab.setFont(ui_font(17, QFont.Weight.Bold))
             else:
-                self.icon_lab.setPixmap(icon.pixmap(28, 28))
+                self.icon_lab.setPixmap(
+                    icon.pixmap(24 if self._vertical else 28,
+                                24 if self._vertical else 28))
         else:
             self.icon_lab.setVisible(False)
-        lay.addWidget(self.icon_lab)
 
-        txt = QVBoxLayout()
-        txt.setSpacing(4)
-        head = QHBoxLayout()
-        head.setSpacing(6)
         self.title_lab = QLabel(title)
-        # 15px：改版前卡片标题和下面正文同为 13px，标题直接被淹没
+        # 横向卡 15px；宫格卡按 v2 方案收成 13px/700（字号在 apply_theme 里定）
         self.title_lab.setFont(ui_font(15, QFont.Weight.DemiBold))
-        head.addWidget(self.title_lab)
         self.badge_lab = QLabel(badge)
         # ★ 空徽标必须隐藏：badge 现在带 padding + 背景（柠檬胶囊），
         #   空文本的 QLabel 仍占 padding 的宽高 —— 不隐藏就会在每个卡片标题
         #   右边冒出一个没有字的小色块。2026-10-17 改版时踩到，截图才发现。
         self.badge_lab.setVisible(bool(badge))
-        head.addWidget(self.badge_lab)
-        head.addStretch()
-        txt.addLayout(head)
         self.desc_lab = QLabel(desc)
         self.desc_lab.setWordWrap(True)
-        txt.addWidget(self.desc_lab)
-        txt.addStretch()
-        lay.addLayout(txt, 1)
+
+        if self._vertical:
+            lay.addWidget(self.icon_lab, 0, Qt.AlignmentFlag.AlignLeft)
+            head = QHBoxLayout()
+            head.setSpacing(8)
+            head.addWidget(self.title_lab)
+            head.addWidget(self.badge_lab)
+            head.addStretch()
+            lay.addLayout(head)
+            lay.addWidget(self.desc_lab)
+            lay.addStretch()
+        else:
+            lay.addWidget(self.icon_lab)
+            txt = QVBoxLayout()
+            txt.setSpacing(4)
+            head = QHBoxLayout()
+            head.setSpacing(6)
+            head.addWidget(self.title_lab)
+            head.addWidget(self.badge_lab)
+            head.addStretch()
+            txt.addLayout(head)
+            txt.addWidget(self.desc_lab)
+            txt.addStretch()
+            lay.addLayout(txt, 1)
         self.apply_theme(mode)
 
     def set_badge(self, text: str):
@@ -619,7 +657,8 @@ class ActionCard(QFrame):
     def set_icon(self, icon):
         """换图标（主题切换时图标颜色要跟着变，pixmap 不会自动变色）。"""
         if icon is not None:
-            self.icon_lab.setPixmap(icon.pixmap(28, 28))
+            s = 24 if self._vertical else 28
+            self.icon_lab.setPixmap(icon.pixmap(s, s))
 
     def mousePressEvent(self, e):                            # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
@@ -654,7 +693,11 @@ class ActionCard(QFrame):
         p = palette(self._mode)
         t = self._hover_s.value
         bg = mix(p["card"], p["card_hover"], t)
-        bd = mix(p["border"], p["border_hover"], t)
+        # ★ v2 宫格卡：hover 时边框转柠檬线（原型是 translateY(-3px) + 描边）。
+        #   Qt 里动 widget 位置会挤动布局，改用「描边 + 底色微提亮」等价表达，
+        #   依然由 SmoothValue 平滑插值，不会闪一下。
+        bd = mix(p["border"],
+                 p["acid_line"] if self._vertical else p["border_hover"], t)
         if self._pressed:
             bg = mix(bg, p["track"], 0.8)
 
@@ -663,7 +706,8 @@ class ActionCard(QFrame):
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         q.setPen(QPen(QColor(bd), 1.0))
         q.setBrush(QColor(bg))
-        q.drawRoundedRect(rect, 12, 12)
+        q.drawRoundedRect(rect, 18 if self._vertical else 12,
+                          18 if self._vertical else 12)
         q.end()
 
     def apply_theme(self, mode: str):
@@ -671,15 +715,25 @@ class ActionCard(QFrame):
         p = palette(mode)
         # 背景交给 paintEvent，这里只把外壳透明掉（否则 QSS 和自绘会叠两层）
         self.setStyleSheet("#ActionCard{background:transparent;border:none;}")
-        self.title_lab.setStyleSheet(f"color:{p['value']};font-size:15px;font-weight:600;")
-        self.desc_lab.setStyleSheet(f"color:{p['title']};font-size:12px;")
+        fs = "13px;font-weight:700" if self._vertical else "15px;font-weight:600"
+        self.title_lab.setStyleSheet(f"color:{p['value']};font-size:{fs};")
+        # ★ 宫格说明是 12px 正文，用次级档（#566070 / 深色 #C7CEDA）；
+        #   横向列表版沿用最弱档。差别就是 v2 的对比度校正。
+        self.desc_lab.setStyleSheet(
+            f"color:{p['label'] if self._vertical else p['title']};font-size:12px;")
         # 徽标用柠檬实心小胶囊：整套界面只有它是「实心柠檬 + 墨字」，
         # 所以「新」「推荐」一眼就能跳出来，又不会到处泛滥。
         self.badge_lab.setStyleSheet(
             f"background:{p['acid']};color:#0B0E14;font-size:11px;"
             f"font-weight:600;padding:2px 7px;border-radius:9px;")
-        self.icon_lab.setStyleSheet(
-            f"background:{p['icon_bg']};border-radius:10px;")
+        if self._vertical:
+            # v2 宫格图标块：柠檬浅底 + 柠檬描边（图标本身由 nav_icon 染成 acid）
+            self.icon_lab.setStyleSheet(
+                f"background:{p['acid_soft']};border:1px solid {p['acid_line']};"
+                f"border-radius:11px;")
+        else:
+            self.icon_lab.setStyleSheet(
+                f"background:{p['icon_bg']};border-radius:10px;")
         self.update()
 
 

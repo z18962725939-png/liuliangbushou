@@ -316,6 +316,12 @@ _SETTINGS_DEFAULTS: dict = {
     "ffmpeg_path": "",
     "lm_save_dir": "",
     "history_enabled": True,      # 抓取时是否把结果记到本机历史库（v1.12.0）
+    # ★ 匿名故障摘要（2026-11-15 P0）：三项默认必须保持「关 / 空 / 空」。
+    #   客户端不写死任何服务器地址；没配 endpoint 就绝不联网。
+    #   `gui_qt/diagnostics.py` 的门禁会断言这三项默认值，不许改。
+    "diag_report_enabled": False,
+    "diag_endpoint": "",
+    "diag_anon_id": "",           # 随机匿名 ID，与机器无关（首次记录时生成）
 }
 
 

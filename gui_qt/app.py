@@ -45,6 +45,15 @@ def _write_crash_log(exc: BaseException) -> str:
             f.write(f"时间: {datetime.now():%Y-%m-%d %H:%M:%S}\n")
             f.write(f"Python: {sys.version}\n\n")
             f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        # P0：启动崩溃是最严重、也最容易静默丢失的故障，记一条脱敏摘要。
+        # 只传异常类名，绝不把 traceback / 路径 / 用户信息塞进事件。
+        # 函数体内 import 已登记在 spec 的 hiddenimports（gui_qt.diagnostics）。
+        try:
+            from gui_qt import diagnostics
+            diagnostics.record_event(None, "startup_crash", step="boot",
+                                     result="fail", code=type(exc).__name__)
+        except Exception:
+            pass
         return path
     except Exception:
         return ""

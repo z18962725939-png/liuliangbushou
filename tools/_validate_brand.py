@@ -134,8 +134,12 @@ def check_no_legacy() -> None:
 def check_brand_roles() -> None:
     section("B. 品牌色必须各就各位（墨=结构、柠檬=能量）")
     INK, ACID = "#0b0e14", "#c8f751"
+    # ★ v2 界面重构（2026-11-16）：浅色柠檬调深一档，白底上更实。
+    #   官网 / 深色主题仍是 #C8F751，浅色客户端专用 #C4F13E，不许互串。
+    ACID_LIGHT = "#c4f13e"
     chk(INK in light.lower(), "浅色主题用墨做结构色", "浅色主题缺墨色 #0B0E14")
-    chk(ACID in light.lower(), "浅色主题有柠檬（能量点）", "浅色主题缺柠檬 #C8F751")
+    chk(ACID_LIGHT in light.lower(), "浅色主题有专用柠檬 #C4F13E（能量点）",
+        "浅色主题缺浅色柠檬 #C4F13E")
     chk(ACID in dark.lower(), "深色主题用柠檬做结构色", "深色主题缺柠檬 #C8F751")
 
     # 页面底：深色主题必须直接用官网 hero 的墨色，形成品牌闭环
@@ -143,11 +147,12 @@ def check_brand_roles() -> None:
         "深色页面底 = 官网 hero 墨色 #0B0E14",
         "深色页面底不是 #0B0E14（品牌闭环断了）")
 
-    # 主按钮：两套主题都必须是柠檬底 + 墨字
-    for label, text in (("浅色", light), ("深色", dark)):
+    # 主按钮：两套主题都必须是柠檬底 + 墨字（各自的柠檬档）
+    for label, text, acid in (("浅色", light, ACID_LIGHT),
+                              ("深色", dark, ACID)):
         m = re.search(r"QPushButton#Primary\s*\{([^}]*)\}", text, re.I)
         body = (m.group(1) if m else "").lower()
-        ok = ACID in body and INK in body and "font-weight" in body
+        ok = acid in body and INK in body and "font-weight" in body
         chk(ok, f"{label}主题主按钮 = 柠檬底墨字",
             f"{label}主题主按钮不是柠檬底墨字", body.strip()[:60])
 
@@ -167,6 +172,9 @@ def check_brand_roles() -> None:
     chk('BRAND_INK = "#0B0E14"' in th and 'BRAND_ACID = "#C8F751"' in th,
         "主题令牌已集中定义（BRAND_INK / BRAND_ACID）",
         "theme.py 缺品牌常量")
+    chk('BRAND_ACID_LIGHT = "#C4F13E"' in th,
+        "浅色柠檬有独立令牌 BRAND_ACID_LIGHT",
+        "theme.py 缺 BRAND_ACID_LIGHT（v2 浅色色板）")
     chk(re.search(r'_ACCENT_BY_MODE\s*=\s*\{[^}]*"light":\s*BRAND_INK', th) is not None,
         "浅色 accent = 墨", "浅色 accent 不是墨")
     chk(re.search(r'_ACCENT_BY_MODE\s*=\s*\{[^}]*"dark":\s*BRAND_ACID', th) is not None,

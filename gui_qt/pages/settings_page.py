@@ -9,13 +9,14 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
-                               QTextEdit, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame,
+                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+                               QPushButton, QScrollArea, QTextEdit, QVBoxLayout,
+                               QWidget)
 
 from ._base import (StatusLine, Worker, append_log, card, connection_diagnosis,
-                    form_row, guide_banner, log_panel, page_title, row_widget,
-                    vertical_card)
+                    connect_guarded, form_row, guide_banner, log_panel,
+                    page_title, row_widget, vertical_card)
 
 import justoneapi_collector.branding as branding
 import justoneapi_collector.licensing as licensing
@@ -28,6 +29,10 @@ import justoneapi_collector.browser_login as bl
 from gui_qt.login_gate import BrowserLoginWorker as _LoginWorker  # noqa: E402
 from gui_qt.login_gate import cookie_key                          # noqa: E402
 from gui_qt.widgets.kit import ChoiceFlow, Segmented                   # noqa: E402
+# P0 匿名故障摘要：diagnostics 是纯逻辑模块（不依赖 Qt），LogDialog 是自绘
+# 中文弹窗（双主题已处理）。两者都放顶部 import，PyInstaller 静态可见。
+from gui_qt import diagnostics                                         # noqa: E402
+from gui_qt.widgets.log_export import LogDialog                        # noqa: E402
 
 
 class SettingsPage(QWidget):
@@ -273,7 +278,10 @@ class SettingsPage(QWidget):
         self.lic_hint.setStyleSheet("color:#6B7280;font-size:12px;")
         self.lic_hint.setWordWrap(True)
         lic_l.addWidget(self.lic_hint)
-        root.addWidget(lic)
+        # ★ 2026-11-15 修既有 bug：分档改造时这里漏改成 self._lays，
+        #   授权卡被直接挂到 root —— 结果「授权与激活」档永远是空的，
+        #   而其它每一档底部都多出一张授权卡 + 一大块空白。归位到自己的档。
+        self._lays["license"].addWidget(lic)
 
         # ---------- 软件更新 ----------
         up, up_l = vertical_card("软件更新", self)
@@ -330,6 +338,42 @@ class SettingsPage(QWidget):
         self.fb_status = StatusLine(f"作者联系方式：{contact}")
         fb_l.addWidget(self.fb_status)
         self._lays["system"].addWidget(fb)
+
+        # ---------- 匿名故障摘要（P0，2026-11-15） ----------
+        # 独立一档，不塞进「反馈与日志」：这是隐私开关，客户必须一眼看到
+        # 「发了什么、没发什么」，不能藏在折叠说明里。默认关闭；没配通道时
+        # 界面明说「不会联网发送任何内容」。
+        dg, dg_l = vertical_card("匿名故障摘要（默认关闭）", self)
+        dg_l.addWidget(QLabel(
+            "开启后只记录：软件版本、故障类别、失败步骤、错误码、出口模式、结果。"
+            "不记录视频链接、账号、文案、机器码、授权码、客户名或本地路径。"))
+        self.diag_enable = QCheckBox("允许匿名上报故障摘要")
+        self.diag_enable.setChecked(
+            bool(self.ctx.get_setting("diag_report_enabled", False)))
+        connect_guarded(self.diag_enable.toggled,
+                        lambda *_: self._save_diag_cfg(),
+                        on_error=lambda m: self.fb_status.setText(m),
+                        label="保存故障摘要开关")
+        dg_l.addWidget(self.diag_enable)
+        self.diag_channel = QLabel("")
+        self.diag_channel.setWordWrap(True)
+        dg_l.addWidget(self.diag_channel)
+        self._refresh_diag_channel()
+        drow = QHBoxLayout()
+        btn_copy = QPushButton("复制运行体检结论")
+        btn_full = QPushButton("完整体检（实测网络）")
+        btn_open = QPushButton("查看本地记录")
+        for btn, slot, label in (
+                (btn_copy, lambda *_: self._copy_health(), "复制体检结论"),
+                (btn_full, lambda *_: self._full_health(), "完整体检"),
+                (btn_open, lambda *_: self._open_diag_records(), "查看本地记录")):
+            connect_guarded(btn.clicked, slot,
+                            on_error=lambda m: self.fb_status.setText(m),
+                            label=label)
+            drow.addWidget(btn)
+        drow.addStretch()
+        dg_l.addLayout(drow)
+        self._lays["system"].addWidget(dg)
 
         # ★ 2026-10-27：每档末尾必须垫一根弹簧。分档后单档内容常常比窗口矮，
         #   QVBoxLayout 会把多出来的高度分给「可以被拉长」的那一项 —— 实测
@@ -867,3 +911,88 @@ class SettingsPage(QWidget):
             support.open_in_explorer(support._iter_log_files()[0] if support._iter_log_files() else Path("."))
         except Exception:  # noqa: BLE001
             pass
+
+    # ----------------------------------------------------------- 匿名故障摘要
+    def _save_diag_cfg(self, _checked=False):
+        """开关落盘。★ 关掉后本地仍记脱敏摘要，但永远不会外发。"""
+        on = bool(self.diag_enable.isChecked())
+        self.ctx.settings["diag_report_enabled"] = on
+        self.ctx.save_settings()
+        self._refresh_diag_channel()
+        diagnostics.record_event(self.ctx, "diag_toggle",
+                                 result="on" if on else "off")
+        tail = ("；上报通道已配置" if diagnostics.endpoint(self.ctx)
+                else "；通道未配置，不会联网发送")
+        self.fb_status.setText(("已开启" if on else "已关闭")
+                               + "匿名故障摘要" + tail)
+        self.fb_status.mark("ok")
+
+    def _refresh_diag_channel(self):
+        """只显示状态，不把服务器地址暴露给客户（也避免误填）。"""
+        ep = diagnostics.endpoint(self.ctx)
+        on = bool(self.diag_enable.isChecked())
+        if not ep:
+            txt = "上报通道：未配置 · 只在本机记录，软件不会联网发送任何内容。"
+        elif on:
+            txt = "上报通道：已配置且已开启 · 仅发送上方列出的字段。"
+        else:
+            txt = "上报通道：已配置但未开启 · 只在本机记录。"
+        self.diag_channel.setText(txt)
+
+    def _copy_health(self):
+        """快速体检：不联网、毫秒级，结论可直接复制发作者。"""
+        self._show_health_text(diagnostics.health_report(self.ctx), False)
+
+    def _full_health(self):
+        """完整体检：真发请求探测出口，必须丢 Worker，否则界面会僵住数秒。"""
+        self.fb_status.setText("正在实测网络出口（最多 5 秒）…")
+        self.fb_status.mark("idle")
+
+        def run(worker):
+            return diagnostics.health_report(self.ctx, probe_network=True)
+
+        w = Worker(run)
+        self._diag_worker = w          # 保活：QThread 被 GC 会直接崩进程
+        connect_guarded(w.done, self._on_health_done,
+                        on_error=lambda m: self._set_health_error(m),
+                        label="完整体检结果")
+        connect_guarded(w.error, self._set_health_error,
+                        on_error=lambda m: self.fb_status.setText(m),
+                        label="完整体检失败")
+        w.start()
+
+    def _on_health_done(self, text):
+        self._show_health_text(str(text or ""), True)
+
+    def _set_health_error(self, msg):
+        self.fb_status.setText(f"完整体检失败：{msg}")
+        self.fb_status.mark("error")
+
+    def _show_health_text(self, text: str, probed: bool):
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            LogDialog(
+                self, title="运行体检完成",
+                summary="体检结论已复制到剪贴板。",
+                body="点「显示详细信息」查看全文；这份结论不含任何身份信息，"
+                     "可直接粘贴发给作者。",
+                detail=text,
+                note=("已实测网络出口" if probed
+                      else "未实测网络（点「完整体检」可补测）"),
+                show_export=False, tone="success",
+            ).show_nonmodal()
+        except Exception:                                    # noqa: BLE001
+            pass
+        self.fb_status.setText("体检结论已复制，可直接粘贴发给作者")
+        self.fb_status.mark("ok")
+
+    def _open_diag_records(self):
+        d = diagnostics.events_dir()
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        support.open_in_explorer(d)

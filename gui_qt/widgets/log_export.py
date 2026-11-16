@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
                                QVBoxLayout)
 
 from gui_qt.pages._base import Worker
+from gui_qt import diagnostics
 
 # 每档：窗口底 / 边线 / 标题字 / 正文字 / 次要字 / 详情区底与字
 _THEME = {
@@ -267,6 +268,13 @@ def export_logs(parent=None, ctx=None, kind: str = "日志",
         show_result_dialog(parent, path, success_note)
 
     def _on_error(text):
+        # P0：打包日志本身就是「客户已经遇到问题」的强信号，记一条脱敏摘要。
+        # 只记固定枚举，绝不把异常文本 / 路径塞进事件。
+        try:
+            diagnostics.record_event(ctx, "log_export_failed",
+                                     step="pack", result="fail")
+        except Exception:                                    # noqa: BLE001
+            pass
         if status is not None:
             try:
                 status.setText(f"日志导出失败：{text}")
@@ -340,7 +348,22 @@ def show_failure_dialog(parent=None, title: str = "出错了",
 
     live_page 的录制失败场景用它替换原来的 QMessageBox —— 原窗的
     「Show Details...」是英文、没有关闭按钮、导出入口也无处安放。
+
+    ★ P0（2026-11-15）：详情末尾自动附带一份「运行体检结论」——版本、
+      授权状态、凭证有无、出口模式、ffmpeg、日志目录可写。客户不必再
+      描述「我用不了」，作者也不用靠猜。结论不含机器码/账号/路径。
+      同时记一条匿名故障摘要（默认只落本机，开关关闭时绝不联网）。
     """
+    ctx = getattr(parent, "ctx", None)
+    try:
+        detail = (detail or "") + diagnostics.quick_health_block(ctx)
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        diagnostics.record_event(ctx, "failure", step="failure_dialog",
+                                 code=kind, result="fail")
+    except Exception:                                        # noqa: BLE001
+        pass
     try:
         dlg = LogDialog(parent, title=title, summary=summary, body=body,
                         detail=detail, note=note, show_export=True, kind=kind)

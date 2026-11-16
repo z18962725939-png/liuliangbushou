@@ -5,6 +5,12 @@
   （选分类 → 选平台 → 选接口 → 手填参数），客户第一眼看到的是一堆
   自己看不懂的下拉框，第一印象就是"这软件好难"。
 
+★ 2026-11-16 三次改版（按分享链接里的《v2 界面重构方案》落地）
+  方案的核心判断：首页不该是一条「设置项一样的长列表」。现在把高频功能区
+  改成 3 列 × 2 行功能宫格，每块卡自带图标块 + 标题 + 说明，hover 时边框
+  转柠檬；上方的状态面板（驾驶舱）与三步引导保留 —— 一屏里三种信息形状
+  （数据 / 流程 / 入口）各司其职，眼睛有落点。配色同步换成 v2 浅色对比度体系。
+
 ★ 2026-10-17 二次改版（客户反馈「首页看起来怪怪的、不够整洁」）
   问题不在配色，在**结构**：原版是「三张指标卡 + 三张步骤卡 + 六张功能卡」，
   九块一样大、一样白、一样圆角的卡堆在一起，眼睛没有落点；侧栏还是实心高亮条，
@@ -20,10 +26,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout,
+                               QInputDialog, QLabel, QPushButton, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
-from ._base import page_title
+from ._base import connect_guarded, page_title
 from gui_qt.icons import nav_icon
 from gui_qt.widgets.kit import DisclosurePanel, NodeTimeline
 from gui_qt.widgets.stat import (ActionCard, BigNumber, GlowPanel, StatCard,
@@ -151,6 +158,11 @@ class HomePage(QWidget):
         self._cards: list[ActionCard] = []
         self._card_pairs: list[tuple[ActionCard, str]] = []   # 换主题时按名字重取图标
         self._stat_cards: list[StatCard] = []
+        # ★ 2026-11-16 P2：轻量作业簿。读失败会降级为空簿，绝不让作业簿坏掉
+        #   拖垮首页构建（_base 的 AppContext 也可能在演示模式下没有数据目录）。
+        from gui_qt import taskflow
+        self._tf = taskflow
+        self._book = taskflow.load()
         self._build_ui()
         self.refresh()
 
@@ -246,26 +258,97 @@ class HomePage(QWidget):
         root.addWidget(flow_panel)
         self._panel_flow = flow_panel
 
-        # ---------- ④ 天天要用的功能（一行一条） ----------
+        # ---------- ③b 当前作业（P2 任务流） ----------
+        # ★ 为什么放在三步引导正下方：三步是「第一次用怎么办」，作业卡是
+        #   「我上次做到哪了」。两者都是回答"现在该干什么"，挨在一起才顺；
+        #   又都在功能宫格上面，保证一屏里先看到流程、再看到入口。
+        #   不新增导航页：它只是工作台里的一块面板，免费版没有工作台页，
+        #   所以这里对免费版零影响。
+        root.addSpacing(2)
+        job_panel = QFrame()
+        job_panel.setObjectName("Panel")
+        jv = QVBoxLayout(job_panel)
+        jv.setContentsMargins(16, 12, 16, 12)
+        jv.setSpacing(9)
+
+        jhead = QHBoxLayout()
+        jhead.setSpacing(10)
+        jt = QLabel("当前作业")
+        jt.setObjectName("SectionLabel")
+        jhead.addWidget(jt)
+        self.job_progress = QLabel("尚无作业")
+        self.job_progress.setObjectName("Meta")
+        jhead.addWidget(self.job_progress)
+        jhead.addStretch()
+        jv.addLayout(jhead)
+
+        self.job_title = QLabel("把一件视频从选题做到成片，进度记在这里，关掉软件也不丢。")
+        self.job_title.setObjectName("Caption")
+        self.job_title.setWordWrap(True)
+        jv.addWidget(self.job_title)
+
+        # 六步进度点：用等宽字符拼，靠颜色区分完成/未完成，不引入新 QSS 选择器
+        self.job_dots = QLabel("")
+        self.job_dots.setObjectName("Meta")
+        jv.addWidget(self.job_dots)
+
+        jbtns = QHBoxLayout()
+        jbtns.setSpacing(8)
+        self.job_next_btn = QPushButton("新建作业")
+        self.job_next_btn.setObjectName("Primary")
+        self.job_next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        connect_guarded(self.job_next_btn.clicked,
+                        lambda *_: self._on_job_primary(), label="作业主操作")
+        jbtns.addWidget(self.job_next_btn)
+
+        self.job_done_btn = QPushButton("完成本步")
+        self.job_done_btn.setObjectName("ToolPill")
+        self.job_done_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        connect_guarded(self.job_done_btn.clicked,
+                        lambda *_: self._on_job_done(), label="完成本步")
+        jbtns.addWidget(self.job_done_btn)
+
+        for text, slot in (("归位产物", self._on_job_collect),
+                           ("切换", self._on_job_switch),
+                           ("清单", self._on_job_copy),
+                           ("删除", self._on_job_delete)):
+            b = QPushButton(text)
+            b.setObjectName("ToolPill")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            connect_guarded(b.clicked, lambda *_cb, s=slot: s(), label=text)
+            jbtns.addWidget(b)
+        jbtns.addStretch()
+        jv.addLayout(jbtns)
+        root.addWidget(job_panel)
+        self._panel_job = job_panel
+
+        # ---------- ④ 天天要用的功能（v2：3 列功能宫格） ----------
         root.addSpacing(4)
         root.addWidget(_section("天天要用的功能"))
-        list_panel = QFrame()
-        list_panel.setObjectName("Panel")
-        lv = QVBoxLayout(list_panel)
-        lv.setContentsMargins(8, 8, 8, 8)
-        lv.setSpacing(0)
+        # ★ 2026-11-16 v2 重构：一行一条的长列表 → 3 列 2 行宫格。
+        #   列表把 6 个高频功能压成 6 条细行，一屏读下来像设置项；
+        #   宫格让每个功能有一块「面」，图标 + 说明一眼可达，也和上面的
+        #   状态面板、三步引导拉开信息形状。原型里 hover 是上浮 3px，
+        #   Qt 里动位置会挤动布局，改为「柠檬描边 + 底色微提亮」等价表达。
+        grid = QWidget()
+        grid.setStyleSheet("background:transparent;")
+        grid.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Preferred)
+        gl = QGridLayout(grid)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(14)
         for i, (name, desc, badge) in enumerate(QUICK_ACTIONS):
-            if i:
-                lv.addWidget(_hsep())
-            # 图标色跟着主题走（浅色墨 / 深色柠檬），不再写死旧的靛蓝
-            card = ActionCard(nav_icon(name, palette(self._mode)["accent"], 28),
-                              name, desc, self._mode, badge)
+            # 图标染成能量色（浅色 #C4F13E / 深色 #C8F751），落在柠檬浅底上
+            card = ActionCard(nav_icon(name, palette(self._mode)["acid"], 24),
+                              name, desc, self._mode, badge, vertical=True)
             card.clicked.connect(lambda _c=False, n=name: self._goto(n))
-            lv.addWidget(card)
+            gl.addWidget(card, i // 3, i % 3)
             self._cards.append(card)
             self._card_pairs.append((card, name))
-        root.addWidget(list_panel)
-        self._panel_list = list_panel
+        for col in range(3):
+            gl.setColumnStretch(col, 1)
+        root.addWidget(grid)
+        self._panel_grid = grid
 
         # ---------- ⑤ 其它工具 ----------
         root.addSpacing(4)
@@ -328,6 +411,160 @@ class HomePage(QWidget):
         if win is not None and hasattr(win, "switch_to"):
             win.switch_to(name)
 
+    # ---------------------------------------------------------------- 作业
+    def _save_book(self):
+        if not self._tf.save(self._book):
+            self.job_title.setText("作业保存失败（磁盘不可写？本次进度只在内存里）。")
+
+    def _refresh_job(self):
+        """把作业簿状态画到卡片上。无作业 / 有作业两条路径都不抛异常。"""
+        tf = self._tf
+        job = tf.active_job(self._book)
+        p = palette(self._mode)
+        if job is None:
+            self.job_title.setText(
+                "把一件视频从选题做到成片，进度记在这里，关掉软件也不丢。")
+            self.job_progress.setText("尚无作业")
+            self.job_dots.setText("")
+            self.job_next_btn.setText("＋ 新建作业")
+            self.job_done_btn.setEnabled(False)
+            return
+
+        done, total, pct = tf.progress(job)
+        self.job_title.setText(job.get("title") or "未命名作业")
+        self.job_progress.setText(f"{done}/{total} · {pct}%")
+        # 已完成用能量色，未完成用弱化灰；两段内联样式随主题重刷
+        on = "●" * done
+        off = "○" * (total - done)
+        self.job_dots.setText(f"{on}{off}")
+        self.job_dots.setStyleSheet(
+            f"color:{p['accent']};font-size:15px;letter-spacing:3px;")
+        nxt = tf.next_step(job)
+        self.job_next_btn.setText(
+            f"下一步：{nxt['title']}" if nxt else "六步已完成")
+        self.job_done_btn.setEnabled(bool(nxt))
+
+    def _on_job_primary(self):
+        """主按钮：有未完成步骤→跳到该步页面；全完成或没作业→新建。"""
+        tf = self._tf
+        job = tf.active_job(self._book)
+        nxt = tf.next_step(job)
+        if job is not None and nxt is None:
+            self._new_job()
+            return
+        if nxt is None:
+            self._new_job()
+            return
+        self._goto(nxt["page"])
+
+    def _new_job(self):
+        title, ok = QInputDialog.getText(
+            self, "新建作业", "这次要做什么？（例：按摩棒工厂 11 月选题）")
+        if not ok:
+            return
+        job = self._tf.create(self._book, title)
+        # 新建时拍一份当前各页保存目录的快照，供日后切回来复用
+        self._tf.snapshot_dirs(self._book, job["id"], self._ctx_dirs())
+        self._save_book()
+        self._refresh_job()
+
+    def _ctx_dirs(self) -> dict:
+        """从 AppContext 现成的设置键取各页保存目录（不碰任何页面控件）。"""
+        s = getattr(self.ctx, "settings", {}) or {}
+        return {k: s.get(k, "") for k in self._tf.DIR_ROLE}
+
+    def _on_job_collect(self):
+        """把各页保存目录里最近新增的产物，按角色归位到当前作业对应步骤。"""
+        job = self._tf.active_job(self._book)
+        if not job:
+            self.job_title.setText("先新建一个作业，再归位产物。")
+            return
+        ctx_dirs = self._ctx_dirs()
+        # 也把下载器当前实际用的目录算进去（转录页的扫描就认这个）
+        dl = getattr(getattr(self.ctx, "downloader", None), "save_dir", None)
+        if dl is not None:
+            ctx_dirs["dl_save_dir"] = str(dl) or ctx_dirs.get("dl_save_dir", "")
+        r = self._tf.scan_artifacts(self._book, job["id"], ctx_dirs)
+        self._tf.snapshot_dirs(self._book, job["id"], ctx_dirs)
+        self._save_book()
+        self._refresh_job()
+        if r["attached"]:
+            self.job_title.setText(
+                f"已归位 {r['attached']} 个产物到对应步骤（原文件没动）。")
+        else:
+            self.job_title.setText(
+                "最近 48 小时没有新产物可归位；下载或转录后点这里即可。")
+
+    def _on_job_done(self):
+        job = self._tf.active_job(self._book)
+        nxt = self._tf.next_step(job)
+        if not job or not nxt:
+            return
+        self._tf.mark_step(self._book, job["id"], nxt["key"], done=True)
+        self._save_book()
+        self._refresh_job()
+
+    def _on_job_switch(self):
+        jobs = self._book.get("jobs", [])
+        if not jobs:
+            self._new_job()
+            return
+        names = [f"{j.get('title')}  ({self._tf.progress(j)[0]}/6)" for j in jobs]
+        picked, ok = QInputDialog.getItem(
+            self, "切换作业", "选一个作业：", names, 0, False)
+        if not ok:
+            return
+        idx = names.index(picked) if picked in names else -1
+        if idx >= 0:
+            self._tf.set_active(self._book, jobs[idx]["id"])
+            self._apply_job_dirs(jobs[idx]["id"])
+            self._save_book()
+            self._refresh_job()
+
+    def _apply_job_dirs(self, job_id: str):
+        """把作业的目录快照写回 ctx，让下游页的保存/扫描指到本次作业。
+
+        ★ 只写「当前没有值」的键：客户在设置页手填的目录优先，作业快照
+          只在空着时补位，避免切换作业把客户刚改的设置冲掉。
+        ★ 转录页的 _scan() 读 ctx.downloader.save_dir，所以下载目录快照
+          也同步到下载器实例上，这条跨页链路才算真通。
+        """
+        dirs = self._tf.apply_dirs(self._book, job_id)
+        if not dirs:
+            return
+        s = getattr(self.ctx, "settings", None)
+        if s is None:
+            return
+        for k, v in dirs.items():
+            if not str(s.get(k) or "").strip():
+                s[k] = v
+        # 下载器实例（若已就绪）也跟着指过去
+        dl = getattr(self.ctx, "downloader", None)
+        dl_dir = dirs.get("dl_save_dir")
+        if dl is not None and dl_dir:
+            try:
+                from pathlib import Path
+                dl.save_dir = Path(dl_dir)
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    def _on_job_copy(self):
+        job = self._tf.active_job(self._book)
+        text = self._tf.render_summary(job)
+        try:
+            QApplication.clipboard().setText(text)
+            self.job_title.setText("作业清单已复制，可直接发给同事或贴进笔记。")
+        except Exception:                                      # noqa: BLE001
+            self.job_title.setText(text.splitlines()[0] if text else "")
+
+    def _on_job_delete(self):
+        job = self._tf.active_job(self._book)
+        if not job:
+            return
+        self._tf.delete_job(self._book, job["id"])
+        self._save_book()
+        self._refresh_job()
+
     # ---------------------------------------------------------------- 入场
     def entrance_order(self):
         """切到本页时按阅读顺序依次浮现的几块（编排式入场）。
@@ -341,7 +578,7 @@ class HomePage(QWidget):
         return [w for w in (getattr(self, "title_lab", None),
                             getattr(self, "_panel_status", None),
                             getattr(self, "_panel_flow", None),
-                            getattr(self, "_panel_list", None)) if w is not None]
+                            getattr(self, "_panel_grid", None)) if w is not None]
 
     # ---------------------------------------------------------------- 刷新
     def refresh(self):
@@ -361,28 +598,30 @@ class HomePage(QWidget):
             days = st.get("days_left")
             tone = "normal" if (days is None or days > 3) else "warn"
             self.lic_card.set_value(
-                "已激活", st.get("label") or "授权有效",
-                tone)
+                "已激活", sub=st.get("label") or "授权有效", tone=tone)
         elif state == "trial":
             days = st.get("days_left")
-            # set_value 只有 (value, sub, tone) 三个位置，多传一个会 TypeError。
-            # 原写法传了四个，只是这条分支一直没被执行到才没暴露。
+            # ★ 2026-11-16 v2：BigNumber.set_value 的位置参数是
+            #   (value, unit, sub, tone)。这里原来把「剩 N 天」当 unit、
+            #   把 "warn" 当 sub —— 截图里授权格直接冒出一行 "normal"，
+            #   客户会以为是报错。授权状态没有单位，说明一律走 sub。
             self.lic_card.set_value(
                 "试用期",
-                f"剩 {days:.0f} 天 · 到期后需激活" if days else "试用中", "warn")
+                sub=f"剩 {days:.0f} 天 · 到期后需激活" if days else "试用中",
+                tone="warn")
         elif state == "free":
             # 免费版是一个能正常干活的档位 —— 用 ok 色，别标成"未激活"吓走人。
             # 副标题直接写清可用边界，避免客户点进采集页才发现用不了。
             self.lic_card.set_value(
-                "免费版", "下载 · 录制 永久可用，其余需激活", "normal")
+                "免费版", sub="下载 · 录制 永久可用，其余需激活", tone="normal")
         elif state == "expired":
-            # 同为「多传一个参数」的老写法：试用到期 / 授权过期的客户一打开首页
-            # 就会 TypeError，页面直接白掉。既然撞上了就一起改掉。
             self.lic_card.set_value(
-                "已过期", f"{st.get('label') or '授权已到期'} · 请联系服务方续费", "bad")
+                "已过期", sub=f"{st.get('label') or '授权已到期'} · 请联系服务方续费",
+                tone="bad")
         else:
             self.lic_card.set_value(
-                "未激活", "需激活授权码 · 到「设置 → 授权与激活」粘贴", "bad")
+                "未激活", sub="需激活授权码 · 到「设置 → 授权与激活」粘贴",
+                tone="bad")
 
         # ---- 额度 ----
         used = limit = 0
@@ -505,6 +744,31 @@ class HomePage(QWidget):
         if not unlimited and limit > 0 and used >= limit:
             hints.append("今日额度已用完，明天 16:00 自动重置。")
         self.checker.setToolTip(" · ".join(hints) if hints else "三项都正常，直接点下面的功能开工。")
+        self._style_check_pill(pending)
+        # P2：作业卡每次刷新都重画（含切主题后的进度点颜色）
+        if hasattr(self, "job_dots"):
+            self._refresh_job()
+
+    def _style_check_pill(self, pending: int):
+        """v2：把「上手检查」的结论做成状态胶囊（绿=全正常 / 琥珀=待处理）。
+
+        ★ 为什么不改 kit.py：DisclosurePanel 被多个页面共用，而「结论胶囊」
+          是工作台驾驶舱的语义特例。这里只接管本页这一颗 meta 标签，
+          取不到就静默退回原来的纯文字，不牵动其它页面。
+        ★ apply_theme() 末尾会重跑 refresh()，所以切主题后 kit 重刷过
+          内联样式也会被这里重新清掉，胶囊不会「切一次深色就消失」。
+        """
+        head = getattr(self.checker, "_head", None)
+        meta = getattr(head, "_meta", None)
+        if meta is None:
+            return
+        meta.setObjectName("StatusPill")
+        meta.setProperty("tone", "ok" if pending == 0 else "warn")
+        meta.setStyleSheet("")          # 清掉 kit 的内联色，交给 QSS 语义类
+        st = meta.style()
+        st.unpolish(meta)               # 属性选择器改了 tone 必须重新 polish
+        st.polish(meta)
+        meta.update()
 
     def _play_check(self):
         """展开「上手检查」时让三个节点依次亮起。
@@ -532,7 +796,7 @@ class HomePage(QWidget):
     # ---------------------------------------------------------------- 主题
     def apply_theme(self, mode: str):
         self._mode = mode
-        accent = palette(mode)["accent"]
+        acid = palette(mode)["acid"]
         if getattr(self, "_pill", None) is not None:
             self._pill.apply_theme(mode)
         # ★ 2026-11-10 客户「切深色，工作台右侧颜色不一致」：
@@ -546,7 +810,7 @@ class HomePage(QWidget):
         for c in self._stat_cards:
             c.apply_theme(mode)
         for c, name in self._card_pairs:
-            c.set_icon(nav_icon(name, accent, 28))   # 图标是位图，得手动换色
+            c.set_icon(nav_icon(name, acid, 24))     # 图标是位图，得手动换色
             c.apply_theme(mode)
         self.usage.apply_theme(mode)
         self.flow.apply_theme(mode)

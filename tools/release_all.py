@@ -6,6 +6,18 @@
     python tools/release_all.py --notes "新增批量导出" --bump minor
     python tools/release_all.py --notes "只重新上传，不打包" --no-pack
     python tools/release_all.py --notes "看看会发生什么" --dry-run
+    python tools/release_all.py --notes "全量发版" --with-extras
+
+    --with-extras 把原来四个手工命令（免费版 / EdgeOne / 镜像 / 发卡工具）
+    收进同一条；失败只警告，不影响已上线的完整版。
+
+★ P1（2026-11-16）：失败可重复、可回滚
+    bump 前按字节备份 branding.py + installer.iss，状态记在
+    installer_output/.release_state.json（该目录已被 gitignore）。
+    · 上传 COS 之前失败 → 自动整份回滚版本号，重跑不会升两档；
+    · 上传 COS 之后失败 → 绝不回滚（代码版本必须与线上一致），
+      重跑同一条命令会自动按 --no-pack 续跑剩余步骤。
+    全程不需要人工判断该不该改版本号。
 
 它会依次做完
 ────────────
@@ -32,6 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
@@ -44,6 +57,23 @@ ISS = ROOT / "installer.iss"
 SPEC = ROOT / "justoneapi_collector.spec"
 SMOKE = ROOT / "gui_qt" / "_smoke.py"
 LOG_FILE = INSTALLER_OUT / "release_log.md"
+
+# ── P1 发版状态机（2026-11-16）──────────────────────────────────────────
+# 以前失败后 branding.py / installer.iss 里已经是新版本号，30 多个 early return
+# 谁都不回退 —— 重跑一次就 bump 两档。这里把「旧版本 / 新版本 / 是否已发布」
+# 落成状态文件，并在 bump 前备份两个源文件的原始字节，失败时整份写回。
+# 放在 installer_output/ 下：该目录已在 .gitignore，公开仓不会看到运行时状态。
+STATE_FILE = INSTALLER_OUT / ".release_state.json"
+BACKUP_DIR = INSTALLER_OUT / ".release_backup"
+BACKUP_FILES = {"branding.py": BRANDING, "installer.iss": ISS}
+
+# 真机 EdgeOne CLI（Bash 读不到 .edgeone 配置，必须走 PowerShell 全路径）
+EDGEONE_CMD = Path(
+    r"C:\Users\Administrator\.workbuddy\binaries\node\versions"
+    r"\22.22.2-6\edgeone.cmd")
+# 四件套脚本在沙盒环境里会被这两个变量干扰，跑之前必须摘掉
+EXTRAS_ENV_STRIP = ("CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR",
+                    "CODEBUDDY_TOOL_CALL_ID")
 
 DESKTOP = Path.home() / "Desktop"
 PY = sys.executable
@@ -89,6 +119,153 @@ def run(cmd: list[str], title: str, tail_lines: int = 12,
     proc.wait()
     print(f"   … 退出码 {proc.returncode}（共 {len(lines)} 行输出）")
     return proc.returncode, "".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# P1 状态机：可重复、可回滚（2026-11-16）
+# 判别原则只有一条：**线上发布是分界线**。
+#   发布前失败 → 源码版本号必须回到旧值，否则重跑 bump 两档；
+#   发布后失败 → 绝不能回退，否则代码版本和线上版本对不上，只能续跑。
+# ──────────────────────────────────────────────────────────────────────
+def _corrupt(path: Path) -> bool:
+    """断电曾把 branding.py / installer.iss 整文件写成 NUL，读前 4KB 判坏。"""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return True
+    if not head:
+        return True
+    return head.count(b"\x00") > len(head) // 3
+
+
+def preflight_sources() -> tuple[bool, str]:
+    """发版前确认两个版本源文件没被写坏（这一步不受 --skip-smoke 影响）。"""
+    for name, path in BACKUP_FILES.items():
+        if not path.is_file():
+            return False, f"{name} 不存在"
+        if _corrupt(path):
+            return False, (f"{name} 内容疑似全 NUL（断电写坏）。别直接发版："
+                           "删 .git/index 后 git read-tree HEAD 恢复，"
+                           "不要 checkout 整个分支")
+    return True, ""
+
+
+def load_state() -> dict | None:
+    """读残留状态。文件坏了不能当「无状态」静默忽略 —— 改名留证再提示。"""
+    if not STATE_FILE.is_file():
+        return None
+    try:
+        st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(st, dict) or not st.get("old_ver"):
+            raise ValueError("字段不全")
+        return st
+    except Exception as exc:                                   # noqa: BLE001
+        try:
+            STATE_FILE.replace(STATE_FILE.with_suffix(".json.broken"))
+        except OSError:
+            pass
+        print(f"   [警告] 发版状态文件损坏（{exc}），已改名留证，按全新发版处理")
+        return None
+
+
+def save_state(st: dict) -> None:
+    """原子写：先写 .tmp 再 replace，避免断电把状态文件本身写成半截。"""
+    INSTALLER_OUT.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+
+def clear_state() -> None:
+    try:
+        STATE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def snapshot_sources() -> None:
+    """bump 前按字节备份两个源文件，回滚时整份写回（比反向字符串替换可靠）。"""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    for name, path in BACKUP_FILES.items():
+        (BACKUP_DIR / name).write_bytes(path.read_bytes())
+
+
+def restore_sources(old_ver: str, new_ver: str) -> bool:
+    """回滚版本号。优先用字节备份；备份不全才退化成反向替换（幂等）。"""
+    restored = 0
+    for name, path in BACKUP_FILES.items():
+        bak = BACKUP_DIR / name
+        if bak.is_file() and not _corrupt(bak):
+            try:
+                path.write_bytes(bak.read_bytes())
+                restored += 1
+            except OSError:
+                pass
+    if restored == len(BACKUP_FILES):
+        return True
+    try:
+        # 已经回退过时这条是无害的空操作：new_ver 在文件里根本找不到
+        write_version(new_ver, old_ver)
+        print("   [提示] 字节备份不全，已用版本号反向替换回滚（请核对 git diff）")
+        return True
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"   [严重] 版本号回滚失败：{exc}")
+        print(f"   请手工把 branding.py 与 installer.iss 的 {new_ver} 改回 {old_ver} 再重跑")
+        return False
+
+
+def mark_published() -> None:
+    """publish_release.py 成功后立刻落标记：此后任何失败绝不回退版本号。"""
+    st = load_state() or {}
+    st["published"] = True
+    st["phase"] = "published"
+    save_state(st)
+
+
+def finish(rc: int, st: dict) -> None:
+    """唯一收口：成功清场 / 发布前失败回滚 / 发布后失败留状态等续跑。"""
+    disk = load_state() or {}
+    old_ver = disk.get("old_ver") or st.get("old_ver", "?")
+    new_ver = disk.get("new_ver") or st.get("new_ver", "?")
+    published = bool(disk.get("published") or st.get("published"))
+
+    if rc == 0:
+        clear_state()
+        shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+        return
+
+    if published:
+        print("\n" + "!" * 58)
+        print(f"[未回滚] 线上已经发布 v{new_ver}，源码版本必须保持一致。")
+        print("  直接用同一条命令重跑：状态机会自动按 --no-pack 续跑，")
+        print("  不重新打包、不再升版本号，也不会重跑门禁。")
+        print("!" * 58)
+        return
+
+    if old_ver == new_ver:                 # --no-pack：版本号本来就没动
+        clear_state()
+        return
+
+    ok = restore_sources(old_ver, new_ver)
+    clear_state()
+    shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+    if ok:
+        print("\n" + "!" * 58)
+        print(f"[已自动回滚] 版本号 v{new_ver} → v{old_ver}")
+        print("  修好上面的错误后直接重跑同一条命令，不会升两档。")
+        print("!" * 58)
+    else:
+        print("\n[严重] 自动回滚失败，必须先人工修版本号再重跑。")
+
+
+def decide_versions(old_ver: str, no_pack: bool, kind: str,
+                    resumed: bool) -> tuple[str, str, str]:
+    """纯函数（可单测）：返回 (old_ver, new_ver, 说明)。"""
+    if resumed:
+        # 线上已发布：源码里就是新版本，续跑不 bump、不重新打包
+        return old_ver, old_ver, "线上已发布，自动续跑（不 bump / 不打包）"
+    return old_ver, (old_ver if no_pack else bump(old_ver, kind)), ""
 
 
 def read_version() -> str:
@@ -251,18 +428,93 @@ def verify_remote(feed_url: str, local_setup: Path) -> tuple[bool, str]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-def main() -> int:
-    ap = argparse.ArgumentParser(description="流量捕手一条龙发版")
-    ap.add_argument("--notes", required=True, help="更新说明，会写进 version.json 并展示给客户")
-    ap.add_argument("--bump", choices=["patch", "minor", "major"], default="patch",
-                    help="版本号递增方式，默认 patch（1.1.0 → 1.1.1）")
-    ap.add_argument("--no-pack", action="store_true", help="跳过打包，只上传现有安装包")
-    ap.add_argument("--skip-smoke", action="store_true", help="跳过 GUI 冒烟（赶时间时用）")
-    ap.add_argument("--dry-run", action="store_true", help="只打印步骤，不真的执行")
-    args = ap.parse_args()
+# P1：把「发版后还要手工跑四件套」这条隐式耦合收进一条命令
+# ──────────────────────────────────────────────────────────────────────
+def check_keygen_freshness() -> tuple[bool, str, bool]:
+    """返回 (指纹一致, 说明, 需要重建发卡工具)。
 
-    old_ver = read_version()
-    new_ver = old_ver if args.no_pack else bump(old_ver, args.bump)
+    以前只在链尾「提醒」一句，发完版才发现发卡界面缺勾选框。现在预检阶段
+    就报出来，--with-extras 会自动重建，不再靠人记得。
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from justoneapi_collector import licensing as _lic
+        stamp_file = TOOLS / "_keygen_stamp.json"
+        feats = list(_lic.FEATURES.keys())
+        if not stamp_file.is_file():
+            return False, "还没盖过功能位指纹章", True
+        stamp = json.loads(stamp_file.read_text(encoding="utf-8"))
+        old = list(stamp.get("features") or [])
+        if old != feats:
+            return False, (f"功能位清单变了（发卡工具 {len(old)} 项 / "
+                           f"当前代码 {len(feats)} 项）"), True
+        return True, f"功能位指纹一致（{len(feats)} 项）", False
+    except Exception as exc:                                   # noqa: BLE001
+        return False, f"检查未执行：{exc}", False
+
+
+def _extras_env(extra: dict | None = None) -> dict:
+    env = dict(os.environ)
+    for key in EXTRAS_ENV_STRIP:
+        env.pop(key, None)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _keygen_py() -> str:
+    """发卡工具要用 Python310 打（tcvenv 缺 PyInstaller / cos-sdk）。"""
+    cand = Path(r"C:\Python310\python.exe")
+    return str(cand) if cand.is_file() else PY
+
+
+def run_extras(new_ver: str, notes: str) -> None:
+    """四件套：免费版 → EdgeOne 自有域名 → COS 镜像 → 发卡工具。
+
+    全部尽力而为：完整版此刻已上线，这里任何一步失败都不改变发布结果，
+    只打印可复制的补跑命令（也方便单独重跑其中一件）。
+    """
+    print(f"\n{'─' * 58}\n▶ 补跑四件套（免费版 / 官网 / 镜像 / 发卡工具）\n{'─' * 58}")
+    env = _extras_env()
+
+    # ① 免费版（TRAFFIC_EDITION=free 由 release_free.py 自己设，不许改源码再改回）
+    code, _ = run([PY, str(TOOLS / "release_free.py"), "--notes", notes],
+                  "免费版打包与上传", tail_lines=8, env=env)
+    if code != 0:
+        print(f"   [警告] 免费版失败，补跑：{PY} tools/release_free.py --notes \"…\"")
+
+    # ② EdgeOne 自有域名：必须真机 PowerShell 全路径，禁 -a overseas
+    standalone = INSTALLER_OUT / "standalone"
+    if EDGEONE_CMD.is_file() and standalone.is_dir():
+        ps_cmd = (f"& '{EDGEONE_CMD}' makers deploy '{standalone}' "
+                  f"-n trafficcatcher --json")
+        code, _ = run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                      "EdgeOne 部署官网（自有域名）", tail_lines=8, env=env)
+        if code != 0:
+            print("   [警告] EdgeOne 部署失败，别加 -a overseas；用真机 PowerShell 手动补跑")
+    else:
+        print(f"   [警告] 跳过 EdgeOne：CLI 或 standalone 目录不存在（{EDGEONE_CMD}）")
+
+    # ③ COS 镜像站（首页 + 子页 + 字体 + 音频，白名单同步）
+    code, _ = run([PY, str(TOOLS / "publish_site_mirror.py")],
+                  "镜像站整站同步", tail_lines=8, env=env)
+    if code != 0:
+        print(f"   [警告] 镜像同步失败，补跑：{PY} tools/publish_site_mirror.py")
+
+    # ④ 发卡工具：只有指纹不一致才重建，避免每次发版都白打一个 exe
+    ok, why, need = check_keygen_freshness()
+    if need:
+        code, _ = run([_keygen_py(), str(TOOLS / "build_keygen.py")],
+                      "重建发卡工具（功能位变了）", tail_lines=8, env=env)
+        if code != 0:
+            print(f"   [警告] 发卡工具重建失败，补跑：{_keygen_py()} tools/build_keygen.py")
+    else:
+        print(f"   [OK] 发卡工具无需重建：{why}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+def _pipeline(args, old_ver: str, new_ver: str) -> int:
+    """发版主体。版本决策、状态机、回滚全部在 main() 里，这里只管顺序执行。"""
     setup_name = f"流量捕手_Setup_v{new_ver}.exe"
 
     print("=" * 58)
@@ -274,19 +526,39 @@ def main() -> int:
 
     if args.dry_run:
         print("\n将依次执行：")
+        print( "  0a. 断电文件检测 + 发卡工具功能位指纹预检（始终执行）")
         print(f"  0. GUI 冒烟 + 编译检查 + 功能位同步/门禁检查"
               f"（{'跳过' if args.skip_smoke else '执行'}）")
-        print(f"  1. 版本号 {old_ver} → {new_ver}（branding.py + installer.iss）")
+        print(f"  1. 版本号 {old_ver} → {new_ver}（先按字节备份两个源文件）")
         print( "  2. 清空 dist")
         print( "  3. PyInstaller 打包 → Inno Setup 生成安装包")
-        print( "  4. 上传 COS + 回读校验")
+        print( "  4. 上传 COS + 回读校验（★ 此后失败不再回滚版本号）")
         print( "  5. 同步下载页（版本号 + 微信 UA 可访问性自检）")
         print( "  6. 端到端匿名验证（SHA256 + 文件头）")
         print( "  7. 复制到桌面")
+        print( "  7b. GitHub 提交 / push / Release")
+        if getattr(args, "with_extras", False):
+            print( "  7c. 四件套：免费版 → EdgeOne → 镜像站 → 发卡工具")
         print( "  8. 输出摘要 + 客户通知文案")
         print( "  9. 追加 release_log.md")
-        print("\n确认后去掉 --dry-run 再跑。")
+        print("\n状态机：上传前失败自动回滚版本号，上传后失败自动转为 --no-pack 续跑。")
+        print("确认后去掉 --dry-run 再跑。")
         return 0
+
+    # ── 0a) 断电保护 + 隐式耦合预检（不受 --skip-smoke 影响）──
+    ok, why = preflight_sources()
+    if not ok:
+        print(f"[中止] {why}")
+        return 1
+    ok, why, need = check_keygen_freshness()
+    if not ok:
+        print("\n" + "!" * 58)
+        print(f"[必须处理] 发卡工具功能位不同步：{why}")
+        print(f"   重建命令：{_keygen_py()} tools/build_keygen.py")
+        print("   或在发版命令上加 --with-extras 让它自动重建。")
+        print("!" * 58)
+    else:
+        print(f"   [OK] {why}")
 
     # ── 0) 自检 ──
     if not args.skip_smoke:
@@ -534,6 +806,32 @@ def main() -> int:
             print("[中止] 一键导出日志退化（客户报问题时拿不到日志），先修好再发版。")
             return 1
 
+        # ★ 2026-11-15 P0 匿名故障摘要：这扇门守的是隐私红线 —— 开关默认值、
+        #   字段白名单、脱敏、关闭时零联网、体检结论不含身份信息。任何一条
+        #   被放宽，软件就会在客户不知情时外发数据，必须整链停在这里。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_diagnostics.py")],
+                      "匿名故障摘要 / 统一体检（隐私红线 + 功能回归）")
+        if code != 0:
+            print("[中止] 匿名故障摘要的隐私约束被破坏（可能外发客户数据），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-16 P1：发版链自身的可重复 / 可回滚也要有门禁。
+        #   静态断言 + 沙盒真跑 main() 模拟「发布前失败 / 发布后失败 / 续跑」，
+        #   防止以后有人把 mark_published 挪位、或让某个 early return 绕过回滚。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_release_chain.py")],
+                      "发版链状态机（自动回滚 / 断点续跑 / 四件套接线）")
+        if code != 0:
+            print("[中止] 发版链回滚能力退化（失败后重跑会升两档或版本与线上不一致），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-16 P2：轻量作业簿。这扇门守的是「下一步按钮不送错页面」
+        #   和「作业簿不收集 Token / 客户名」两条，任何一条破了都别发。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_taskflow.py")],
+                      "任务流作业簿（六步页面映射 / 隐私白名单 / 原子写）")
+        if code != 0:
+            print("[中止] 任务流作业簿退化（下一步会跳错页，或作业簿开始收集敏感信息），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")
@@ -612,6 +910,9 @@ def main() -> int:
     if code != 0:
         print("[中止] 发布失败，云端未改动。")
         return 3
+    # ★ 分界线：从这一刻起线上已经是新版本，后面任何失败都绝不回退源码版本号
+    mark_published()
+    print("   [状态机] 线上已发布；此后失败只续跑，不回滚版本号")
 
     # ── 5) 同步下载页 ──
     # 这一步以前漏了，导致发完 v1.2.0 页面还挂着 v1.1.0 的链接，
@@ -641,31 +942,15 @@ def main() -> int:
     digest = sha256_of(setup_path)
     print(f"\n   桌面副本 {dst}（{size:,} 字节）")
 
-    # ── 7) 发卡工具新鲜度检查 ──
-    #   桌面发卡工具是打包好的 exe，它的「包含功能」勾选框来自 licensing.FEATURES。
-    #   功能位变了却没重建 exe → 发卡界面里看不到新功能位
-    #   （客户就是发现「关键词抓取」没有勾选框才来投诉的）。
-    #   这里用「功能位指纹」判断，比看文件时间准确：只有功能清单真的变了才提醒。
-    try:
-        import sys as _sys
-        _sys.path.insert(0, str(ROOT))
-        from justoneapi_collector import licensing as _lic
-        stamp_file = TOOLS / "_keygen_stamp.json"
-        now_feats = list(_lic.FEATURES.keys())
-        if stamp_file.is_file():
-            stamp = json.loads(stamp_file.read_text(encoding="utf-8"))
-            if list(stamp.get("features") or []) != now_feats:
-                print("\n" + "!" * 58)
-                print("[必须处理] 功能位清单变了，但桌面上的发卡工具还是旧的 exe！")
-                print(f"   发卡工具里：{stamp.get('features')}")
-                print(f"   当前代码里：{now_feats}")
-                print("   不重建的话，你在发卡界面里看不到新功能位。请跑：")
-                print("     C:/Python310/python.exe tools/build_keygen.py")
-                print("!" * 58)
-        else:
-            print("\n[提醒] 还没盖过功能位指纹章，建议跑一次 tools/build_keygen.py。")
-    except Exception as _e:                                    # noqa: BLE001
-        print(f"\n[提醒] 发卡工具新鲜度检查未执行：{_e}")
+    # ── 7) 发卡工具新鲜度复查 ──
+    #   预检（0a）已经报过一次；这里复查是因为打包过程中如果有人改了 FEATURES，
+    #   发卡界面就会缺勾选框。--with-extras 会在链尾自动重建，不靠人记得。
+    ok, why, need = check_keygen_freshness()
+    if not ok:
+        print(f"\n[必须处理] 发卡工具仍是旧的：{why}")
+        print(f"   重建命令：{_keygen_py()} tools/build_keygen.py")
+    else:
+        print(f"\n   [OK] {why}")
 
     # ── 7b) GitHub 同步 ──
     #   公开仓 z18962725939-png/liuliangbushou：发版提交 + push + Release。
@@ -674,6 +959,13 @@ def main() -> int:
         sync_github(new_ver, args.notes)
     except Exception as _e:                                    # noqa: BLE001
         print(f"\n[提醒] GitHub 同步未完成（线上发布不受影响）：{_e}")
+
+    # ── 7c) 四件套（--with-extras 才跑，把原来四个手工命令收进一条）──
+    if getattr(args, "with_extras", False):
+        try:
+            run_extras(new_ver, args.notes)
+        except Exception as _e:                                # noqa: BLE001
+            print(f"\n[警告] 四件套有一步没跑完（完整版发布不受影响）：{_e}")
 
     # ── 8) 摘要 ──
     print("\n" + "=" * 58)
@@ -704,6 +996,80 @@ def main() -> int:
         fh.write(entry)
     print(f"\n  已追加到 {LOG_FILE.name}")
     return 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# main：只负责「版本决策 + 状态机 + 统一收口」，具体顺序全在 _pipeline
+# ──────────────────────────────────────────────────────────────────────
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="流量捕手一条龙发版（失败自动回滚 / 断点续跑 / 四件套可选）")
+    ap.add_argument("--notes", required=True, help="更新说明，会写进 version.json 并展示给客户")
+    ap.add_argument("--bump", choices=["patch", "minor", "major"], default="patch",
+                    help="版本号递增方式，默认 patch（1.1.0 → 1.1.1）")
+    ap.add_argument("--no-pack", action="store_true", help="跳过打包，只上传现有安装包")
+    ap.add_argument("--skip-smoke", action="store_true", help="跳过 GUI 冒烟（赶时间时用）")
+    ap.add_argument("--dry-run", action="store_true", help="只打印步骤，不真的执行、不写状态")
+    ap.add_argument("--with-extras", action="store_true",
+                    help="发版后自动补跑四件套：免费版 / EdgeOne / 镜像 / 发卡工具")
+    args = ap.parse_args()
+
+    st = load_state()
+
+    # 干跑：纯读，绝不写状态、绝不碰源文件
+    if args.dry_run:
+        old0 = read_version()
+        old0, new0, _ = decide_versions(old0, args.no_pack, args.bump, False)
+        if st:
+            mode = "线上已发布" if st.get("published") else "发布前中断"
+            print(f"[状态机] 检测到残留状态 v{st.get('old_ver')} → v{st.get('new_ver')}（{mode}）")
+            print("  正式跑会自动回滚或续跑，不需要人工改版本号。")
+        return _pipeline(args, old0, new0)
+
+    resumed = bool(st and st.get("published"))
+    if st and not resumed:
+        # 上次在上传前中断：源码里可能已经是新版本号，先按字节整份恢复
+        restore_sources(str(st.get("old_ver", "")), str(st.get("new_ver", "")))
+        clear_state()
+        shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+        print(f"[状态机] 上次发版在上传前中断，已回滚 "
+              f"v{st.get('new_ver')} → v{st.get('old_ver')}")
+        st = None
+    if resumed:
+        args.no_pack = True
+        args.skip_smoke = True
+        print(f"[状态机] 上次线上已发布 v{st.get('new_ver')} 但后续步骤没跑完："
+              "自动按 --no-pack 续跑（不 bump / 不打包 / 不重跑门禁）")
+
+    old_ver = read_version()
+    old_ver, new_ver, note = decide_versions(old_ver, args.no_pack, args.bump, resumed)
+    if note:
+        print(f"  {note}")
+
+    if not (resumed and st):                   # 续跑沿用原状态（保留 published 标记）
+        from datetime import datetime, timedelta, timezone
+        started = datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+        if new_ver != old_ver:
+            snapshot_sources()                 # 必须在 write_version 之前
+        save_state({
+            "schema": 1, "old_ver": old_ver, "new_ver": new_ver,
+            "notes": args.notes, "bump": args.bump,
+            "phase": "started", "published": bool(resumed),
+            "started_at": started,
+        })
+
+    try:
+        rc = _pipeline(args, old_ver, new_ver)
+    except KeyboardInterrupt:
+        print("\n[中断] 收到 Ctrl+C，正在按阶段回滚 / 保留状态……")
+        rc = 130
+    except Exception:                                          # noqa: BLE001
+        print("\n[异常] 发版链抛出未捕获异常：")
+        traceback.print_exc()
+        rc = 99
+    finish(rc, load_state() or {"old_ver": old_ver, "new_ver": new_ver,
+                                "published": resumed})
+    return rc
 
 
 if __name__ == "__main__":

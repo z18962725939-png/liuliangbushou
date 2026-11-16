@@ -297,7 +297,8 @@ QLineEdit#CmdInput {
     background: #141821;
     border: 1px solid transparent;
     border-radius: 8px;
-    padding: 9px 12px;
+    /* ★ v2：左右留出放大镜 / Esc 键帽的位置，与浅色版一致。 */
+    padding: 9px 52px 9px 38px;
     font-size: 12px;
     color: #E6E9EF;
     selection-background-color: #33471A;
@@ -834,3 +835,32 @@ QTextBrowser#TutorialBody {
     color: #C3CAD6;
     font-size: 13px;
 }
+
+/* ---------------------------------------------------------------------------
+   ★ v2 改版补充（2026-11-16）：SectionLabel 分区标题样式，与浅色版对应。
+   此前两套 QSS 都没定义这个语义类，对比度门禁一直报「取不到色值」。
+   --------------------------------------------------------------------------- */
+QLabel#SectionLabel {
+    font-size: 12px;
+    font-weight: 600;
+    color: #9AA4B2;
+}
+
+/* ---------------------------------------------------------------------------
+   ★ v2 组件细节（2026-11-16）：状态胶囊 + 表格行 hover（深色对应档）
+   --------------------------------------------------------------------------- */
+QLabel#StatusPill {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 15px;
+    background: #1A212B;
+    color: #9AA4B2;
+    border: 1px solid transparent;
+}
+QLabel#StatusPill[tone="ok"]   { background: #16281F; color: #5EE39A; }
+QLabel#StatusPill[tone="acid"] { background: #202A18; color: #C8F751; }
+QLabel#StatusPill[tone="warn"] { background: #2A2312; color: #F5C044; }
+QLabel#StatusPill[tone="bad"]  { background: #2B1818; color: #F87171; }
+QTableWidget::item:hover:!selected { background: #1B2410; }
+QTreeWidget::item:hover:!selected  { background: #1B2410; }
