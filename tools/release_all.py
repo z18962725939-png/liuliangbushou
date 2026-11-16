@@ -305,9 +305,13 @@ def sync_github(new_ver: str, notes: str) -> None:
     Release 创建脚本幂等，失败后手动重跑即可。
     """
     print(f"\n{'─' * 58}\n▶ GitHub 同步（提交 / push / Release）\n{'─' * 58}")
-    # 1) 提交：只收已跟踪文件的改动（branding / iss / 发卡印章 / 文档），
-    #    不碰未跟踪的产物（installer_output、日志都在 .gitignore 里）
-    subprocess.run(["git", "add", "-u"], cwd=str(ROOT), check=False)
+    # 1) 提交：★ 2026-11-16 修——原来用 `git add -u` 只收已跟踪文件，
+    #    结果每次新增的模块（P0 diagnostics / P2 taskflow / 新门禁 / 新文档）
+    #    全被漏掉，GitHub 上的源码永远比安装包少一截，还得人工补提交。
+    #    改用 `git add -A`：未跟踪的产物由 .gitignore 挡着（installer_output /
+    #    *.log / _tmp_shots / __pycache__ 都在里面），dry-run 验证过只会多收
+    #    真正该进仓的新文件。
+    subprocess.run(["git", "add", "-A"], cwd=str(ROOT), check=False)
     st = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
                         capture_output=True, text=True)
     staged = [l for l in st.stdout.splitlines() if l and not l.startswith("??")]

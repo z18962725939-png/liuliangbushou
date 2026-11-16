@@ -107,6 +107,13 @@ check("preflight_sources()" in ast.get_source_segment(src, funcs["_pipeline"]),
 check("ghp_" not in src.replace("GITHUB_TOKEN=ghp_xxx", ""),
       "发版链源码没有写死 PAT")
 
+# ★ 2026-11-16 v1.28.8 真机踩坑：sync_github 原来用 `git add -u`，
+#   新增模块（diagnostics / taskflow / 新门禁 / 新文档）全被漏提交，
+#   GitHub 源码永远比安装包少一截。钉死必须用 -A。
+check('["git", "add", "-A"]' in src and '["git", "add", "-u"]' not in src,
+      "GitHub 同步用 git add -A（新增模块不会被漏提交）",
+      "又退回 git add -u：新增文件会漏进不了发版提交")
+
 
 # ── B. 运行时沙盒 ──────────────────────────────────────────────────────
 print("\n" + "=" * 68)
