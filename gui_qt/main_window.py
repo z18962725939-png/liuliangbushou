@@ -28,6 +28,7 @@ from gui_qt.pages.topic_page import TopicPage
 from gui_qt.pages.transcribe_page import TranscribePage
 from gui_qt.pages.trend_page import TrendPage
 from gui_qt.pages.video_download_page import VideoDownloadPage
+from gui_qt.subwindow import SubWindow
 from gui_qt.pages.watch_page import WatchPage
 from gui_qt.theme import accent_color, nav_active_icon_color, nav_text_color
 from gui_qt.widgets.command_palette import install_shortcut
@@ -263,6 +264,8 @@ _TABLE_COL_WIDTHS = {
     "账号昵称": 110, "sec_uid": 110, "平均互动(近N条)": 116,
     "赞粉比(互动率%)": 116, "近30天更新数": 108, "体检时间": 92,
     "时长 / 大小": 96, "博主昵称": 104,
+    # v1.28.9 直播录制历史表：大小/时间两列走短字段宽度，文件名列走 Stretch
+    "大小": 76, "录制时间": 148,
     # v1.28.3 转录页状态表格：首列徽标最长是「源文件已更新」，64px 会截字
     "转录状态": 108, "大小": 84, "所在目录": 140, "转录稿": 96,
 }
@@ -436,6 +439,11 @@ _EMPTY_HINTS = {
          "新建任务", "_new_task"),
     ],
     "直播监控": [
+        # ★ 精确匹配历史表的首列「文件名」：不登记的话它会回退到下面那条
+        #   None 引导，空历史表上浮出「还没有监控目标 / 添加监控」，文不对题。
+        ("文件名", "还没有录制的回放",
+         "录完的直播会自动列在这里，双击就能用电脑默认播放器打开。"
+         "也可以点右边按钮先看看文件都存在哪。", "打开保存目录", "_open_save_dir"),
         (None, "还没有监控目标",
          "粘贴抖音直播间链接，或先搜索博主再选中；添加后软件会立刻查一次"
          "是不是正在直播，在播就直接开始录。", "添加监控", "_add"),
@@ -514,6 +522,17 @@ class MainWindow(QMainWindow):
         # 让各页面能回调主窗口做跳转（工作台卡片、结果表「写同款文案」都靠它）
         self.ctx.main_window = self
         self.setWindowTitle(branding.APP_DISPLAY_NAME)
+        # ★ 窗口尺寸边界（2026-11-18 客户反馈「右侧内容过多会拉长整个窗口」）：
+        #   页面全都套了 QScrollArea（见 _scroll_wrap），内容再长也不会撑大窗口；
+        #   真正缺的是窗口本身的上下限 —— 之前只有 app.py 里一句 resize，
+        #   最大化/拖边缘就能把它拉到铺满整屏，长页面摊开后视觉上像「被内容撑大」。
+        #   锁一个舒适区间：默认见 app.py 的 resize(1180,760)，这里只管边界。
+        #   · 下限保证控件不被压到重叠（实测最小可读宽约 1080）；
+        #   · 上限 1520×940 —— 大屏仍能放大看表格，但不会一根拉满 4K。
+        #   注意用 setMinimum/MaximumSize 而非 setFixedSize：后者连最大化都禁掉，
+        #   对需要看宽表的客户反而是倒退。
+        self.setMinimumSize(1080, 680)
+        self.setMaximumSize(1520, 940)
         # ★ 窗口自己接管初始焦点（2026-10-18）：TAB 顺序的第一站如果不是窗口，
         #   Qt 会把焦点交给第一个可聚焦子控件 —— 也就是侧栏第一项，于是客户
         #   一打开软件就看见一个焦点环，误以为"这项被选中了"。窗口拿住焦点，
@@ -542,6 +561,9 @@ class MainWindow(QMainWindow):
         self._group_items = {}
         self._group_of = {}         # 页面名 -> 所属分组（Ctrl+K 跳过去要展开用）
         self._cmd_palette = None
+        # 独立窗口：页面名 -> SubWindow。同一页只弹一个，重复点「独立窗口」
+        # 把已开的那个 raise 出来，避免把 widget 借给两个父控件而崩掉。
+        self._popouts = {}
         self._build_ui()
         self._refresh_nav_icons()
 
@@ -744,6 +766,19 @@ class MainWindow(QMainWindow):
         self._guide_btn.clicked.connect(lambda: open_guide(self, None))
         nv.addWidget(self._guide_btn)
 
+        # ★ 独立窗口（2026-11-18）：把当前页弹出去单独看，主窗口继续干活。
+        #   页面内容多时不必主窗口拉到铺满屏 —— 弹出来自成一个可缩放窗口，
+        #   关闭自动归位。全站通用，任何页面都能用。
+        self._popout_btn = QPushButton("独立窗口打开本页")
+        self._popout_btn.setObjectName("NavItem")
+        self._popout_btn.setIconSize(QSize(18, 18))
+        self._popout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._popout_btn.setToolTip(
+            "把当前这一页弹到独立窗口，方便单独查看；\n"
+            "关闭窗口后页面自动回到主界面")
+        self._popout_btn.clicked.connect(lambda *_: self.popout_current())
+        nv.addWidget(self._popout_btn)
+
         # ★ 一键导出日志（2026-11-15）：常驻侧栏底部，任何页面都能点。
         #   背景：出口原来只在「设置 → 系统档」里，客户遇到问题时（如
         #   TikTok 录制失败）根本找不到 —— 拿不到日志只能来回猜。
@@ -801,6 +836,10 @@ class MainWindow(QMainWindow):
         if not self._focus_given:
             self._focus_given = True
             self.setFocus(Qt.FocusReason.OtherFocusReason)
+        # ★ 系统标题栏跟随应用主题（2026-11-17）：必须在 show 之后，
+        #   此时 winId() 才落地。首次显示同步一次，避免深色界面顶白条。
+        from gui_qt.titlebar import apply_native_titlebar
+        apply_native_titlebar(self, self._theme_mode)
 
     # ------------------------------------------------------------ 侧栏分组折叠
     def _refresh_group_icon(self, group: str):
@@ -976,7 +1015,75 @@ class MainWindow(QMainWindow):
             st.polish(head)
             head.update()
 
+    # ------------------------------------------------------------ 独立窗口
+    def popout_current(self):
+        """把当前页弹到独立窗口；关闭自动归还主界面。
+
+        ★ 为什么这样做（2026-11-18 客户「内容多拉长窗口」）：
+          页面本身在 QScrollArea 里不会被内容撑大，但客户想要「把这一页
+          抽出来单独盯、主窗口继续干别的」。做法是**借**出页面 widget 给
+          独立窗口（同一时刻一个 QWidget 只能有一个父控件），关闭时再还回
+          原滚动容器 —— 页面对象、Worker、状态全部保留，不重建。
+        """
+        cur = self._stack.currentWidget()
+        if cur is None:
+            return
+        # 反查当前页名（stack 里放的是 QScrollArea，名字映射在 _scrolls）
+        name = None
+        for n, scroll in self._scrolls.items():
+            if scroll is cur:
+                name = n
+                break
+        if not name:
+            return
+        # 已弹出 → 激活已有窗口，不重复借出
+        existing = self._popouts.get(name)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        page_widget = cur.widget()
+        if page_widget is None:
+            return
+
+        scroll_ref = cur  # 关闭时还回这里
+
+        def _on_closed(win, name=name):
+            w = win.take_content()
+            if w is not None:
+                scroll_ref.setWidget(w)
+                w.setGraphicsEffect(None)
+                w.setVisible(True)
+            self._popouts.pop(name, None)
+
+        try:
+            sub = SubWindow(f"{name} · 独立窗口", parent=self,
+                            on_closed=_on_closed)
+            cur.takeWidget()                 # 从滚动容器摘下（不销毁）
+            sub.set_content(page_widget)
+            self._popouts[name] = sub
+            sub.show()
+            self.statusBar().showMessage(
+                f"已把「{name}」弹到独立窗口，关闭后自动回到主界面", 4000) \
+                if hasattr(self, "statusBar") else None
+        except Exception as exc:             # noqa: BLE001
+            # 弹出失败必须把 widget 还回去，否则主界面这块永久空白
+            try:
+                cur.setWidget(page_widget)
+            except Exception:                # noqa: BLE001
+                pass
+            import traceback
+            traceback.print_exc()
+
     def _switch(self, name):
+        # 若目标页此刻正被借到独立窗口里，先关闭它把 widget 还回来，
+        # 否则主界面这一格会是空白（widget 同时只能有一个父控件）。
+        popped = self._popouts.get(name)
+        if popped is not None:
+            try:
+                popped.close()
+            except Exception:                                # noqa: BLE001
+                pass
         self._ensure_group_expanded(name)
         group = self._group_of.get(name)
         if group:
@@ -1071,6 +1178,9 @@ class MainWindow(QMainWindow):
 
     def _toggle_theme(self):
         self._theme_mode = "dark" if self._theme_mode == "light" else "light"
+        # 系统标题栏跟着变（QSS 管不到它，必须单独调 DWM）。
+        from gui_qt.titlebar import apply_native_titlebar
+        apply_native_titlebar(self, self._theme_mode)
         app = QApplication.instance()
         if app is not None:
             from gui_qt.theme import apply_theme, restyle_tree

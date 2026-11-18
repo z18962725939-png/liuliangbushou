@@ -10,9 +10,10 @@ live_monitor.LiveMonitor（经 AppContext.ensure_monitor 注入）。
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, 
+                               QHeaderView, QLabel, QLineEdit, QMessageBox,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
@@ -223,6 +224,40 @@ class LivePage(QWidget):
         self.status.mark("idle")
         root.addWidget(self.status)
 
+        # ★ 2026-11-18 录制历史：录完的文件不再「撒手不管」。
+        #   录制链路只管录，停手后文件躺在保存目录里，软件重启就认不出来了。
+        #   这里扫目录列成表，双击/按钮用系统默认播放器打开，补上「回放」这半条路。
+        #   ★ 放在「监控目标」上方：回放是客户点进这页的高频目的（我录的东西
+        #     哪去了），监控目标属配置区、低频。放下面会被空态撑到首屏外。
+        hist, hist_l = vertical_card("录制历史（双击用系统播放器打开）", self)
+        self.hist_table = QTableWidget(0, 3)
+        self.hist_table.setHorizontalHeaderLabels(["文件名", "大小", "录制时间"])
+        self.hist_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.hist_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # ★ 不能设 maximumHeight：空态引导会给空表设 200px 的 minimumHeight，
+        #   一旦 maximum < minimum，Qt 布局行为未定义，会露出半截空态覆盖层。
+        # 双击 = 打开回放；连接走 connect_guarded，槽里抛异常也能看见原因
+        connect_guarded(self.hist_table.doubleClicked,
+                        lambda *_: self._open_history_selected(),
+                        on_error=self._slot_failed, label="打开回放")
+        hist_l.addWidget(self.hist_table)
+        hist_row = QHBoxLayout()
+        b_open = QPushButton("打开选中回放")
+        b_open.setToolTip("用电脑默认播放器打开选中的录制文件")
+        connect_guarded(b_open.clicked, lambda *_: self._open_history_selected(),
+                        on_error=self._slot_failed, label="打开回放")
+        b_folder = QPushButton("打开保存目录")
+        b_folder.setToolTip("在文件管理器里打开录制保存目录")
+        connect_guarded(b_folder.clicked, lambda *_: self._open_save_dir(),
+                        on_error=self._slot_failed, label="打开保存目录")
+        b_refresh = QPushButton("刷新列表")
+        connect_guarded(b_refresh.clicked, lambda *_: self._refresh_history(),
+                        on_error=self._slot_failed, label="刷新录制历史")
+        hist_row.addWidget(b_open); hist_row.addWidget(b_folder)
+        hist_row.addWidget(b_refresh); hist_row.addStretch()
+        hist_l.addLayout(hist_row)
+        root.addWidget(hist)
+
         # 目标表格
         tb, tb_l = vertical_card("监控目标", self)
         self.table = QTableWidget(0, 7)
@@ -249,6 +284,8 @@ class LivePage(QWidget):
         self._restore_rows()
         if self.ctx.demo and self._ensure_daemon() is None:
             self._load_demo_targets()
+        # 首次进入就把已经录好的文件列出来（录制历史不随软件重启丢失）
+        self._refresh_history()
 
     # ----------------------------------------------------------------
     def _default_dir(self):
@@ -266,6 +303,65 @@ class LivePage(QWidget):
         except OSError:
             pass
         return str(root)
+
+    # ------------------------------------------- 录制历史 / 回放（2026-11-18）
+    def _history_dir(self) -> Path:
+        """历史表扫描的目录：以界面上当前填的保存目录为准（用户可能刚改过）。"""
+        raw = str(self.save_dir.text() if hasattr(self, "save_dir") else "").strip()
+        return Path(raw) if raw else Path(self._default_dir())
+
+    def _refresh_history(self):
+        """扫保存目录，把可回放的 mp4 列进历史表。只读，不动任何文件。"""
+        from justoneapi_collector.record_history import scan_recordings
+        items = scan_recordings(self._history_dir())
+        self.hist_table.setRowCount(0)
+        for rec in items:
+            r = self.hist_table.rowCount()
+            self.hist_table.insertRow(r)
+            for c, val in enumerate((rec.name, rec.size_text, rec.time_text)):
+                cell = QTableWidgetItem(val)
+                # 绝对路径挂在首行 UserRole：双击时据此打开，显示仍是短文件名
+                if c == 0:
+                    cell.setData(Qt.ItemDataRole.UserRole, rec.path)
+                    cell.setToolTip(rec.path)
+                self.hist_table.setItem(r, c, cell)
+        if items:
+            self.status.setText(f"录制历史：{len(items)} 个可回放文件（双击打开）")
+            self.status.mark("ok")
+
+    def _open_history_selected(self):
+        """用系统默认播放器打开选中的录制；没选中就提示，绝不静默。"""
+        rows = sorted({i.row() for i in self.hist_table.selectedIndexes()})
+        if not rows:
+            self.status.setText("请先在「录制历史」里选中一个文件")
+            self.status.mark("warn")
+            return
+        opened = 0
+        for r in rows:
+            cell = self.hist_table.item(r, 0)
+            path = cell.data(Qt.ItemDataRole.UserRole) if cell else ""
+            if not path or not Path(path).is_file():
+                continue
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            opened += 1
+        if opened:
+            self.status.setText(f"已用系统播放器打开 {opened} 个录制文件")
+            self.status.mark("ok")
+        else:
+            self.status.setText("选中的文件已不存在（可能被移到别处或删除）")
+            self.status.mark("warn")
+
+    def _open_save_dir(self):
+        """在文件管理器里打开保存目录；目录不存在就先建，失败给明话。"""
+        d = self._history_dir()
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as e:                              # noqa: BLE001
+            self.status.setText(f"保存目录打不开：{e}")
+            self.status.mark("error")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+        self.status.setText(f"已打开保存目录：{d}")
 
     def _daemon(self):
         return self.ctx.daemon
@@ -1056,10 +1152,32 @@ class LivePage(QWidget):
                 return e
 
         w = Worker(run)
-        self._wire_worker(w, lambda n: self.status.setText(
-            f"停止失败：{n}" if isinstance(n, Exception) else f"已停止 {n} 个录制"),
-            "停止失败", "停止录制结果")
+        self._wire_worker(w, lambda n: self._on_stop_done(n),
+                          "停止失败", "停止录制结果")
         w.start()
+
+    def _on_stop_done(self, n):
+        """停止录制结果：提示产物落哪 + 刷新历史表（录完那一刻就能找到文件）。"""
+        if isinstance(n, Exception):
+            self.status.setText(f"停止失败：{n}")
+            self.status.mark("error")
+            return
+        self.status.setText(f"已停止 {n} 个录制")
+        # dm.last_stopped 里有本次每个文件的结果（path/size/ok），界面此前从不读。
+        dm = self._daemon()
+        reports = []
+        if dm is not None:
+            try:
+                reports = list(getattr(dm, "last_stopped", []) or [])
+            except Exception:                              # noqa: BLE001
+                reports = []
+        ok_files = [r for r in reports if r.get("ok") and r.get("path")]
+        if ok_files:
+            newest = ok_files[-1]
+            name = Path(str(newest.get("path"))).name
+            self.status.setText(f"录制已保存：{name}　·　共 {len(ok_files)} 个，见下方「录制历史」")
+            self.status.mark("ok")
+        self._refresh_history()
 
     def _stop_all(self):
         dm = self._daemon()
@@ -1075,9 +1193,8 @@ class LivePage(QWidget):
                 return e
 
         w = Worker(run)
-        self._wire_worker(w, lambda n: self.status.setText(
-            f"停止失败：{n}" if isinstance(n, Exception) else f"已停止全部录制（{n} 个）"),
-            "停止失败", "停止全部录制结果")
+        self._wire_worker(w, self._on_stop_done,
+                          "停止失败", "停止全部录制结果")
         w.start()
 
     def _remove_selected(self):
@@ -1141,6 +1258,8 @@ class LivePage(QWidget):
                     dm.save_dir = Path(d)
                 except Exception:  # noqa: BLE001
                     pass
+        # 换了目录，历史表要重新扫，否则还列着上一个目录的文件
+        self._refresh_history()
 
     # --------------------------------------------------- 指示灯 / 表格同步
     @staticmethod

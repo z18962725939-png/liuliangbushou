@@ -870,6 +870,36 @@ QTextBrowser#TutorialBody {
     font-size: 13px;
 }
 
+/* —— 通用次级窗口（2026-11-18）：把当前页弹出去独立看 —— */
+QDialog#SubWindow {
+    background: #F5F6F8;
+}
+QFrame#SubWindowHead {
+    background: #FFFFFF;
+    border-bottom: 1px solid #E5E7EB;
+}
+QLabel#SubWindowTitle {
+    color: #0B0E14;
+    font-size: 16px;
+    font-weight: 600;
+}
+QPushButton#SubWindowClose {
+    color: #566070;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    padding: 2px 8px;
+}
+QPushButton#SubWindowClose:hover {
+    color: #0B0E14;
+    background: #F1F3F5;
+}
+QScrollArea#SubWindowScroll {
+    background: #F5F6F8;
+    border: none;
+}
+
 /* ---------------------------------------------------------------------------
    ★ v2 改版补充（2026-11-16）：SectionLabel 分区标题样式。
    此前 QSS 里没有这个语义类（对比度门禁一直红着「取不到色值」）——
