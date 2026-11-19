@@ -123,16 +123,23 @@ def fake_httpx(resp=None, exc=None):
 
 _real_httpx = None
 lg_httpx_backup = sys.modules.get("httpx")
+# ★ 2026-11-19：remote_override 结果按进程缓存（一次启动只发一次请求），
+#   每个场景用 force=True 显式重拉，测的是「各响应如何解读」；
+#   缓存命中本身另设一项断言（见末尾），避免测试与新语义冲突。
 sys.modules["httpx"] = fake_httpx(FakeResp(200, '{"require_login": false}'))
-check("云端返回 false → 读到 False", lg.remote_override() is False)
+check("云端返回 false → 读到 False", lg.remote_override(force=True) is False)
 sys.modules["httpx"] = fake_httpx(FakeResp(200, '{"require_login": true}'))
-check("云端返回 true → 读到 True", lg.remote_override() is True)
+check("云端返回 true → 读到 True", lg.remote_override(force=True) is True)
 sys.modules["httpx"] = fake_httpx(FakeResp(500, "boom"))
-check("云端非 200 → None（放行给本地）", lg.remote_override() is None)
+check("云端非 200 → None（放行给本地）", lg.remote_override(force=True) is None)
 sys.modules["httpx"] = fake_httpx(FakeResp(200, "not json"))
-check("云端返回垃圾 → None", lg.remote_override() is None)
+check("云端返回垃圾 → None", lg.remote_override(force=True) is None)
 sys.modules["httpx"] = fake_httpx(exc=RuntimeError("no network"))
-check("云端请求异常 → None（断网绝不拦人）", lg.remote_override() is None)
+check("云端请求异常 → None（断网绝不拦人）", lg.remote_override(force=True) is None)
+# 缓存：同一进程内第二次调用不发请求（换一个会抛错的 mock，命中缓存则不碰它）
+_cached = lg.remote_override(force=True)
+sys.modules["httpx"] = fake_httpx(exc=RuntimeError("第二次不该发请求"))
+check("二次调用命中缓存（不重复发请求）", lg.remote_override() == _cached)
 if lg_httpx_backup is not None:
     sys.modules["httpx"] = lg_httpx_backup
 else:

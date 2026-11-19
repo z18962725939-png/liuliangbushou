@@ -221,7 +221,13 @@ class LiveMonitor:
         #   本机常见端口）；空串 = 用户明确不用代理。这里用 quick_proxy()
         #   毫秒级取候选、**不联网验证**，否则构造会在 UI 线程卡好几秒；
         #   真正的可用性由 fetch_room 的「给定代理 → 系统代理 → 直连」兜底。
-        self.tiktok_proxy = (tiktok_live.quick_proxy() if tiktok_proxy is None
+        # ★ 2026-11-19 启动性能：构造期绝不扫端口。quick_proxy() 逐个
+        #   connect_ex 14 个常见端口、每个超时 0.25s = 客户没开代理时白等 3.5s。
+        #   这里只同步取「显式配置 → Windows 系统代理」（读注册表，毫秒级），
+        #   端口扫描交给下面那个后台线程补扫回填 —— 客户最常见的 Clash
+        #   「系统代理」场景零延迟命中，纯端口代理场景后台几百毫秒内自动补上，
+        #   界面不再等待。fetch_room 本身还有「给定→系统→直连」兜底，不会误判。
+        self.tiktok_proxy = (tiktok_live.quick_proxy(ports=False) if tiktok_proxy is None
                              else str(tiktok_proxy or "").strip())
         # ★ 是否为「自动探测」状态：客户常常先开软件、后开代理。自动模式下
         #   代理为空不能一次定死，失败时每 2 分钟重扫一次端口（毫秒级、
@@ -231,7 +237,23 @@ class LiveMonitor:
         # 实际走通的出口：配置为空但靠「系统代理」连通时记在这里。
         # ★ ffmpeg 不读 Windows 系统代理，录制必须显式拿到这个值，
         #   否则状态查得到、流却拉不下来。
+        #   ★ 必须在下面的后台补扫线程之前初始化，避免竞态。
         self._tiktok_via = ""
+        if self._tiktok_proxy_auto and not self.tiktok_proxy:
+            # 后台补扫端口：不阻塞构造，扫到且仍处自动模式/当前为空才回填。
+            def _probe_ports():
+                try:
+                    found = tiktok_live.quick_proxy(ports=True)
+                except Exception:                # noqa: BLE001
+                    return
+                if (found and self._tiktok_proxy_auto
+                        and not self.tiktok_proxy):
+                    self.tiktok_proxy = found
+                    self._tiktok_via = ""
+
+            import threading as _th
+            _th.Thread(target=_probe_ports, name="tiktok-proxy-probe",
+                       daemon=True).start()
         # 浏览器会话懒加载且复用，避免每个轮询周期都重过一次 WAF 挑战
         self._tiktok_browser: tiktok_live.TikTokLiveBrowser | None = None
 

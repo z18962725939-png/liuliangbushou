@@ -59,6 +59,55 @@ def _write_crash_log(exc: BaseException) -> str:
         return ""
 
 
+def _make_splash():
+    """用纯代码绘制启动画面（墨底 + 柠檬色标题 + 版本 + 加载提示）。
+
+    返回一个 QSplashScreen；失败返回 None 由调用方降级。刻意不引入新模块、
+    不读外部图片，避免改 hiddenimports / datas 带来的打包回归风险。
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+    from PySide6.QtWidgets import QSplashScreen
+
+    w, h = 460, 260
+    pix = QPixmap(w, h)
+    pix.fill(QColor("#0B0E14"))                 # 官网同一墨色
+    p = QPainter(pix)
+    try:
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 顶部柠檬色能量条
+        p.fillRect(0, 0, w, 6, QColor("#C8F751"))
+        # 主标题
+        f = QFont()
+        f.setPointSize(28)
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor("#C8F751"))
+        p.drawText(0, 74, w, 50, Qt.AlignmentFlag.AlignCenter, "流量捕手")
+        # 副标题
+        f2 = QFont()
+        f2.setPointSize(12)
+        p.setFont(f2)
+        p.setPen(QColor("#98A1AF"))
+        try:
+            from justoneapi_collector.branding import APP_DISPLAY_NAME, APP_VERSION
+            sub = f"{APP_DISPLAY_NAME}  v{APP_VERSION}"
+        except Exception:                       # noqa: BLE001
+            sub = "流量捕手"
+        p.drawText(0, 128, w, 30, Qt.AlignmentFlag.AlignCenter, sub)
+        # 加载提示
+        f3 = QFont()
+        f3.setPointSize(11)
+        p.setFont(f3)
+        p.setPen(QColor("#C8F751"))
+        p.drawText(0, 196, w, 30, Qt.AlignmentFlag.AlignCenter, "正在启动，请稍候…")
+    finally:
+        p.end()
+    sp = QSplashScreen(pix)
+    sp.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    return sp
+
+
 def build_context() -> AppContext:
     """构造应用上下文；在此创建 client / downloader 等共享业务资源并注入。
 
@@ -94,6 +143,21 @@ def run() -> None:
         app.setApplicationDisplayName("流量捕手")
         apply_theme(app, "light")
 
+        # ★ 启动画面（2026-11-19）：把「import 页面 + 构造业务资源 + 登录门」
+        #   这段 (~1~4 秒) 的等待用一个稳定的品牌画面盖住。修复前客户看到的是
+        #   「双击后空等几秒 → 闪一个 136x57 的默认小窗 → 再等几秒 → 主窗口」，
+        #   像卡死/闪屏；现在全程是一张静止的启动图直到主窗口就绪。
+        #   纯代码绘制（QPainter），不依赖外部图片，打包无需加 datas。
+        #   任何异常都吞掉 —— 启动画面绝不能拦住软件启动。
+        splash = None
+        try:
+            splash = _make_splash()
+            if splash is not None:
+                splash.show()
+                app.processEvents()          # 立刻画出来，否则仍是空白等
+        except Exception:                    # noqa: BLE001
+            splash = None
+
         # 按钮悬停过渡（2026-10-27）：QSS 没有 transition，这里的接管让
         # 鼠标划过按钮时背景色是 180ms 渐变而不是开关式跳变。
         # ★ 装在 QApplication 上而不是逐个按钮：任何窗口/对话框里的按钮
@@ -119,6 +183,12 @@ def run() -> None:
         except Exception:                                   # noqa: BLE001
             gate_on = False
         if gate_on:
+            # 登录门是模态框：先关掉启动画面再弹，避免两者叠在一起。
+            if splash is not None:
+                try:
+                    splash.hide()
+                except Exception:                           # noqa: BLE001
+                    pass
             if not ensure_login(None, ctx, window=window):
                 return                                      # 用户主动退出，正常收尾
             try:
@@ -128,6 +198,16 @@ def run() -> None:
                 pass
 
         window.show()
+        # 主窗口真正显示后再收启动画面：中间不留空窗闪烁。
+        if splash is not None:
+            try:
+                splash.finish(window)
+            except Exception:                               # noqa: BLE001
+                try:
+                    splash.hide()
+                except Exception:                           # noqa: BLE001
+                    pass
+            splash = None
 
         # 启动后自动检查新版本（后台线程，无新版则完全静默）。
         # 延迟 1.5 秒：先让主界面画出来，避免联网检查把启动过程拖慢。
@@ -139,6 +219,13 @@ def run() -> None:
         raise
     except Exception as exc:  # noqa: BLE001 — 启动期兜底，需捕获一切
         path = _write_crash_log(exc)
+        # 异常退出也要收掉启动画面，别让它盖在报错框上不肯走。
+        try:
+            _sp = locals().get("splash")
+            if _sp is not None:
+                _sp.hide()
+        except Exception:                                    # noqa: BLE001
+            pass
         # 尽力弹窗告知用户；若 Qt 尚不可用则静默退出（日志已落盘）
         try:
             import traceback as _tb

@@ -475,6 +475,20 @@ def count_up(label, new_text: str, duration: int = T_COUNT) -> bool:
         label.setText(str(new_text))
         return False
 
+    # ★ 2026-11-19 竞态修复：逐条实时计数时，上一条的滚动动画可能还没跑完，
+    #   新值就来了。若不停旧的，多个动画的 valueChanged 会抢着 setText，
+    #   数字会闪回旧值、甚至卡在中间。启动新动画前先把旧的停掉并从标签上摘除。
+    old = label.property("_count_anim")
+    if old is not None:
+        try:
+            old.stop()
+            # 动画 parent 是 label，stop 不会移除它；批量下几百条会堆几百个
+            # 已停的 QVariantAnimation。删掉旧的，只留当前一个。
+            old.deleteLater()
+        except RuntimeError:                        # 旧动画已被 Qt 销毁
+            pass
+        label.setProperty("_count_anim", None)
+
     anim = QVariantAnimation(label)
     anim.setDuration(max(80, ms))
     anim.setStartValue(start)
@@ -482,7 +496,8 @@ def count_up(label, new_text: str, duration: int = T_COUNT) -> bool:
     anim.setEasingCurve(QEasingCurve.Type.Linear)
     anim.valueChanged.connect(
         lambda p: label.setText(fmt(start + (end - start) * ease("soft", float(p)))))
-    # 用属性挂住引用：局部变量被回收时动画会连同定时器一起消失（数字停在半路）
+    # 用属性挂住引用：局部变量被回收时动画会连同定时器一起消失（数字停在半路），
+    # 同时作为「当前唯一动画」的句柄供下一次调用 stop 掉（见上方竞态修复）。
     label.setProperty("_count_anim", anim)
     anim.finished.connect(lambda: label.setText(str(new_text)))
     anim.start()

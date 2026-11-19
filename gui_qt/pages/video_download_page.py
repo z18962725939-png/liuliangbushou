@@ -23,6 +23,8 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from justoneapi_collector.video_downloader import video_is_downloaded  # noqa: E402
+
 from justoneapi_collector import quota
 from justoneapi_collector.video_downloader import VideoDownloader
 from justoneapi_collector.video_link_import import (find_links_in_text,
@@ -156,12 +158,21 @@ def _download_task(worker, downloader, videos, media_type="video"):
         worker.emit_progress(
             pct, f"已完成 {done}/{total} 条 · {_fmt_size(d_sum)} / {_fmt_size(t_sum)}")
 
+    # ★ 2026-11-19 实时计数：逐条完成时把「这条成没成」单独发一个事件，
+    #   界面据此在任务**进行中**就 +1（顶部数字 + 该行状态同时更新），
+    #   不再等整批 done 才一次性跳数。判据与 _on_downloaded 完全一致：
+    #   path 非空 且 err 为空 = 成功。
     def on_progress(count, tot, video, path, err):
         with lock:
             state["done"] = int(count)
             state["frac"].pop(_key(video), None)   # 完成：按整条计满
         done, pct, _d, _t = _snapshot()
         worker.emit_progress(pct, f"已完成 {done}/{total} 条：{_label(video)}")
+        # 逐条完成事件：payload = (video, ok)。done/失败两条路径都覆盖。
+        # getattr 兜底：无头门禁里的假 Worker 可能没有该信号，不能让它打断下载。
+        _emit_item = getattr(worker, "emit_item", None)
+        if _emit_item is not None:
+            _emit_item((video, bool(path) and not err))
 
     return downloader.download_videos(videos, on_progress=on_progress,
                                       on_chunk=on_chunk, media_type=media_type)
@@ -244,6 +255,86 @@ def _fetch_ks_list_task(worker, downloader, url_text):
     return videos, err or ""
 
 
+# ★ 2026-11-19 多博主批量采集：把「单个博主的拉取逻辑」复用成「串行多位」。
+#   为什么串行不并发：抖音走本机浏览器登录会话、快手走云端接口，同一时刻
+#   开多个浏览器抓取会互相抢登录态/Cookie，风控也会立刻拦。所以一个 Worker
+#   里逐个跑，用 _SegmentWorker 把每位博主的 0-100 进度映射到整体区间。
+class _SegmentWorker:
+    """把一位博主的 0-100 进度转发成整体进度的某个切片，消息原样回传。"""
+
+    def __init__(self, parent, lo: int, hi: int):
+        self._parent = parent
+        self._lo = lo
+        self._hi = hi
+
+    def emit_progress(self, pct, msg=""):
+        try:
+            frac = max(0.0, min(100.0, float(pct))) / 100.0
+        except (TypeError, ValueError):
+            frac = 0.0
+        self._parent.emit_progress(
+            self._lo + (self._hi - self._lo) * frac, msg)
+
+
+def _batch_bloggers_task(worker, downloader, urls, list_type, platform, use_browser):
+    """串行采集多位博主的作品，汇总进一张表（在 Worker 线程运行）。
+
+    返回 (videos, failures, ok_count, total)：
+      videos   —— 所有博主拉到的作品，按 video_id 去重（多人可能推同一条）
+      failures —— [(主页链接, 原因)]，某位失败不打断其他位
+      ok_count —— 成功拉到内容的博主数
+      total    —— 本次有效链接数
+    """
+    valid = [str(u).strip() for u in urls if str(u).strip()]
+    total = len(valid)
+    if not total:
+        return [], [], 0, 0
+
+    seen: set = set()
+    all_videos = []
+    failures = []
+    ok_count = 0
+
+    for i, url in enumerate(valid):
+        lo = int(i * 100 / total)
+        hi = int((i + 1) * 100 / total)
+        seg = _SegmentWorker(worker, lo, hi)
+        worker.emit_progress(lo, f"正在采集第 {i + 1}/{total} 位：{url[:28]}…")
+        try:
+            if platform == "kuaishou":
+                vids, err = _fetch_ks_list_task(seg, downloader, url)
+            else:
+                # 与单次入口同款：先零联网解析 sec_uid，失败则交给浏览器解开
+                try:
+                    sec_uid, _reason = downloader.resolve_sec_uid(
+                        url, allow_network=False)
+                except TypeError:                      # 演示/旧假下载器兼容
+                    sec_uid, _reason = downloader.resolve_sec_uid(url)
+                vids, err = _fetch_list_task(
+                    seg, downloader, list_type, sec_uid or None, False,
+                    use_browser=use_browser, profile_url="" if sec_uid else url)
+        except Exception as exc:  # noqa: BLE001 —— 单博主的异常不能毁掉整批
+            vids, err = [], str(exc)
+
+        if err and not vids:
+            failures.append((url, err))
+            continue
+        added = 0
+        for v in (vids or []):
+            key = getattr(v, "video_id", "") or id(v)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_videos.append(v)
+            added += 1
+        ok_count += 1
+        if err:                                        # 部分成功也要记账
+            failures.append((url, f"已取 {added} 条，另有提示：{err}"))
+        worker.emit_progress(hi, f"第 {i + 1}/{total} 位完成：新增 {added} 条")
+
+    return all_videos, failures, ok_count, total
+
+
 def _batch_resolve_task(worker, downloader, urls, skip_ids, should_stop):
     """后台批量解析链接任务（导入的 Excel/粘贴链接都走这里）。
 
@@ -271,6 +362,7 @@ class VideoDownloadPage(QWidget):
         self._resolve_worker = None
         self._download_worker = None
         self._list_worker = None          # 博主列表批量拉取（作品/喜欢/收藏）
+        self._batch_bloggers_worker = None  # 多博主串行批量采集（独立 worker，不与单次互斥）
         self._import_worker = None        # 批量导入（Excel / 粘贴链接）解析
         self._import_stop = False
         # ★ 2026-10-24：单条「解析」识别出输入其实是博主主页链接时暂存于此，
@@ -529,11 +621,39 @@ class VideoDownloadPage(QWidget):
         lr2.addWidget(self.fetch_list_btn)
         ll.addLayout(lr2)
 
+        # ★ 2026-11-19 多博主批量采集：上面那行一次只拉一位博主。
+        #   客户手上常是一整串主页链接（一行一个），这里给独立的多行入口，
+        #   串行逐个采集、结果汇总进同一张表。不改动上面单次入口（门禁钉着它）。
+        lr3 = QHBoxLayout()
+        lr3.setSpacing(8)
+        lr3.addWidget(QLabel("批量采集："))
+        self.batch_urls_edit = QPlainTextEdit()
+        self.batch_urls_edit.setFixedHeight(58)
+        self.batch_urls_edit.setPlaceholderText(
+            "一行一位博主主页链接（抖音/快手均可），例如：\n"
+            "https://www.douyin.com/user/MS4w…\nhttps://www.kuaishou.com/profile/3x…")
+        self.batch_urls_edit.setToolTip(
+            "多位博主会按行串行采集（浏览器登录会话只有一个，不能并发）；"
+            "平台/列表类型沿用上方选择；各博主作品合并去重后进下方表格。")
+        lr3.addWidget(self.batch_urls_edit, 1)
+        self.batch_fetch_btn = QPushButton("批量采集博主")
+        self.batch_fetch_btn.setObjectName("Primary")
+        self.batch_fetch_btn.setToolTip(
+            "按行粘贴多位博主主页链接，逐个采集作品并合并进下载列表（失败的不影响其他位）")
+        connect_guarded(self.batch_fetch_btn.clicked,
+                        lambda *_: self._batch_fetch_bloggers(),
+                        on_error=self._slot_failed, label="批量采集博主")
+        lr3.addWidget(self.batch_fetch_btn)
+        ll.addLayout(lr3)
+
         hint = QLabel(
             "提示：「喜欢 / 收藏」仅抖音支持且需先在「设置 → 抖音登录」扫码登录；"
             "留空链接则拉取【登录账号本人】的喜欢 / 收藏。\n"
             "快手：只拉「作品」，粘贴快手博主主页链接即可 —— 走云端接口，"
             "无需登录、不会弹浏览器窗口。\n"
+            "★ 多位博主：把主页链接一行一个粘到「批量采集」框，点「批量采集博主」——"
+            "按上面的平台/列表类型逐个采集，作品自动去重合并，某位失败不影响其他位。"
+            "抖音博主会串行打开浏览器，请勿中途关闭窗口。\n"
             "浏览器会话抓取会自动打开一个 Chrome/Edge 窗口并滚动加载页面（抖音风控较严，"
             "这是目前唯一稳定的方式），抓取期间请勿关闭该窗口。结果会加入下方列表，勾选后「下载选中」。"
         )
@@ -589,12 +709,16 @@ class VideoDownloadPage(QWidget):
         root.addWidget(self.status)
 
         # 视频表格
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["选择", "平台", "标题", "时长 / 大小"])
+        # ★ 2026-11-19：加第 5 列「状态」，直接显示这条在保存目录里是否已下载。
+        #   判断走 video_is_downloaded —— 与下载器真正跳过下载的文件名判据同源。
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["选择", "平台", "标题", "时长 / 大小", "状态"])
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         root.addWidget(self.table, 1)
 
 
@@ -739,6 +863,9 @@ class VideoDownloadPage(QWidget):
                 "建议点「浏览」换成可写的位置。")
         if self.ctx is not None:
             self.ctx.settings["dl_save_dir"] = d
+        # ★ 2026-11-19：换保存目录后，每行「是否已下载」的判据目录变了，整表重算
+        if hasattr(self, "table") and self.table is not None:
+            self._refresh_all_status()
 
     def _login(self, platform, disabled):
         if disabled:
@@ -1256,6 +1383,76 @@ class VideoDownloadPage(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
 
+    # ------------------------------------------- 多博主批量采集（2026-11-19）
+    def _batch_fetch_bloggers(self):
+        """按行读取多个博主主页链接，串行采集后合并进下载表。"""
+        if not self._ensure_real_downloader():
+            if self._free_mode():
+                self._prompt_paid_feature("博主主页作品批量入库")
+            else:
+                self._prompt_need_token()
+            return
+        if (self._batch_bloggers_worker is not None
+                and self._batch_bloggers_worker.isRunning()):
+            self.status.setText("多博主批量采集中，请稍候…")
+            return
+        urls = [ln.strip() for ln in
+                self.batch_urls_edit.toPlainText().splitlines() if ln.strip()]
+        if not urls:
+            self.status.setText("请在「批量采集」框里一行粘贴一位博主的主页链接")
+            return
+        platform = self._blogger_platform()
+        list_type = self.list_type_combo.currentData() or "post"
+        if platform == "kuaishou" and list_type != "post":
+            self.status.setText("快手只支持「作品」列表（喜欢/收藏是抖音专属）")
+            return
+        use_browser = self.use_browser_chk.isChecked() if platform != "kuaishou" else False
+
+        self.batch_fetch_btn.setEnabled(False)
+        self.batch_fetch_btn.setText("采集中…")
+        self.status.setText(f"开始串行采集 {len(urls)} 位博主…（请勿关闭浏览器窗口）")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        w = Worker(_batch_bloggers_task, self.downloader, urls, list_type,
+                   platform, use_browser)
+        connect_guarded(w.done, self._on_batch_bloggers_done,
+                        on_error=self._slot_failed, label="多博主采集结果")
+        connect_guarded(
+            w.progress,
+            lambda pct, msg: (self.progress.setValue(int(max(0, min(100, pct)))),
+                              self.status.setText(msg) if msg else None),
+            on_error=self._slot_failed, label="多博主采集进度")
+        connect_guarded(w.error, lambda m: self.status.setText(f"批量采集中断：{m}"))
+        connect_guarded(w.finished, self._on_batch_bloggers_finished,
+                        label="多博主采集收尾")
+        self._batch_bloggers_worker = w
+        w.start()
+
+    def _on_batch_bloggers_done(self, result):
+        try:
+            videos, failures, ok_count, total = result
+        except Exception:  # noqa: BLE001
+            videos, failures, ok_count, total = [], [("<未知>", "返回结果异常")], 0, 0
+        added = 0
+        for v in (videos or []):
+            self._add_video_info_row(v)
+            added += 1
+        # 汇总：成功几位、合并去重后几条、哪几位失败——一次性说清楚
+        parts = [f"批量采集完成：{ok_count}/{total} 位博主成功"]
+        parts.append(f"合并去重后新增 {added} 条")
+        if failures:
+            detail = "；".join(f"{u[:20]}（{e}）" for u, e in failures[:4])
+            more = f" 等 {len(failures)} 位" if len(failures) > 4 else ""
+            parts.append(f"失败：{detail}{more}")
+        parts.append("勾选后点「下载选中」即可批量下载")
+        self.status.setText("；".join(parts))
+
+    def _on_batch_bloggers_finished(self):
+        self.batch_fetch_btn.setEnabled(True)
+        self.batch_fetch_btn.setText("批量采集博主")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+
     def _add_video_info_row(self, info):
         plat = getattr(info, "platform", "douyin") or "douyin"
         # ★ 视频号 / 小红书的标题里常夹着换行（后面跟一整串 #话题标签）。
@@ -1299,8 +1496,15 @@ class VideoDownloadPage(QWidget):
         self.status.setText(f"开始下载 {len(picked)} 条…")
 
         media_type = self.media_combo.currentData() or "video"
+        # ★ 2026-11-19：本轮逐条实时计数的基线。逐条信号边跑边加，done 时
+        #   用 results 的真实结果**对账校正**，两个口径都以"这批"为单位。
+        self._live_ok = 0
+        self._live_fail = 0
         w = Worker(_download_task, self.downloader, picked, media_type)
         w.progress.connect(self._on_dl_progress)
+        # 逐条完成 → 实时 +1（数字滚动 + 该行状态列同步）
+        connect_guarded(w.item_done, self._on_dl_item,
+                        on_error=self._slot_failed, label="逐条下载计数")
         connect_guarded(w.done, self._on_downloaded,
                         on_error=self._slot_failed, label="下载结果")
         connect_guarded(w.error, lambda m: self.status.setText(f"下载出错：{m}"))
@@ -1314,13 +1518,45 @@ class VideoDownloadPage(QWidget):
         if msg:
             self.status.setText(msg)
 
+    def _on_dl_item(self, payload):
+        """逐条下载完成：实时累加计数 + 刷新该行状态（任务进行中就可见）。
+
+        ★ 2026-11-19：以前统计只在整批 done 时更新一次，客户批量下 30 条，
+          中途数字纹丝不动，像卡死。现在每条下完就 +1，数字滚动动画跟着走。
+        ★ 这里只做"实时累加"；done 里会用 results 真实结果对账校正，
+          所以即使某条信号漏发或重复，最终数字仍与真实落盘一致。
+        """
+        try:
+            video, ok = payload
+            if ok:
+                self._live_ok += 1
+                self._stat_ok += 1
+            else:
+                self._live_fail += 1
+                self._stat_fail += 1
+            self._refresh_stats()
+            # 同步该行「状态」列：下成的那条立刻从"未下载"变"已下载"
+            self._refresh_one_video_status(video)
+        except Exception:                                    # noqa: BLE001
+            pass
+
     def _on_downloaded(self, results):
         ok = sum(1 for item in results if item and item[1] and not item[2])
         fail = len(results) - ok
-        # 累进本批成果（顶部数字条立刻能看到"这轮成了几条"）
-        self._stat_ok += ok
-        self._stat_fail += fail
+        # ★ 2026-11-19 对账：逐条信号边跑边加过了（_live_ok/_live_fail），
+        #   done 时以 results 的**真实结果为准校正**，绝不能再 += 一次
+        #   （否则数字翻倍），也不怕逐条信号漏发（校正会补上）。
+        # getattr 兜底：无头门禁用假页面直调本方法时没走 __init__，
+        # 就当逐条信号一条都没发，全部由 results 对账出来。
+        if not hasattr(self, "_live_ok"):
+            self._live_ok = 0
+        if not hasattr(self, "_live_fail"):
+            self._live_fail = 0
+        self._stat_ok += ok - self._live_ok
+        self._stat_fail += fail - self._live_fail
         self._refresh_stats()
+        # ★ 2026-11-19：文件已落盘，立刻重算每行的「状态」列（成功/失败分支都覆盖）
+        self._refresh_all_status()
         # ★ v1.19.1：弹窗/状态栏展示**实际落盘**目录（last_save_dir_used）——
         #   下载器发现原目录写不进去时会自动改存到备用目录，还拿用户填的
         #   那个说事，客户会去一个根本没文件的文件夹里找。
@@ -1484,7 +1720,50 @@ class VideoDownloadPage(QWidget):
         while len(self._videos) < r:
             self._videos.append(None)
         self._videos.append(video)
+        self._set_row_status(r)
         self._sync_actions()
+
+    def _save_dir_for_status(self) -> Path:
+        """状态列用哪個目录：优先下载器记下的「实际落盘目录」。
+
+        ★ v1.19.1 下载器发现原目录写不进会自动改存备用目录，
+          last_save_dir_used 记的是真目录。状态列必须跟它对齐，
+          否则客户按状态说「已下载」，去原目录却找不到文件。
+        """
+        actual = getattr(self.downloader, "last_save_dir_used", None)
+        return Path(actual or self.dir_edit.text().strip() or ".")
+
+    def _set_row_status(self, r: int):
+        """刷新单行的「状态」格：已下载 / 未下载（演示行显示 —）。"""
+        if r < 0 or r >= self.table.rowCount():
+            return
+        video = self._videos[r] if r < len(self._videos) else None
+        if video is None:
+            txt = "—"
+        else:
+            txt = "已下载" if video_is_downloaded(video, self._save_dir_for_status()) else "未下载"
+        it = QTableWidgetItem(txt)
+        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 不写死颜色：深浅主题的文字色交给 QSS 统一管（品牌门禁会查色板）
+        self.table.setItem(r, 4, it)
+
+    def _refresh_all_status(self):
+        """目录变化 / 下载完成后，整表重算状态。"""
+        for r in range(self.table.rowCount()):
+            self._set_row_status(r)
+
+    def _refresh_one_video_status(self, video):
+        """逐条下载完成后，只刷新这一条对应的行（按对象身份定位）。
+
+        ★ 用 `is` 身份匹配而不是 video_id 相等：同一 id 可能在列表里重复
+          出现，用相等会刷错行；下载回调带回的就是同一个对象引用。
+        """
+        if video is None:
+            return
+        for r, v in enumerate(self._videos):
+            if v is video:
+                self._set_row_status(r)
+                return
 
     def _clear_list(self):
         """清空待下载列表：二次确认 → 清空 → 明确反馈清掉了几条。"""

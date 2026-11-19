@@ -65,26 +65,36 @@ def is_logged_in(settings: dict, platform: str = PLATFORM) -> bool:
     return bool(names & set(_COOKIE_NAMES))
 
 
-def remote_override() -> bool | None:
+# ★ 一次启动只拉一次云端开关（2026-11-19）：启动路径里 require_login_enabled()
+#   会被调用两次（app.py 判门一次、ensure_login() 内部再判一次），旧实现每次都
+#   同步发一个 3 秒超时的 HTTP 请求 —— 网络差时白等 6 秒，客户感知「双击后卡住」。
+#   云端开关本就是启动期常量，缓存一次结果即可；force=True 可显式刷新。
+_REMOTE_CACHE: dict = {"value": ..., "at": 0.0}   # ... = 哨兵，表示还没拉过
+
+
+def remote_override(force: bool = False) -> bool | None:
     """拉取云端保险丝；返回 True/False 表示云端明确要求，None 表示没拉到。
 
-    任何异常都返回 None —— 断网客户绝不能被这道门挡住。
+    结果按进程缓存（一次启动只发一次请求）。任何异常都返回 None —— 断网
+    客户绝不能被这道门挡住。force=True 用于设置页手动重判，绕过缓存。
     """
+    import time as _time
+    if not force and _REMOTE_CACHE["value"] is not ...:
+        return _REMOTE_CACHE["value"]
+    value: bool | None = None
     try:
         import httpx
         with httpx.Client(timeout=REMOTE_TIMEOUT, follow_redirects=True) as c:
             r = c.get(REMOTE_GATE_URL)
-        if r.status_code != 200:
-            return None
-        data = json.loads(r.text)
-        if not isinstance(data, dict):
-            return None
-        v = data.get("require_login")
-        if isinstance(v, bool):
-            return v
+        if r.status_code == 200:
+            data = json.loads(r.text)
+            if isinstance(data, dict) and isinstance(data.get("require_login"), bool):
+                value = data["require_login"]
     except Exception:                                   # noqa: BLE001
-        return None
-    return None
+        value = None
+    _REMOTE_CACHE["value"] = value
+    _REMOTE_CACHE["at"] = _time.time()
+    return value
 
 
 def require_login_enabled(ctx, use_remote: bool = True) -> bool:

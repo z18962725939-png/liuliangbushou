@@ -379,6 +379,39 @@ def _bad_windows_name(name: str) -> str:
     return ""
 
 
+def video_file_path(video, save_dir: Path) -> tuple[Path, str]:
+    """算出一个视频「将会落到」的路径 —— 下载行为的唯一命名口径。
+
+    ★ 2026-11-19：下载页要在列表里显示「是否已下载」，判断必须与
+      `_download_video_file_once` 真正跳过下载时用的文件名**完全同源**。
+      以前这段命名规则只写在下载函数里，界面若照着字面另抄一遍，
+      一旦命名规则改动（如 v1.24.6 的 _video_stem 就与这里不同），
+      就会出现「列表说没下、点下载却跳过」的错位。所以抽成单一函数：
+      下载器自己调它，界面也调它，从此不可能漂移。
+
+    返回 (最终路径, 改名说明)。改名说明为 "" 表示文件名原样可用。
+    """
+    # getattr 兜底：界面状态刷新拿到的可能是外部传入的轻量对象（如门禁用
+    # SimpleNamespace），缺字段时按空串处理，绝不让「刷新状态」把整页带崩。
+    author = _safe_filename(getattr(video, "author", "") or "", 30) or "unknown"
+    desc = _safe_filename(getattr(video, "desc", "") or "", 50)
+    filename = f"{author}_{desc}_{getattr(video, 'video_id', '')}.mp4"
+    save_path = save_dir / filename
+    # 文件名本身会让 open() 失败的（超长/保留名/结尾点号），换短名
+    return VideoDownloader._prepare_path(save_dir, save_path, video.video_id)
+
+
+def video_is_downloaded(video, save_dir) -> bool:
+    """这个视频在给定目录里是否已有完整文件（下载器跳过的同一判据）。"""
+    if video is None or not save_dir:
+        return False
+    path, _ = video_file_path(video, Path(save_dir))
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 class VideoDownloader:
     """Download no-watermark videos from Douyin."""
 
@@ -2670,13 +2703,9 @@ class VideoDownloader:
         #   以前没有这一步，客户只能看到 4 条「保存目录不可写」然后自己找设置。
         save_dir, dir_note = self._resolve_save_dir(subdir)
 
-        author = _safe_filename(video.author, 30) or "unknown"
-        desc = _safe_filename(video.desc, 50)
-        filename = f"{author}_{desc}_{video.video_id}.mp4"
-        save_path = save_dir / filename
-
-        # 文件名本身会让 open() 直接失败的（超长/保留名/结尾点号），换短名
-        save_path, name_note = self._prepare_path(save_dir, save_path, video.video_id)
+        # ★ 2026-11-19：命名口径抽成模块级 video_file_path，下载页的
+        #   「是否已下载」状态列调的是同一个函数，杜绝两套规则漂移。
+        save_path, name_note = video_file_path(video, save_dir)
 
         # Skip if already downloaded
         if save_path.exists() and save_path.stat().st_size > 0:

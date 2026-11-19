@@ -677,6 +677,11 @@ class Worker(QThread):
     log = Signal(str)
     done = Signal(object)
     error = Signal(str)
+    # ★ 逐条完成事件（2026-11-19）：批量任务里每完成一个条目就发一次，
+    #   让界面能在任务**进行中**累加计数，而不是等整批 done 才一次性跳数。
+    #   payload 由各任务自己定（下载页用 (video, ok)），基类不解释内容。
+    #   加信号是纯增量，其他页面不 connect 就完全不受影响。
+    item_done = Signal(object)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -703,6 +708,10 @@ class Worker(QThread):
 
     def emit_log(self, msg: str):
         self.log.emit(str(msg))
+
+    def emit_item(self, payload):
+        """上报一条「逐条完成」事件；界面可据此实时累加进度计数。"""
+        self.item_done.emit(payload)
 
     def run(self):
         try:

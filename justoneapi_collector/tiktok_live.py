@@ -301,12 +301,18 @@ def detect_egress(timeout: float = 4.0,
     return "", "none"
 
 
-def quick_proxy() -> str:
-    """毫秒级取一个出口候选，供启动/设置注入用（不联网验证）。
+def quick_proxy(ports: bool = True) -> str:
+    """取一个出口候选，供启动/设置注入用（不验证可用性）。
 
     只看「显式配置 → 系统代理 → 常见端口」，**不看环境变量**：那是 IDE
     注入的临时端口，填进界面只会误导客户。真正的可用性由 fetch_room 的
     多出口回退来兜底，所以这里取错也不会造成「状态未知」。
+
+    ★ ports=False（2026-11-19）：跳过「逐个 connect_ex 常见端口」。14 个端口
+      每个超时 0.25s，客户机没开代理时累计 3.5s —— 启动时在主线程调它会让
+      界面白等近 4 秒。构造 LiveMonitor 走 ports=False（只读注册表，毫秒级），
+      端口扫描交给后台线程补扫回填；显式配置和系统代理两条路是同步的，不受
+      影响（客户最常见的 Clash「系统代理」场景零延迟拿到）。
     """
     explicit = normalize_proxy(os.environ.get("TIKTOK_LIVE_PROXY") or "")
     if explicit:
@@ -314,6 +320,8 @@ def quick_proxy() -> str:
     sys_p = system_proxy()
     if sys_p:
         return sys_p
+    if not ports:
+        return ""
     for port in _COMMON_PROXY_PORTS:
         if _port_open(port):
             return f"http://127.0.0.1:{port}"

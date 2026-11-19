@@ -264,7 +264,7 @@ class DramaPage(QWidget):
     def _download_bundle(self):
         # ★ 按钮不禁用，重复点要给话说（家规：禁用按钮=烂门禁，点了没反应像坏了）
         if self._busy:
-            self.status.set("组件正在下载中，不用重复点。")
+            self.status.setText("组件正在下载中，不用重复点。")
             return
         self._busy = True
         self.dl_bar.setVisible(True)
@@ -411,10 +411,10 @@ class DramaPage(QWidget):
             t.setItem(n, 2, QTableWidgetItem(str(row.get("episode_count") or 0)))
             t.setItem(n, 3, QTableWidgetItem(str(row.get("status") or "")))
         if not self._projects:
-            self.status.set("还没有剧集项目。点「新增剧集」，"
+            self.status.setText("还没有剧集项目。点「新增剧集」，"
                             "选一个装着整部剧的文件夹（文件夹名就是剧名）。")
         else:
-            self.status.set(f"共 {len(self._projects)} 部剧")
+            self.status.setText(f"共 {len(self._projects)} 部剧")
         # 默认选第一行，集列表跟着亮
         if self._projects:
             t.selectRow(0)
@@ -453,15 +453,15 @@ class DramaPage(QWidget):
         w = Worker(job)
         connect_guarded(w.done, self._on_new_done, label="新增剧集完成")
         connect_guarded(w.error, self._rpc_error, label="新增剧集失败")
-        self.status.set("正在扫描剧集…")
+        self.status.setText("正在扫描剧集…")
         w.start()
 
     def _on_new_done(self, ret):
         if ret.get("dupe"):
-            self.status.set(f"这个文件夹已经建过剧集了（剧名：{ret.get('name')}）")
+            self.status.setText(f"这个文件夹已经建过剧集了（剧名：{ret.get('name')}）")
             append_log(self.log, "重复建项已跳过")
         else:
-            self.status.set("剧集已建好，集也扫完了")
+            self.status.setText("剧集已建好，集也扫完了")
             append_log(self.log, "新增剧集完成")
         self._refresh_projects()
 
@@ -533,7 +533,7 @@ class DramaPage(QWidget):
         connect_guarded(w.done, lambda _r: self._load_episodes(),
                         label="扫描完成")
         connect_guarded(w.error, self._rpc_error, label="扫描失败")
-        self.status.set("正在扫描集…")
+        self.status.setText("正在扫描集…")
         w.start()
 
     # ── 分析 ──────────────────────────────────────────────────
@@ -576,23 +576,23 @@ class DramaPage(QWidget):
         connect_guarded(w.progress, self._on_job_progress, label="分析进度")
         connect_guarded(w.done, self._on_analyze_done, label="分析完成")
         connect_guarded(w.error, self._rpc_error, label="分析失败")
-        self.status.set("正在分析…先转写，再找场景和冲突点，几十集会比较久")
+        self.status.setText("正在分析…先转写，再找场景和冲突点，几十集会比较久")
         w.start()
 
     def _on_analyze_done(self, ret):
         state = (ret or {}).get("state")
         # 成功态是 completed（服务端 infra/jobs.py 的字面量），不是 done
         if state == "completed":
-            self.status.set("分析完成，可以生成成片了")
+            self.status.setText("分析完成，可以生成成片了")
             append_log(self.log, "分析完成")
             self._load_episodes()
             self._load_works()
         elif state == "timeout":
-            self.status.set("分析超时了（超过 2 小时）。可以分几集重跑一次")
+            self.status.setText("分析超时了（超过 2 小时）。可以分几集重跑一次")
             append_log(self.log, "分析超时")
         else:
             job = (ret or {}).get("job") or {}
-            self.status.set(f"分析没跑完：{job.get('message') or state}")
+            self.status.setText(f"分析没跑完：{job.get('message') or state}")
             append_log(self.log, f"分析失败：{job.get('message') or state}")
         self._load_episodes()
 
@@ -669,31 +669,31 @@ class DramaPage(QWidget):
         connect_guarded(w.progress, self._on_job_progress, label="导出进度")
         connect_guarded(w.done, self._on_export_done, label="导出完成")
         connect_guarded(w.error, self._rpc_error, label="导出失败")
-        self.status.set("正在出成片…")
+        self.status.setText("正在出成片…")
         w.start()
 
     def _on_export_done(self, ret):
         ret = ret or {}
         if ret.get("ok"):
-            self.status.set("成片已生成，点「打开成片目录」看成品")
+            self.status.setText("成片已生成，点「打开成片目录」看成品")
             append_log(self.log, "成片导出完成")
             self._load_works()
         else:
             why = ret.get("reason") or (ret.get("job") or {}).get("message") \
                 or ret.get("state")
-            self.status.set(f"成片没出来：{why}")
+            self.status.setText(f"成片没出来：{why}")
             append_log(self.log, f"导出失败：{why}")
 
     # ── 通用回调 ──────────────────────────────────────────────
 
     def _on_job_progress(self, pct, msg):
-        self.status.set(f"{msg or '处理中'}（{int(pct)}%）")
+        self.status.setText(f"{msg or '处理中'}（{int(pct)}%）")
 
     def _on_progress(self, payload):
         pct = payload.get("percent")
         msg = str(payload.get("message") or "")
         if pct is not None:
-            self.status.set(f"{msg}（{int(pct)}%）" if msg else f"{int(pct)}%")
+            self.status.setText(f"{msg}（{int(pct)}%）" if msg else f"{int(pct)}%")
 
     def _on_logline(self, payload):
         lv = payload.get("level")
@@ -702,7 +702,7 @@ class DramaPage(QWidget):
             append_log(self.log, f"[{lv}] {msg}")
 
     def _rpc_error(self, msg):
-        self.status.set(f"操作失败：{msg}")
+        self.status.setText(f"操作失败：{msg}")
         append_log(self.log, f"失败：{msg}")
 
     def _open_outputs(self):

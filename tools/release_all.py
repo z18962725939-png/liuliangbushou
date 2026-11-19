@@ -863,6 +863,34 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             print("[中止] 窗口尺寸或独立窗口退化（窗口又被拉长 / 弹出回不来），先修好再发版。")
             return 1
 
+        # ★ 2026-11-19 下载列表「是否已下载」状态列：守的是状态显示与
+        #   下载器跳过判据同源。纯显示问题编译/冒烟抓不到 —— 只能断言
+        #   命名函数是单一来源、下载器确实调它、三处刷新接线都在。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_download_status.py")],
+                      "下载状态列（命名同源 / 判据 / 刷新接线 / 离屏行为）")
+        if code != 0:
+            print("[中止] 下载状态列退化（状态与实际下载行为可能对不上），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-19 多博主批量采集：客户问「能不能同时添加多位博主」。
+        #   底层浏览器登录态只能串行，钉住去重/失败隔离/进度/付费闸门 —— 这些
+        #   静默退化编译和冒烟都抓不到。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_blogger_multi.py")],
+                      "多博主批量采集（串行 / 去重 / 失败隔离 / 进度 / 付费闸门）")
+        if code != 0:
+            print("[中止] 多博主批量采集退化（并发抢登录态 / 不去重 / 白嫖采集接口），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-19 启动体验：客户反馈「每次打开闪空框、卡几秒」。真机抓到
+        #   quick_proxy 构造期扫 14 个端口白等 3.5s + 云端开关重复请求 + 默认
+        #   小窗闪现 + drama_page 17 处 status.set 异常。钉住端口延迟 / 缓存 /
+        #   启动画面 / StatusLine 用法 —— 这类问题编译和冒烟都抓不到。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_startup.py")],
+                      "启动体验（端口延迟 / 开关缓存 / 启动画面 / StatusLine）")
+        if code != 0:
+            print("[中止] 启动体验退化（空框闪 / 久等 / 启动刷新抛异常），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")
