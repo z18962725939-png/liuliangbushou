@@ -11,7 +11,7 @@
 ;  手工编译：  ISCC.exe installer_free.iss
 ; ======================================================================
 #define MyAppName "流量捕手免费版"
-#define MyAppVersion "1.28.9"
+#define MyAppVersion "1.28.11"
 #define MyAppPublisher "流量捕手工作室"
 #define MyAppExeName "流量捕手免费版.exe"
 
@@ -19,14 +19,14 @@
 ; ★ 免费版独立 AppId，必须和完整版的 5BDDBD5C-... 不同，且发布后不许改。
 AppId={{A7F3C1D9-4E2B-4F8A-9C56-2D8B7E1A5C93}}
 AppName=流量捕手免费版
-AppVersion=1.28.9
-AppVerName=流量捕手免费版 1.28.9
+AppVersion=1.28.11
+AppVerName=流量捕手免费版 1.28.11
 AppPublisher=流量捕手工作室
 AppCopyright=Copyright © 2026 流量捕手工作室
 DefaultDirName={autopf}\流量捕手免费版
 DefaultGroupName=流量捕手免费版
 OutputDir=installer_output
-OutputBaseFilename=流量捕手免费版_Setup_v1.28.9
+OutputBaseFilename=流量捕手免费版_Setup_v1.28.11
 SetupIconFile=build\app_icon.ico
 Compression=lzma2/max
 SolidCompression=yes
