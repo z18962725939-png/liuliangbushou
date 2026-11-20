@@ -47,6 +47,10 @@ PAGE_FEATURE: dict[str, tuple[str, str]] = {
     # 短剧解析：把客户给的短剧链接/文本解析出镜头与时间线，同属 auto 策略，
     # 与「短剧成片」是一对上下游入口（解析 → 成片），各自独立页面。
     "短剧解析": ("drama_parse", "drama_parse_page"),
+    # 微信聊天整理：纯本地解析 ZIP + 写笔记，零边际成本，auto 策略。
+    "微信聊天整理": ("wechat_chat", "wechat_chat_page"),
+    # 见舟工作台：只对接用户本机的见舟实例，零边际成本，auto 策略。
+    "见舟工作台": ("jianzhou_bridge", "jianzhou_page"),
 }
 
 # 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报
@@ -55,9 +59,11 @@ PAGE_FEATURE_EXTRA: dict[str, str] = {
 }
 
 # 不单独计费的入口页：不占功能位，免登记
-NAV_NO_FEATURE: set[str] = {"工作台", "数据趋势"}
+NAV_NO_FEATURE: set[str] = {"工作台", "数据趋势", "视频号解析"}
 # 工作台＝首页总览，只是其它功能的入口；
 # 数据趋势＝本地历史记录的查看页，属于基础能力（老客户升级即可用），不单独计费
+# 视频号解析＝走免费的 video.zacao.top（作者自己的 key，不从客户扣），
+# 与「视频下载」同一条链路、同样不占功能位、不接付费闸门。
 
 PASSED: list[str] = []
 FAILED: list[str] = []

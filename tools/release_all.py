@@ -891,6 +891,42 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             print("[中止] 启动体验退化（空框闪 / 久等 / 启动刷新抛异常），先修好再发版。")
             return 1
 
+        # ★ 2026-11-20 微信聊天整理：新增纯本地页面，解析微信合并转发 ZIP →
+        #   Obsidian 笔记 / 文件夹 / 剪贴板。钉住真实 TXT 格式解析、ZIP 安全
+        #   边界、三种出口、以及新增页的接入清单（漏一项打包后就静默失效）。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_wechat_archive.py")],
+                      "微信聊天整理（解析 / 安全 / 出口 / 接入清单）")
+        if code != 0:
+            print("[中止] 微信聊天整理退化（解析失灵 / 路径穿越 / 清单漏登记），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-20 见舟工作台桥接：把独立的本机 Web 工作台接进软件，
+        #   只做 /healthz 探测 + 内容雷达手动线索推送，不复制上游代码。
+        #   钉住「只连本机 / 禁代理 / 失败关闭」三条安全边界与新增页清单。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_jianzhou_bridge.py")],
+                      "见舟工作台桥接（本机边界 / 推送 / 接入清单）")
+        if code != 0:
+            print("[中止] 见舟桥接退化（可能误连公网 / 推送失灵 / 清单漏登记），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-20 见舟深度内嵌：上游整套（FastAPI 后端 + Vue3 前端）
+        #   随包分发，同进程启动 + QWebEngineView 内嵌显示。钉住 vendor 完整、
+        #   3.10 语法兼容、端到端 HTTP、生命周期、主题跟随与打包 datas。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_jianzhou_embed.py")],
+                      "见舟深度内嵌（vendor / 生命周期 / 内嵌页 / 打包）")
+        if code != 0:
+            print("[中止] 见舟内嵌退化（vendor 缺失 / 服务起不来 / 前端 404 / 漏打包），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-20 视频号解析页：粘视频号链接 → 作者/标题/封面/直链，走
+        #   免费 media_parser（不占功能位、不接付费闸门）。钉住 Worker 启动
+        #   （漏 .start() 点了没反应）、免费链路不混付费、新增页 13 处接入清单。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_wechat_channels.py")],
+                      "视频号解析（免费链路 / Worker / 接入清单 / 离屏冒烟）")
+        if code != 0:
+            print("[中止] 视频号解析退化（点了没反应 / 混付费链路 / 清单漏登记），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")

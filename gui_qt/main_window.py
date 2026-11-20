@@ -19,6 +19,7 @@ from gui_qt.pages.drama_page import DramaPage
 from gui_qt.pages.drama_parse_page import DramaParsePage
 from gui_qt.pages.geo_page import GeoPage
 from gui_qt.pages.home_page import HomePage
+from gui_qt.pages.jianzhou_page import JianzhouPage
 from gui_qt.pages.keyword_page import KeywordPage
 from gui_qt.pages.live_page import LivePage
 from gui_qt.pages.report_page import ReportPage
@@ -28,6 +29,8 @@ from gui_qt.pages.topic_page import TopicPage
 from gui_qt.pages.transcribe_page import TranscribePage
 from gui_qt.pages.trend_page import TrendPage
 from gui_qt.pages.video_download_page import VideoDownloadPage
+from gui_qt.pages.wechat_channels_page import WechatChannelsPage
+from gui_qt.pages.wechat_chat_page import WechatChatPage
 from gui_qt.subwindow import SubWindow
 from gui_qt.pages.watch_page import WatchPage
 from gui_qt.theme import accent_color, nav_active_icon_color, nav_text_color
@@ -44,10 +47,10 @@ from gui_qt.widgets.motion import fade_in, stagger
 NAV_GROUPS = [
     ("开始", ["工作台"]),
     # 短剧成片排在「视频下载」之后：下载拿素材 → 剪辑出成片，是一条上下游链路
-    ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "短剧解析", "短剧成片"]),
+    ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片"]),
     ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
     ("更多工具", ["数据采集", "批量采集", "直播监控", "GEO 监测", "报告",
-                  "音视频转文本"]),
+                  "音视频转文本", "微信聊天整理", "见舟工作台"]),
     ("设置", ["设置"]),
 ]
 
@@ -91,6 +94,7 @@ _PAGE_CLASS = {
     "关键词抓取": KeywordPage,
     "批量采集": BatchPage,
     "视频下载": VideoDownloadPage,
+    "视频号解析": WechatChannelsPage,
     "直播监控": LivePage,
     "选题挖掘": TopicPage,
     "竞品体检": CompetitorPage,
@@ -103,6 +107,8 @@ _PAGE_CLASS = {
     "短剧成片": DramaPage,
     "短剧解析": DramaParsePage,
     "音视频转文本": TranscribePage,
+    "微信聊天整理": WechatChatPage,
+    "见舟工作台": JianzhouPage,
     "设置": SettingsPage,
 }
 
@@ -354,6 +360,24 @@ def _tune_tables(page: QWidget) -> None:
 #     按钮，也不要挂一个点下去报错的按钮。
 #   · 回调也支持 "goto:页面名"，用于「数据的来源在别的页面」这种跨页引导。
 _EMPTY_HINTS = {
+    "视频号解析": [
+        (None, "还没有解析结果",
+         "在上方粘贴视频号分享链接（一行一条），点「开始解析」，"
+         "作者、标题、封面和直链就会逐条列在这里。",
+         "填入示例", "_fill_demo"),
+    ],
+    "见舟工作台": [
+        (None, "还没有推送记录",
+         "在上方填一行「平台|标题|链接」，点「推送到见舟」，"
+         "线索就会进入见舟的内容雷达，可继续在那里拆成选题。",
+         "填入示例", "_fill_demo"),
+    ],
+    "微信聊天整理": [
+        (None, "还没有解析聊天记录",
+         "在微信里多选聊天记录 →「合并转发」→ 保存到电脑得到 .zip，"
+         "在上面选好文件点「开始解析」，消息会逐条列在这里。",
+         "选择 ZIP…", "_pick_files"),
+    ],
     # ★ v1.28.3：转录页原来用 QListWidget（自己画空态），换成状态表格后
     #   也要登记空态引导，否则全站「每张表都有空态」的规矩破一个口子。
     #   页面里另有 file_empty 提示，表格空时整体 setVisible(False)，

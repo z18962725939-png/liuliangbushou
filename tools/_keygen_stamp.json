@@ -13,7 +13,9 @@
     "geo",
     "script",
     "drama",
-    "drama_parse"
+    "drama_parse",
+    "wechat_chat",
+    "jianzhou_bridge"
   ],
   "backfill": {
     "keyword": "auto",
@@ -21,7 +23,9 @@
     "geo": "deny",
     "script": "auto",
     "drama": "auto",
-    "drama_parse": "auto"
+    "drama_parse": "auto",
+    "wechat_chat": "auto",
+    "jianzhou_bridge": "auto"
   },
-  "built_at": "2026-11-15 14:57:51"
+  "built_at": "2026-11-20 22:13:08"
 }

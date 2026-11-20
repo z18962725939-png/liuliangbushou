@@ -135,6 +135,8 @@ FEATURES: dict[str, str] = {
     "script": "短视频文案仿写",
     "drama": "短剧成片",
     "drama_parse": "短剧解析",
+    "wechat_chat": "微信聊天整理",
+    "jianzhou_bridge": "见舟工作台桥接",
 }
 ALL_FEATURES = tuple(FEATURES.keys())
 
@@ -161,6 +163,12 @@ FEATURE_BACKFILL: dict[str, str] = {
     # 但那会让已售出的老授权码用不了本页，必须给老客户补发新码。
     "drama": "auto",
     "drama_parse": "auto",
+    # 微信聊天整理：全部在本机处理（解析 ZIP + 写 Markdown），不联网、
+    # 不吃 JustOneAPI 额度、零边际成本，随付费套餐赠送，老码自动获得。
+    "wechat_chat": "auto",
+    # 见舟桥接：只探测本机服务 + 推送线索到用户自己的见舟实例，不消耗
+    # JustOneAPI 额度、不产生我方成本，随付费套餐赠送，老码自动获得。
+    "jianzhou_bridge": "auto",
 }
 
 # 首批功能位（v1.0 起就随任意套餐售出）。

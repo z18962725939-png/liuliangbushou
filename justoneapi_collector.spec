@@ -58,6 +58,11 @@ datas = [
     (str(PKG_ROOT / "platforms"), "justoneapi_collector/platforms"),
     # PySide6 界面主题（QSS 非 Python 文件，需显式收集）
     (str(PROJECT_ROOT / "gui_qt" / "styles"), "gui_qt/styles"),
+    # 2026-11-20 见舟工作台整套内嵌：后端 45 个 py + Vue3 免构建前端。
+    # 运行时从 _MEIPASS/vendor/jianzhou 加载（见 jianzhou_host._VENDOR）。
+    # 用 datas 原样搬运而非 py 模块分析，避免上游大量动态 import 漏打。
+    (str(PROJECT_ROOT / "vendor" / "jianzhou" / "app"), "vendor/jianzhou/app"),
+    (str(PROJECT_ROOT / "vendor" / "jianzhou" / "frontend"), "vendor/jianzhou/frontend"),
 ]
 
 # 自带 CPU 转写引擎（约 2 MB）：用户打开就能转写，不用先联网下载引擎包。
@@ -192,6 +197,24 @@ hiddenimports = [
     "gui_qt.pages.watch_page",
     "gui_qt.pages.report_page",
     "gui_qt.pages.video_download_page",
+    # 2026-11-20 视频号解析（新增页；走免费 media_parser，不占功能位）。
+    "gui_qt.pages.wechat_channels_page",
+    # 2026-11-20 微信聊天整理（新增页 + 纯本地解析/导出模块，显式登记防裁）。
+    "gui_qt.pages.wechat_chat_page",
+    "justoneapi_collector.wechat_archive",
+    # 2026-11-20 见舟工作台深度内嵌（新页 + 宿主 + 桥接）。
+    "gui_qt.pages.jianzhou_page",
+    "justoneapi_collector.jianzhou_bridge",
+    "justoneapi_collector.jianzhou_host",
+    "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore",
+    # 见舟后端运行时依赖（app/ 打在 datas 里，不走 PyInstaller 自动分析）
+    "fastapi", "fastapi.responses", "starlette", "starlette.responses",
+    "starlette.staticfiles", "starlette.middleware", "pydantic",
+    "pydantic_core", "uvicorn", "uvicorn.config", "uvicorn.server",
+    "uvicorn.protocols", "uvicorn.protocols.http", "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl", "uvicorn.loops", "uvicorn.loops.auto",
+    "uvicorn.lifespan", "uvicorn.lifespan.on", "uvicorn.lifespan.off",
+    "multipart", "python_multipart", "annotated_types", "typing_inspection",
     "gui_qt.pages.comment_page",
     "gui_qt.pages.geo_page",
     # v1.26.0 短剧成片（DramaClip 剪辑引擎）。

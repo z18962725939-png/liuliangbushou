@@ -89,7 +89,7 @@ print("2) 功能一个都没丢（改导航不能弄丢入口）")
 EXPECTED = ["数据采集", "关键词抓取", "批量采集", "视频下载", "直播监控",
             "选题挖掘", "竞品体检", "评论区截流", "GEO 监测", "复盘监控",
             "报告", "文案仿写", "音视频转文本", "数据趋势", "设置",
-            "短剧成片"]
+            "短剧成片", "微信聊天整理", "见舟工作台", "视频号解析"]
 missing = [p for p in EXPECTED if p not in all_pages]
 check("原有入口全在导航里（一个都没丢）", not missing, f"丢了：{missing}")
 check("导航项没有重复", len(all_pages) == len(set(all_pages)),
