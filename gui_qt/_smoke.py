@@ -17,18 +17,6 @@ app = QApplication(sys.argv)
 from gui_qt.theme import apply_theme  # noqa: E402
 apply_theme(app, "light")
 
-# ★ 见舟工作台在页面构造期会 _boot() 起同进程 uvicorn 守护线程 + 加载
-#   QWebEngineView。无头冒烟只验证「21 个页面都能构建、不抛异常」，不需要
-#   真起服务——服务的真起停由 _validate_jianzhou_embed.py 单独验证。
-#   若在冒烟里起服务，daemon 线程与 WebEngine 子进程会在解释器收尾阶段互抢，
-#   随机触发 0xC0000409 栈溢出（发版被假失败误拦）。这里在导入主窗口前
-#   先把见舟页的 _boot 置空，绕开服务启动，保留界面构建校验。
-try:
-    import gui_qt.pages.jianzhou_page as _jz_page
-    _jz_page.JianzhouPage._boot = lambda self: None
-except Exception:                                          # noqa: BLE001
-    pass
-
 from gui_qt.pages._base import AppContext  # noqa: E402
 from gui_qt.main_window import MainWindow, NAV_GROUPS  # noqa: E402
 
@@ -51,15 +39,6 @@ window._toggle_theme()
 
 print(f"OFFSCREEN_BUILD_OK: 主窗口 + 侧边导航 + 全部 {stack.count()} 个页面构建通过（演示模式）")
 
-# ★ 见舟工作台内嵌了同进程 uvicorn 守护线程 + QWebEngineView。
-#   无头冒烟构造了全部页面（含见舟页），它在演示模式下也会 _boot 起服务。
-#   进程退出前必须停掉服务并让窗口析构，否则 daemon 线程与 WebEngine 子进程
-#   在解释器收尾阶段互抢，触发 0xC0000409 栈溢出（冒烟假失败、发版被误拦）。
-try:
-    from justoneapi_collector import jianzhou_host
-    jianzhou_host.shutdown()
-except Exception:                                          # noqa: BLE001
-    pass
 window.close()
 app.processEvents()
 sys.exit(0)

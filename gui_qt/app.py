@@ -214,19 +214,6 @@ def run() -> None:
         # 未激活授权的用户也会检查 —— 授权过期的客户同样要能收到修复更新。
         QTimer.singleShot(1500, lambda: maybe_check_update(window, ctx))
 
-        # ★ 见舟工作台深度内嵌：同进程起了 uvicorn 守护线程 + QWebEngineView。
-        #   软件正常退出时必须停掉内嵌服务，否则线程悬空、端口占用，
-        #   极端情况下进程析构阶段崩溃（0xC0000409）。aboutToQuit 在 Qt 事件
-        #   循环结束、窗口销毁前触发，是清理服务的最可靠时机。
-        def _shutdown_embedded():
-            try:
-                from justoneapi_collector import jianzhou_host
-                jianzhou_host.shutdown()
-            except Exception:                               # noqa: BLE001
-                pass
-
-        app.aboutToQuit.connect(_shutdown_embedded)
-
         sys.exit(app.exec())
     except SystemExit:
         raise

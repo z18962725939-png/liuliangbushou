@@ -49,8 +49,6 @@ PAGE_FEATURE: dict[str, tuple[str, str]] = {
     "短剧解析": ("drama_parse", "drama_parse_page"),
     # 微信聊天整理：纯本地解析 ZIP + 写笔记，零边际成本，auto 策略。
     "微信聊天整理": ("wechat_chat", "wechat_chat_page"),
-    # 见舟工作台：只对接用户本机的见舟实例，零边际成本，auto 策略。
-    "见舟工作台": ("jianzhou_bridge", "jianzhou_page"),
 }
 
 # 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报

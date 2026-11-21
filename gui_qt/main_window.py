@@ -19,7 +19,6 @@ from gui_qt.pages.drama_page import DramaPage
 from gui_qt.pages.drama_parse_page import DramaParsePage
 from gui_qt.pages.geo_page import GeoPage
 from gui_qt.pages.home_page import HomePage
-from gui_qt.pages.jianzhou_page import JianzhouPage
 from gui_qt.pages.keyword_page import KeywordPage
 from gui_qt.pages.live_page import LivePage
 from gui_qt.pages.report_page import ReportPage
@@ -50,7 +49,7 @@ NAV_GROUPS = [
     ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片"]),
     ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
     ("更多工具", ["数据采集", "批量采集", "直播监控", "GEO 监测", "报告",
-                  "音视频转文本", "微信聊天整理", "见舟工作台"]),
+                  "音视频转文本", "微信聊天整理"]),
     ("设置", ["设置"]),
 ]
 
@@ -108,7 +107,6 @@ _PAGE_CLASS = {
     "短剧解析": DramaParsePage,
     "音视频转文本": TranscribePage,
     "微信聊天整理": WechatChatPage,
-    "见舟工作台": JianzhouPage,
     "设置": SettingsPage,
 }
 
@@ -364,12 +362,6 @@ _EMPTY_HINTS = {
         (None, "还没有解析结果",
          "在上方粘贴视频号分享链接（一行一条），点「开始解析」，"
          "作者、标题、封面和直链就会逐条列在这里。",
-         "填入示例", "_fill_demo"),
-    ],
-    "见舟工作台": [
-        (None, "还没有推送记录",
-         "在上方填一行「平台|标题|链接」，点「推送到见舟」，"
-         "线索就会进入见舟的内容雷达，可继续在那里拆成选题。",
          "填入示例", "_fill_demo"),
     ],
     "微信聊天整理": [
@@ -724,6 +716,13 @@ class MainWindow(QMainWindow):
                 gt.setToolTip(f"打开「{group}」")
             nv.addWidget(body)
 
+            # ★ 单功能分组（开始/设置）不画分组头按钮（2026-11-21）：
+            #   这两组各只有一个功能，分组头「设置」+ 子项「设置」连着出现两次，
+            #   客户截图里就是这个重复。现在只保留真正的子项按钮入口：
+            #   分组头对象照建（手风琴 / 选中态 / Ctrl+K 都依赖它），只是不加进布局。
+            hide_head = group in _NAV_PINNED and len(items) == 1
+            if hide_head:
+                gt.setVisible(False)
             for name in items:
                 btn = QPushButton(name)
                 btn.setObjectName("NavItem")

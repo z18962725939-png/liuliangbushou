@@ -261,7 +261,7 @@ QPushButton#EmptyAction:pressed {
    深色下「标签感」靠灰度差拉开：正文图标 #9AA4B2，hover 提亮到白。
    箭头同样由 main_window 画上去，吃当前主题色。
    --------------------------------------------------------------------------- */
-QPushButton#NavGroup {
+QPushButton#NavRoot {
     background: transparent;
     border: none;
     border-radius: 6px;
@@ -272,8 +272,14 @@ QPushButton#NavGroup {
     letter-spacing: .5px;
     text-align: left;
 }
-QPushButton#NavGroup:hover {
+QPushButton#NavRoot:hover {
     color: #F2F4F8;
+}
+/* 当前所在的一级分组：靠文字提亮 + 字重区分，不画背景框（保持标签感） */
+QPushButton#NavRoot[current="true"] {
+    border: none;
+    color: #F2F4F8;
+    font-weight: 700;
 }
 QFrame#NavGroupBody, QWidget#NavGroupBody {
     background: transparent;

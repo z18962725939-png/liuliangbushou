@@ -288,7 +288,7 @@ QPushButton#EmptyAction:pressed {
    「展开 / 收起」的小箭头不走 QSS：QPushButton 不支持 ::indicator，
    由 main_window._refresh_group_icon 用 chevron_icon 画上去（能跟主题色走）。
    --------------------------------------------------------------------------- */
-QPushButton#NavGroup {
+QPushButton#NavRoot {
     background: transparent;
     border: none;
     border-radius: 6px;
@@ -299,8 +299,14 @@ QPushButton#NavGroup {
     letter-spacing: .5px;
     text-align: left;
 }
-QPushButton#NavGroup:hover {
+QPushButton#NavRoot:hover {
     color: #0B0E14;
+}
+/* 当前所在的一级分组：靠文字转墨色 + 字重区分，不画背景框（保持标签感） */
+QPushButton#NavRoot[current="true"] {
+    border: none;
+    color: #0B0E14;
+    font-weight: 700;
 }
 QFrame#NavGroupBody, QWidget#NavGroupBody {
     background: transparent;
