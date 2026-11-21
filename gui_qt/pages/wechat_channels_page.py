@@ -70,8 +70,13 @@ def _parse_task(worker, links: list[str]):
     return {"total": total, "ok": ok, "fail": total - ok}
 
 
-def _download_task(worker, downloader, videos: list[VideoInfo], save_dir: str):
-    """下载选中项：复用视频下载页同一套 downloader，进度逐条回传。"""
+def _download_task(worker, downloader, videos: list[VideoInfo]):
+    """下载选中项：复用视频下载页同一套 downloader，进度逐条回传。
+
+    ★ 保存目录必须在 GUI 线程就转成 Path —— 下载器内部全是 `save_dir / 文件名`，
+      传字符串进来每条都会抛 TypeError，界面却只剩「失败 N 条」（2026-11-21
+      客户截图就是这个坑）。
+    """
     def on_progress(done, total, video, path, err):
         worker.emit_progress(done * 100.0 / max(total, 1),
                              f"已下载 {done}/{total} 条")
@@ -85,6 +90,7 @@ class WechatChannelsPage(QWidget):
         super().__init__()
         self.ctx = ctx
         self._rows: list[dict] = []
+        self._downloader = None
         self.status = StatusLine("粘贴视频号链接，点「开始解析」即可", parent=self)
         self._build()
         self.apply_theme("light")
@@ -355,12 +361,21 @@ class WechatChannelsPage(QWidget):
         except Exception as exc:                          # noqa: BLE001
             self._say(f"下载器初始化失败：{exc}", "error")
             return
-        save_dir = self.dir_edit.text().strip()
-        if save_dir:
+        self._downloader = downloader
+        save_text = self.dir_edit.text().strip()
+        save_dir: Path | None = None
+        if save_text:
+            try:
+                save_dir = Path(save_text).expanduser()
+                save_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self._say(f"保存目录不可用：{exc}", "error")
+                return
+        if save_dir is not None:
             downloader.save_dir = save_dir
         self.progress.setValue(0)
         self._say(f"正在下载 {len(vids)} 条…", "idle")
-        w = Worker(_download_task, downloader, vids, save_dir)
+        w = Worker(_download_task, downloader, vids)
         self._wire_worker(w, self._on_downloaded, "下载失败", "下载")
         w.start()
 
@@ -370,7 +385,19 @@ class WechatChannelsPage(QWidget):
         fail = len(results) - ok
         self.progress.setValue(100)
         level = "ok" if ok and not fail else ("warn" if ok else "error")
-        self._say(f"下载完成：成功 {ok} 条，失败 {fail} 条", level)
+        msg = f"下载完成：成功 {ok} 条，失败 {fail} 条"
+        # ★ 失败必须带原因：客户只看到「失败 1 条」等于没说，也没法反馈。
+        reasons: list[str] = []
+        for _v, _p, err in results:
+            text = str(err or "").strip()
+            if text and text not in reasons:
+                reasons.append(text)
+        if reasons:
+            msg += "；失败原因：" + "；".join(reasons)
+        note = str(getattr(self._downloader, "last_dir_note", "") or "").strip()
+        if note and note not in msg:
+            msg += f"（{note}）"
+        self._say(msg[:400], level)
 
     # ------------------------------------------------------------------
     #  主题

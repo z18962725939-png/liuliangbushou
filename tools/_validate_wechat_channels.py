@@ -156,5 +156,24 @@ except Exception as exc:                                   # noqa: BLE001
     traceback.print_exc()
     chk("离屏冒烟", False, f"{type(exc).__name__}: {exc}")
 
+print("\n== 5. 下载目录类型与失败原因（2026-11-21 客户反馈回归）==")
+chk("保存目录先转 Path 再交给下载器",
+    "Path(save_text).expanduser()" in src and "downloader.save_dir = save_dir" in src,
+    "QLineEdit 的文本是 str，下载器内部按 Path 拼接，误传会全军覆没")
+chk("Worker 不再把字符串目录传给后台",
+    "Worker(_download_task, downloader, vids)" in src)
+chk("下载失败原因会上屏", "失败原因：" in src)
+dl_src = (ROOT / "justoneapi_collector" / "video_downloader.py").read_text(encoding="utf-8")
+chk("下载器兜底把字符串目录转 Path", "if not isinstance(self.save_dir, Path):" in dl_src)
+chk("全失败路径返回真实原因（不吞错误）", 'return None, "；".join(uniq)' in dl_src)
+chk("视频号过期直链走免费重解析", 'plat in ("weixin_channels", "weixin_mp")' in dl_src)
+try:
+    page._on_downloaded([(object(), None, "模拟失败：HTTP 404")])
+    chk("失败原因显示在状态栏",
+        "失败原因：模拟失败：HTTP 404" in page.status.text(),
+        page.status.text()[:100])
+except Exception as exc:                                   # noqa: BLE001
+    chk("失败原因上屏冒烟", False, f"{type(exc).__name__}: {exc}")
+
 print(f"\n==== 视频号解析门禁：{_PASSED}/{_PASSED + _FAILED} ====")
 sys.exit(1 if _FAILED else 0)

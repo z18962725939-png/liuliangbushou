@@ -2558,10 +2558,16 @@ class VideoDownloader:
     def _resolve_save_dir(self, subdir: str = "") -> tuple[Path, str]:
         """返回本次真正可用的保存目录；原目录不可写则自动换掉。
 
+        ★ 2026-11-21：兜底把字符串目录转成 Path。调用方（视频号解析页）
+          曾直接把 QLineEdit 的文本塞进来，导致 `str / str` TypeError。
+          页面侧已修，这里再兜一层，防止其它页面/历史配置重现同类事故。
+
         为什么要在每次下载前探：客户的 D 盘可能是移动硬盘（拔了就没了）、
         目录可能被杀软/同步盘临时锁住、也可能是上个版本以管理员身份建出来的
         只读目录。这些都不该让「下载 0 条」变成一堵墙。
         """
+        if not isinstance(self.save_dir, Path):
+            self.save_dir = Path(self.save_dir)
         base = self.save_dir / subdir if subdir else self.save_dir
         problem = self._probe(base)
         if not problem:
@@ -2641,7 +2647,9 @@ class VideoDownloader:
         """
         if not err:
             return False
-        for key in ("404", "403", "410", "空内容", "不是视频", "链接可能已过期"):
+        # 400 也收进来：视频号 finder.video.qq.com 的 token 过期后实测回 400，
+        # 换一条新直链就能救回（2026-11-21 客户反馈）。
+        for key in ("400", "404", "403", "410", "空内容", "不是视频", "链接可能已过期"):
             if key in err:
                 return True
         return False
@@ -2672,6 +2680,21 @@ class VideoDownloader:
             if not new_url or new_url == (video.no_watermark_url or ""):
                 return None
             # 只换地址、保留列表里带回来的标题/作者等元数据（文件名靠它们）
+            return replace(video, no_watermark_url=new_url)
+        # ★ 2026-11-21：视频号直链同样会过期（finder.video.qq.com 的 token
+        #   有时效）。原来会掉进下面的抖音重解析分支，拿 /sph/ 链接当抖音
+        #   作品页处理，注定失败 —— 免费解析通道本来就能处理它，直接复用。
+        if plat in ("weixin_channels", "weixin_mp"):
+            if not url:
+                return None
+            try:
+                from .media_parser import parse as _svc_parse
+                data, _r = _svc_parse(url)
+            except Exception:                           # noqa: BLE001
+                return None
+            new_url = str((data or {}).get("video_url") or "")
+            if not new_url or new_url == (video.no_watermark_url or ""):
+                return None
             return replace(video, no_watermark_url=new_url)
         if not url:
             if not vid:
@@ -2714,10 +2737,9 @@ class VideoDownloader:
         # 按视频所属平台匹配对应登录 Cookie，避免把抖音 Cookie 错用到其它平台。
         # 每个视频单独建客户端，规避多线程并发改同一共享客户端 Cookie 头的竞态。
         plat = getattr(video, "platform", "douyin") or "douyin"
-        ck = (self.cookies.get(plat) or "").strip()
-        dl_headers = dict(self._DL_HEADERS)
-        if ck:
-            dl_headers["Cookie"] = ck
+        # ★ 2026-11-21：以前这里硬编码抖音 Referer，视频号/小红书等平台全靠
+        #   _dl_headers_for() 才生效；统一走它，按平台发 Referer/Cookie。
+        dl_headers = self._dl_headers_for(plat)
 
         # ★ v1.14.3：以前只有一条地址、一次尝试，失败了界面上只剩"失败 1 条"，
         #   客户和服务方都不知道为什么（2026-10-17 客户截图正是这样）。
@@ -2761,7 +2783,7 @@ class VideoDownloader:
                     if alt_dir is not None:
                         save_dir = alt_dir
                         save_path, name_note = self._prepare_path(
-                            save_dir, save_dir / filename, video.video_id)
+                            save_dir, save_dir / save_path.name, video.video_id)
                         dir_note = alt_note
                         continue
 
@@ -2770,8 +2792,16 @@ class VideoDownloader:
                     if e not in uniq:
                         uniq.append(e)
                 return None, "；".join(uniq) + (f"（{dir_note}）" if dir_note else "")
-        # 全部失败：返回去重后的原因，让界面能说人话
+        # 全部失败：返回去重后的原因，让界面能说人话。
+        # ★ 2026-11-21：这里原先只写了 `uniq: list[str] = []` 就结束，函数
+        #   隐式返回 None → 上层 `path, err = ...` 直接 TypeError，客户只看到
+        #   「下载异常」而不是「404 / 网络错误」的真实原因。
         uniq: list[str] = []
+        for e in errors:
+            if e not in uniq:
+                uniq.append(e)
+        return None, "；".join(uniq) + (f"（{dir_note}）" if dir_note else "")
+
     @staticmethod
     def _download_candidates(url: str) -> list[str]:
         """同一个作品的可尝试播放地址，**无水印优先**。
