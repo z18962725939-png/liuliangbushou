@@ -14,8 +14,7 @@
     "script",
     "drama",
     "drama_parse",
-    "wechat_chat",
-    "jianzhou_bridge"
+    "wechat_chat"
   ],
   "backfill": {
     "keyword": "auto",
@@ -24,8 +23,7 @@
     "script": "auto",
     "drama": "auto",
     "drama_parse": "auto",
-    "wechat_chat": "auto",
-    "jianzhou_bridge": "auto"
+    "wechat_chat": "auto"
   },
-  "built_at": "2026-11-20 22:13:08"
+  "built_at": "2026-11-21 13:43:21"
 }
