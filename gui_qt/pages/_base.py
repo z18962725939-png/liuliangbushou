@@ -220,6 +220,35 @@ def connection_diagnosis() -> tuple[str, str]:
         tail += f"\n联系方式：{contact}"
     tail += f"\n本机机器码：{mid}"
 
+    # ★ 2026-11-23：默认 okdata 通道下，采集凭证是用户在「设置 → 数据服务」
+    #   自己填的 okd_ Key，授权码里的 token 只服务原 JustOneAPI 通道。
+    #   这时再让人「找服务方重发带接口凭证的授权码」是彻底误导——
+    #   客户的授权码没问题，缺的是自己那把 okdata Key。
+    try:
+        _cfg = AppContext._load_settings()
+        _provider = str(_cfg.get("api_provider", "okdata") or "okdata").strip().lower()
+        _has_okd = bool(str(_cfg.get("okdata_key") or "").strip())
+    except Exception:                                        # noqa: BLE001
+        _provider, _has_okd = "justoneapi", False
+    if _provider != "justoneapi":
+        if _has_okd:
+            return (
+                "okdata 接口连接失败",
+                "你已经在「设置 → 数据服务」填了 okdata Key，但采集接口仍连不上。\n"
+                "请确认 Key 有效、余额充足、网络能访问 okdata.online；"
+                "必要时重新复制 Key 再保存一次。\n\n"
+                "视频下载、直播录制和免费解析不受影响。\n"
+                + tail)
+        return (
+            "请先填写 okdata Key",
+            "当前数据通道是 okdata（默认），采集功能需要你自己的接口 Key，"
+            "和授权码是两回事 —— 你的授权码本身没有问题。\n\n"
+            "① 打开 okdata.online/zh/console，邮箱注册拿到 okd_ 开头的 Key；\n"
+            "② 回到软件「设置 → 数据服务」，粘进「okdata Key」并保存；\n"
+            "③ 再回来操作即可。\n\n"
+            "视频下载、直播录制、视频号/抖音免费解析都不需要这个 Key。\n"
+            + tail)
+
     if st.get("licensed"):
         return (
             "授权码里缺少采集凭证",

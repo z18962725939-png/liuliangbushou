@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from justoneapi_collector import branding, licensing      # noqa: E402
-from gui_qt.pages._base import connection_diagnosis       # noqa: E402
+from gui_qt.pages._base import AppContext, connection_diagnosis  # noqa: E402
 
 PASSED: list[str] = []
 FAILED: list[str] = []
@@ -32,6 +32,13 @@ def check(name: str, cond: bool, extra: str = "") -> bool:
 
 
 _ORIG_STATUS = licensing.status
+_ORIG_LOAD = AppContext.__dict__["_load_settings"]
+
+
+def _fake_settings(provider: str = "justoneapi", key: str = "") -> None:
+    AppContext._load_settings = lambda: {  # type: ignore[assignment]
+        "api_provider": provider, "okdata_key": key,
+    }
 
 
 def _fake_status(**over) -> None:
@@ -44,7 +51,8 @@ def _fake_status(**over) -> None:
 
 
 def main() -> int:
-    print("1) 已激活但授权码里没有采集凭证（本次客户投诉的真实场景）")
+    print("1) 已激活但授权码里没有采集凭证（原 JustOneAPI 通道的真实场景）")
+    _fake_settings("justoneapi", "")
     _fake_status(state="licensed", licensed=True, customer="某客户",
                  embedded_token="", machine_id="1234-5678-90AB-CDEF",
                  daily_quota=30, plan="标准版")
@@ -80,7 +88,26 @@ def main() -> int:
           "设置 → 授权与激活" in detail and "立即激活" in detail)
     check("带机器码", "AAAA-BBBB-CCCC-DDDD" in detail)
 
-    print("5) 健壮性")
+    print("5) ★ okdata 默认通道（v1.28.14+）：缺 Key 要引导填 Key，不许让客户换授权码")
+    _fake_status(state="licensed", licensed=True, customer="某客户",
+                 embedded_token="", machine_id="1234-5678-90AB-CDEF",
+                 daily_quota=30, plan="标准版")
+    _fake_settings("okdata", "")
+    title, detail = connection_diagnosis()
+    check("标题引导填 okdata Key", "okdata Key" in title, title)
+    check("明确授权码本身没问题", "授权码本身没有问题" in detail)
+    check("给出注册与设置步骤", "okdata.online" in detail and "数据服务" in detail)
+    check("★ 不再误导客户换授权码",
+          "重新签发" not in detail and "换掉这张" not in detail)
+    check("仍带机器码方便排查", "1234-5678-90AB-CDEF" in detail)
+
+    print("6) ★ okdata 已填 Key 但仍连不上：提示检查 Key/余额/网络")
+    _fake_settings("okdata", "okd_test123")
+    title, detail = connection_diagnosis()
+    check("标题说明是接口连接失败", "连接失败" in title, title)
+    check("提示检查 Key 与余额", "余额" in detail and "Key" in detail)
+
+    print("7) 健壮性")
     licensing.status = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
     try:
         title, detail = connection_diagnosis()
@@ -88,6 +115,7 @@ def main() -> int:
     except Exception as e:                                   # noqa: BLE001
         check("授权模块异常时也不崩", False, repr(e))
     licensing.status = _ORIG_STATUS
+    AppContext._load_settings = _ORIG_LOAD  # type: ignore[assignment]
 
     print("\n" + "=" * 60)
     print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
