@@ -498,6 +498,16 @@ class DouyinLiveStreamResolver:
             )
             final_url = str(resp.url)
             m2 = re.search(r"live\.douyin\.com/([^?/\s#]+)", final_url)
+            # ★ 2026-11-23：短链跟随重定向后落在账号主页（v.douyin.com/xxx
+            #   → www.douyin.com/user/MS4wLj...）时，过去直接掉到最后的
+            #   「无法识别的输入格式」，直播监控里主页监控因此加不上。
+            #   把 sec_uid 带回去，交给 LiveMonitor 登记成真实账号目标。
+            if not m2:
+                m_sec = re.search(r"MS4wLj[A-Za-z0-9_\-]+", final_url)
+                if m_sec:
+                    return DouyinLiveStreamInfo(
+                        False, "", "", m_sec.group(0), {}, {}, 0,
+                        "主页链接：按账号监控")
             if m2:
                 web_rid = m2.group(1)
                 info = self._with_html_fallback(

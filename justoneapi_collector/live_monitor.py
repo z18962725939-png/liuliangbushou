@@ -44,6 +44,7 @@ from typing import Callable
 from . import tiktok_live
 from .client import JustOneAPICollector
 from .douyin_live_stream import DouyinLiveStreamInfo, DouyinLiveStreamResolver
+from .douyin_live_status_cdp import DouyinHomeLiveCDP
 
 
 @dataclass
@@ -73,6 +74,9 @@ class LiveStatus:
     # ★ v1.28.5：直播间平台。"douyin"（默认，兼容旧名单）/ "tiktok"。
     #   TikTok 不走 user-profile-v3，也不走抖音 webcast/a_bogus 签名。
     platform: str = "douyin"
+    # ★ v1.28.14：在播主页上的直播入口 ID。19 位 room_id_str 是内部房间号，
+    #   拿去 webcast 解析流地址会返回「no room data」；自动录制要用 web_rid。
+    web_rid: str = ""
 
 
 def _safe_filename(text: str, max_len: int = 50) -> str:
@@ -200,7 +204,8 @@ class LiveMonitor:
 
     def __init__(self, client: JustOneAPICollector, save_dir: Path | None = None,
                  auto_record: bool = True, ffmpeg_path: str | None = None,
-                 douyin_cookie: str = "", tiktok_proxy: str | None = None):
+                 douyin_cookie: str = "", tiktok_proxy: str | None = None,
+                 cdp_fallback: bool = True):
         self.client = client
         if save_dir is None:
             desktop = Path.home() / "Desktop"
@@ -217,6 +222,10 @@ class LiveMonitor:
         # 抖音登录 Cookie（内置浏览器扫码登录得到）：带上它解析直播流更稳
         self.douyin_cookie = (douyin_cookie or "").strip()
         self._resolver = DouyinLiveStreamResolver(cookie=self.douyin_cookie)
+        # ★ 2026-11-23：付费接口失败时的免费兜底（浏览器读主页 profile 请求）。
+        #   懒加载：只有真的查状态失败才起浏览器，正常启动零开销。
+        self.cdp_fallback_enabled = bool(cdp_fallback)
+        self._home_cdp: DouyinHomeLiveCDP | None = None
         # ★ TikTok 代理：None = 自动探测（显式配置 → Windows 系统代理 →
         #   本机常见端口）；空串 = 用户明确不用代理。这里用 quick_proxy()
         #   毫秒级取候选、**不联网验证**，否则构造会在 UI 线程卡好几秒；
@@ -337,6 +346,7 @@ class LiveMonitor:
                     input_type=str(it.get("input_type") or "昵称"),
                     live_url=str(it.get("live_url") or ""),
                     note=str(it.get("note") or ""),
+                    web_rid=str(it.get("web_rid") or ""),
                     # 旧版名单没有 platform 字段：从伪 ID 反推，绝不丢目标
                     platform=str(it.get("platform") or
                                  ("tiktok" if sec_uid.startswith("tiktok:")
@@ -356,7 +366,8 @@ class LiveMonitor:
                 {"sec_uid": t.sec_uid, "nickname": t.nickname,
                  "input_type": t.input_type, "room_id": t.room_id,
                  "live_url": t.live_url, "note": t.note,
-                 "platform": t.platform}
+                 "platform": t.platform,
+                 "web_rid": getattr(t, "web_rid", "")}
                 for t in self._targets.values()
             ]}
             tmp = path.with_suffix(".json.tmp")
@@ -397,6 +408,17 @@ class LiveMonitor:
             self._resolver.set_cookie(self.douyin_cookie)
         except Exception:                   # noqa: BLE001
             pass
+        if self._home_cdp is not None:
+            try:
+                self._home_cdp.set_cookie(self.douyin_cookie)
+            except Exception:               # noqa: BLE001
+                pass
+
+    def home_cdp(self) -> DouyinHomeLiveCDP:
+        """免费兜底查询器（单例）。门禁/测试可直接替换 self._home_cdp。"""
+        if self._home_cdp is None:
+            self._home_cdp = DouyinHomeLiveCDP(cookie=self.douyin_cookie)
+        return self._home_cdp
 
     def ffmpeg_path(self) -> str:
         """Currently resolved ffmpeg path ('' when not found)."""
@@ -492,6 +514,16 @@ class LiveMonitor:
         #   （旧行为会把链接原样交给抖音 webcast，客户只看到「无法提取 web_rid」）。
         if tiktok_live.is_tiktok_input(s):
             return self._add_tiktok_target(s, note)
+
+        # ★ 2026-11-23：抖音「账号主页」监控修复。
+        # 主页长链 / 分享文本 / 纯 sec_uid 里带 MS4wLj...，过去会被下面的
+        # `[A-Za-z0-9_-]{6,}` 正则吞成 web_rid:xxx，后续按直播间查，永远
+        # 查不到状态（客户表现为「主页监控加不上/加上了也不动」）。
+        # 这类输入必须登记成**真实账号目标**，走 user-profile-v3 查状态。
+        m_sec = re.search(r"MS4wLj[A-Za-z0-9_\-]+", s)
+        if m_sec and "live.douyin.com/" not in s:
+            return self._add_sec_uid_target(m_sec.group(0), note)
+
         web_rid = ""
         nickname = ""
         # ★ 2026-11-05 客户现场「点添加监控无反应」另一半根因：添加这个动作
@@ -507,6 +539,12 @@ class LiveMonitor:
         if not web_rid:
             # 只有短链 / 主页 URL 才需要跟随重定向（联网，各段自带超时）
             info = self._resolver.resolve_auto(s)
+            # ★ 2026-11-23：短链若重定向到的是**账号主页**（不是直播间），
+            # 解析器会把 sec_uid 放在 info.sec_uid 里，这里按账号登记。
+            # 注意 getattr：旧桩/第三方 resolver 可能没有这个字段。
+            home_uid = getattr(info, "sec_uid", "") or ""
+            if home_uid.startswith("MS4wLj"):
+                return self._add_sec_uid_target(home_uid, note)
             # ★ 2026-11-06：必须用重定向得到的真 web_rid。info.room_id 是
             #   webcast 返回的真实房间号，拿它拼 live.douyin.com/<room_id>
             #   打不开，后续 check_once 会永远查不到状态（表现为「未开播」）。
@@ -536,6 +574,24 @@ class LiveMonitor:
         self._save_state()
         return True, nickname, sec_uid
 
+    def _add_sec_uid_target(self, sec_uid: str, note: str = "") -> tuple[bool, str, str]:
+        """登记真实抖音账号（sec_uid）。
+
+        ★ 绝不给这类目标写 live_url：check_once 一看到 live_url 就会走
+          `_check_by_link` 按直播间 ID 解析，账号目标会被误判成「未开播」。
+        """
+        sec_uid = (sec_uid or "").strip()
+        if not sec_uid:
+            return False, "没识别到博主 sec_uid，请粘贴完整主页链接", ""
+        if sec_uid in self._targets:
+            if note:
+                self._targets[sec_uid].note = str(note)
+        else:
+            self.add_target(sec_uid, f"博主{sec_uid[:12]}…",
+                            input_type="主页", note=note)
+        self._save_state()
+        return True, self._targets[sec_uid].nickname, sec_uid
+
     def remove_target(self, sec_uid: str):
         self._targets.pop(sec_uid, None)
         self._save_state()                  # 移除也要落盘，否则重启后目标复活
@@ -560,7 +616,63 @@ class LiveMonitor:
         resp = self.client.request("douyin-tiktok-china", "user-profile-v3",
                                    {"secUid": sec_uid})
         if not resp.success or not isinstance(resp.data, dict):
-            return None
+            # ★ 2026-11-23：过去直接 return None，界面只剩「接口未返回状态」，
+            #   客户根本不知道是**账户余额不足**（实测 code=601
+            #   INSUFFICIENT BALANCE）。这里把真实原因写进 stream_error，
+            #   界面会显示「状态未知」并把原因放进悬浮提示，绝不冒充没开播。
+            msg = str(getattr(resp, "message", "") or "").strip()
+            code = getattr(resp, "code", None)
+            if st is None:
+                st = LiveStatus(
+                    sec_uid=sec_uid, nickname="", is_live=False,
+                    live_status=0, room_id="0", avatar_url="",
+                    follower_count=0,
+                )
+                self._targets[sec_uid] = st
+            st.last_checked = time.time()
+            if "INSUFFICIENT BALANCE" in msg.upper() or code == 601:
+                base_error = ("状态检查失败：采集账户余额不足，"
+                              "请到 api.justoneapi.com 充值后重试")
+            elif getattr(self.client, "token_invalid", False):
+                base_error = "状态检查失败：API Token 无效或未激活，请到设置页更新"
+            else:
+                base_error = (
+                    f"状态检查失败：接口未返回数据（{msg or 'code=' + str(code)}）")
+
+            # ★ 2026-11-23：付费查不到时走**免费浏览器通道**兜底。
+            # 主页 profile 请求里有同名字段（live_status/room_id_str），
+            # 客户没充值也能知道有没有开播、开播了还能自动录制。
+            # 只有真实账号目标（MS4wLj...）能走这条；web_rid/TikTok 目标
+            # 原本就不走付费接口，不会到这里。
+            snap = None
+            if self.cdp_fallback_enabled and sec_uid.startswith("MS4wLj"):
+                try:
+                    snap = self.home_cdp().fetch(sec_uid)
+                except Exception as exc:                # noqa: BLE001
+                    snap = None
+                    base_error += f"（免费通道异常：{exc}）"
+            if snap is not None and getattr(snap, "ok", False):
+                st.nickname = getattr(snap, "nickname", "") or st.nickname
+                st.live_status = int(getattr(snap, "live_status", 0) or 0)
+                st.is_live = (st.live_status == 1)
+                room = str(getattr(snap, "room_id", "") or "")
+                if room and room != "0":
+                    st.room_id = room
+                web_rid = str(getattr(snap, "web_rid", "") or "")
+                if web_rid:
+                    st.web_rid = web_rid
+                st.stream_error = ""
+                if not st.is_live:
+                    st.stream_url = ""
+                    st.hls_urls = {}
+                    st.flv_urls = {}
+                st.last_checked = time.time()
+                return st
+            # 兜底也失败：保留「状态未知」语义，把两条原因都说清楚
+            if snap is not None and getattr(snap, "error", ""):
+                base_error += f"；免费通道：{snap.error}"
+            st.stream_error = base_error[:400]
+            return st
         user = resp.data.get("user", {}) or {}
         if st is None:
             st = LiveStatus(
@@ -799,6 +911,24 @@ class LiveMonitor:
             return None
 
         errors: list[str] = []
+        # ★ 2026-11-23：CDP 免费兜底从在播主页拿到 web_rid 时优先用它。
+        # 19 位 room_id_str 是内部房间号，app/web 两条路都返回「no room data」
+        # （实测），只有短数字 web_rid 能拿到真实流地址。
+        web_rid = str(getattr(st, "web_rid", "") or "")
+        if web_rid:
+            try:
+                wi = self._resolver.resolve_by_web_rid(web_rid)
+                if wi.error:
+                    errors.append(wi.error)
+                if wi.is_live and (wi.flv_pull_urls or wi.hls_pull_urls):
+                    st.hls_urls = wi.hls_pull_urls
+                    st.flv_urls = wi.flv_pull_urls
+                    st.stream_url = DouyinLiveStreamResolver.pick_best_url(wi) or ""
+                    st.stream_error = ""
+                    return st.stream_url
+            except Exception as e:                  # noqa: BLE001
+                errors.append(f"web_rid 解析异常: {e}")
+
         try:
             # 优先 app 接口（已有 room_id + sec_uid）
             info = self._resolver.resolve_by_app(st.room_id, sec_uid)

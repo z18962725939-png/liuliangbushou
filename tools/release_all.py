@@ -777,9 +777,10 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             return 1
 
         code, _ = run([PY, str(ROOT / "tools" / "_validate_live_add_fast.py")],
-                      "直播监控添加：标准链接零网络快路径")
+                      "直播监控：添加零网络快路径 / 付费失败 CDP 免费兜底")
         if code != 0:
-            print("[中止] 添加监控又退化成联网解析（客户要点完等半分钟才见反馈），先修好再发版。")
+            print("[中止] 添加监控退化成联网解析，或余额不足时不再走免费兜底"
+                  "（客户会以为主播没开播），先修好再发版。")
             return 1
 
         # ★ 2026-11-06 客户「账号正在直播、工具显示未开播」：重建时丢了整套

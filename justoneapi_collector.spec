@@ -131,6 +131,10 @@ hiddenimports = [
     # ★ 它是被 video_downloader._browser_render_resolve() 在**函数体内** import 的，
     #   静态分析扫不到 —— 不写在这里，打出来的包里解析会 100% 失败。
     "justoneapi_collector.douyin_page_resolver",
+    # ★ v1.28.14 直播监控免费兜底：付费接口查不到开播状态时，用 CDP
+    #   读主页 profile 请求拿 live_status / room_id_str / web_rid。
+    #   虽是 live_monitor 顶层静态引用，仍显式登记防打包裁掉。
+    "justoneapi_collector.douyin_live_status_cdp",
     # ★ v1.24.6 服务端解析（抖音 / 小红书 / 快手的主力解析通道）。
     #   同样是 video_downloader._media_service_resolve() 内部的函数体 import，
     #   漏写这一行的后果一模一样：源码能跑、打出来的安装包直接不解析。
