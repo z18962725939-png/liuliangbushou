@@ -564,7 +564,16 @@ class LiveMonitor:
                 elif s.isdigit():
                     web_rid = s
         if not web_rid:
-            return False, "无法从链接/ID 提取 web_rid，请检查格式", ""
+            # ★ 2026-11-23：把解析器的真实失败原因带出来，别只给一句
+            #   「请检查格式」——短链被风控导向通用落地页时，客户根本
+            #   不知道是链接失效还是自己格式不对。
+            detail = (getattr(info, "error", "") or "").strip()
+            msg = "无法从链接/ID 提取 web_rid"
+            if detail:
+                msg += f"（{detail}）"
+            else:
+                msg += "，请检查格式"
+            return False, msg, ""
 
         # 链接类主播用 web_rid 作伪 sec_uid（后续 resolve_stream_url 走 resolve_auto）
         sec_uid = f"web_rid:{web_rid}"

@@ -493,7 +493,15 @@ class DouyinLiveStreamResolver:
         try:
             resp = self._client.get(
                 s,
-                headers={"user-agent": _DEFAULT_UA},
+                # ★ 2026-11-23：短链跟随重定向必须带登录 Cookie。只带 UA 时
+                #   抖音会把请求导向通用落地页（「记录美好生活/充钻石下载APP」），
+                #   final_url 里没有 MS4wLj，主页监控就报「无法提取 web_rid」。
+                headers={
+                    "user-agent": _DEFAULT_UA,
+                    "cookie": self.cookie_header,
+                    "referer": "https://www.douyin.com/",
+                    "accept-language": "zh-CN,zh;q=0.9",
+                },
                 timeout=httpx.Timeout(12.0, connect=8.0),
             )
             final_url = str(resp.url)
@@ -504,6 +512,10 @@ class DouyinLiveStreamResolver:
             #   把 sec_uid 带回去，交给 LiveMonitor 登记成真实账号目标。
             if not m2:
                 m_sec = re.search(r"MS4wLj[A-Za-z0-9_\-]+", final_url)
+                # ★ 落地页 URL 没带 sec_uid 时，再从页面 HTML 里找一次：
+                #   抖音部分短链把 sec_uid 塞在 SSR 数据里而不是跳转地址里。
+                if not m_sec:
+                    m_sec = re.search(r"MS4wLj[A-Za-z0-9_\-]+", resp.text)
                 if m_sec:
                     return DouyinLiveStreamInfo(
                         False, "", "", m_sec.group(0), {}, {}, 0,
