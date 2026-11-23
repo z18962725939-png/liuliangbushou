@@ -28,9 +28,7 @@ from justoneapi_collector import licensing                      # noqa: E402
 # ★ 新增页面必须在这里登记一行，否则本脚本会报「未登记的功能位」。
 # ---------------------------------------------------------------------------
 PAGE_FEATURE: dict[str, tuple[str, str]] = {
-    "数据采集": ("collect", "collect_page"),
     "关键词抓取": ("keyword", "keyword_page"),
-    "批量采集": ("batch", "batch_page"),
     "视频下载": ("download", "video_download_page"),
     "直播监控": ("live", "live_page"),
     "选题挖掘": ("analyze", "topic_page"),
@@ -58,6 +56,11 @@ PAGE_FEATURE: dict[str, tuple[str, str]] = {
 # 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报
 PAGE_FEATURE_EXTRA: dict[str, str] = {
     "export": "各页面的「导出」按钮共用，无独立页面",
+    # ★ 2026-11-23：两个通用接口调试页下线，但 collect/batch 是**已签发授权码**
+    #   里的真实功能位，删掉会让老客户手里的码出现「未知功能位」异常，也会
+    #   破坏发卡工具与兼容门禁。这里只标记「无页面」，授权数据保持不动。
+    "collect": "历史授权位：数据采集页已下线，保留兼容已发授权码",
+    "batch": "历史授权位：批量采集页已下线，保留兼容已发授权码",
 }
 
 # 不单独计费的入口页：不占功能位，免登记

@@ -189,8 +189,6 @@ hiddenimports = [
     "gui_qt.icons",
     "gui_qt.pages",
     "gui_qt.pages._base",
-    "gui_qt.pages.collect_page",
-    "gui_qt.pages.batch_page",
     "gui_qt.pages.settings_page",
     "gui_qt.pages.transcribe_page",
     "gui_qt.pages.live_page",

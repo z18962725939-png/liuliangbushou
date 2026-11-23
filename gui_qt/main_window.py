@@ -11,8 +11,6 @@ from gui_qt.guide_dialog import open_guide
 from gui_qt.icons import (group_caret_icon, help_icon, logo_icon, nav_icon,
                           theme_toggle_icon)
 from gui_qt.pages._base import AppContext
-from gui_qt.pages.batch_page import BatchPage
-from gui_qt.pages.collect_page import CollectPage
 from gui_qt.pages.comment_page import CommentPage
 from gui_qt.pages.competitor_page import CompetitorPage
 from gui_qt.pages.drama_page import DramaPage
@@ -41,17 +39,17 @@ from gui_qt.widgets.guide import GuideBanner
 from gui_qt.widgets.motion import fade_in, stagger
 
 # ★ 导航顺序 = 使用频率（2026-10-14 体验重构）
-# 改版前 14 个功能平铺，且默认停在「数据采集」——那是给开发者调接口用的页面
-# （选分类 → 选平台 → 选接口 → 手填参数），客户打开第一眼看到一堆看不懂的
-# 下拉框，第一印象就是"难"。现在：工作台打头，天天用的排前面，低频的收进
-# 「更多工具」；功能一个没删，老客户照样找得到。
+# 改版前 14 个功能平铺，且默认停在通用的接口调试页，客户打开第一眼看到一堆
+# 看不懂的下拉框，第一印象就是"难"。现在：工作台打头，天天用的排前面，低频的
+# 收进「更多工具」。2026-11-23 起「数据采集」「批量采集」两个通用调试页已下线
+# ——同类需求由「关键词抓取」「公众号运营」「小红书笔记」等专用页承接。
 NAV_GROUPS = [
     ("开始", ["工作台"]),
     # 短剧成片排在「视频下载」之后：下载拿素材 → 剪辑出成片，是一条上下游链路
     ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片",
               "公众号运营", "小红书笔记"]),
     ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
-    ("更多工具", ["数据采集", "批量采集", "直播监控", "GEO 监测", "报告",
+    ("更多工具", ["直播监控", "GEO 监测", "报告",
                   "音视频转文本", "微信聊天整理"]),
     ("设置", ["设置"]),
 ]
@@ -92,9 +90,7 @@ _NAV_STATE_KEY = "nav_collapsed"
 
 _PAGE_CLASS = {
     "工作台": HomePage,
-    "数据采集": CollectPage,
     "关键词抓取": KeywordPage,
-    "批量采集": BatchPage,
     "视频下载": VideoDownloadPage,
     "视频号解析": WechatChannelsPage,
     "直播监控": LivePage,
@@ -486,20 +482,6 @@ _EMPTY_HINTS = {
          "这一页不用手动存：在「选题挖掘」「关键词抓取」「竞品体检」里抓到的结果"
          "都会自动留一份。先从那几页跑一次，攒够两天数据就能画出曲线。",
          "去抓一批数据", "goto:选题挖掘"),
-    ],
-    "数据采集": [
-        (None, "还没有采集结果",
-         "按「分类 → 平台 → 接口」依次选好，填完参数点「执行采集」，"
-         "接口返回的数据会直接进这张表。", "执行采集", "_execute"),
-    ],
-    "批量采集": [
-        # ★ 2026-10-26：动作分成三档之后「新建任务」收在「手动添加」档里，
-        #   文案必须点明去哪一档找 —— 否则客户在「文件导入」档看着"点新建任务"
-        #   却找不到那颗按钮。空态出口本身仍直连 _new_task，不受档位影响。
-        #   两行、每行 ≤16 字：正文实际只有 2 行可见（同视频下载页量出来的结论）。
-        (None, "任务队列是空的",
-         "在「手动添加」档新建一条，\n或先点「生成示例任务」看个样例。",
-         "新建任务", "_new_task"),
     ],
     "直播监控": [
         # ★ 精确匹配历史表的首列「文件名」：不登记的话它会回退到下面那条

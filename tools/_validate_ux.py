@@ -71,7 +71,7 @@ freq = groups.get("常用", [])
 for must in ("选题挖掘", "关键词抓取", "文案仿写"):
     check(f"高频功能「{must}」在「常用」分组里", must in freq, str(freq))
 
-for low in ("数据采集", "批量采集", "直播监控", "GEO 监测", "报告"):
+for low in ("直播监控", "GEO 监测", "报告"):
     check(f"低频功能「{low}」已收进「更多工具」（不再占前排）",
           low in groups.get("更多工具", []) and low not in freq,
           f"常用={freq} 更多={groups.get('更多工具')}")
@@ -86,12 +86,15 @@ check("所有导航项都有对应页面类",
 print()
 print("2) 功能一个都没丢（改导航不能弄丢入口）")
 
-EXPECTED = ["数据采集", "关键词抓取", "批量采集", "视频下载", "直播监控",
+EXPECTED = ["关键词抓取", "视频下载", "直播监控",
             "选题挖掘", "竞品体检", "评论区截流", "GEO 监测", "复盘监控",
             "报告", "文案仿写", "音视频转文本", "数据趋势", "设置",
             "短剧成片", "微信聊天整理", "视频号解析", "公众号运营", "小红书笔记"]
 missing = [p for p in EXPECTED if p not in all_pages]
 check("原有入口全在导航里（一个都没丢）", not missing, f"丢了：{missing}")
+# ★ 2026-11-23：两个通用接口调试页已下线，钉死不许从导航里爬回来。
+removed = [p for p in ("数据采集", "批量采集") if p in all_pages]
+check("已下线的通用调试页不在导航里", not removed, f"又回来了：{removed}")
 check("导航项没有重复", len(all_pages) == len(set(all_pages)),
       f"重复项：{[p for p in all_pages if all_pages.count(p) > 1]}")
 

@@ -229,7 +229,7 @@ class SettingsPage(QWidget):
             lic_intro = QLabel(
                 "这个免费版只做两件事：<b>抖音视频下载</b> 和 <b>直播录制</b>。<br>"
                 "不限次数、不消耗任何接口额度，接口欠费也不影响使用。<br>"
-                "需要数据采集、热榜、关键词、文案仿写、GEO 监测这些功能，<br>"
+                "需要公众号运营、小红书笔记、热榜、关键词、文案仿写、GEO 监测这些功能，<br>"
                 "请下载完整版（同一台电脑可以两个都装，互不覆盖）。")
             lic_intro.setWordWrap(True)
             lic_intro.setTextFormat(Qt.TextFormat.RichText)
@@ -754,7 +754,7 @@ class SettingsPage(QWidget):
         if branding.APP_IS_FREE:
             self.lic_status.setStyleSheet("color:#1565c0;font-weight:600;")
             self.lic_status.setText("免费版 · 永久可用，下载与录制不限次数")
-            hint = ("想要数据采集、热榜、关键词、文案仿写、GEO 监测？"
+            hint = ("想要公众号运营、小红书笔记、热榜、关键词、文案仿写、GEO 监测？"
                     "下载完整版即可，两个版本可以同时安装、互不覆盖。")
             if branding.APP_CONTACT:
                 hint += f"\n联系方式：{branding.APP_CONTACT}"
