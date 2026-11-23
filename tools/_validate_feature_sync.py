@@ -49,6 +49,8 @@ PAGE_FEATURE: dict[str, tuple[str, str]] = {
     "短剧解析": ("drama_parse", "drama_parse_page"),
     # 微信聊天整理：纯本地解析 ZIP + 写笔记，零边际成本，auto 策略。
     "微信聊天整理": ("wechat_chat", "wechat_chat_page"),
+    # 公众号运营：走 okdata 官方 wechat_mp 接口，随采集套餐赠送（auto）。
+    "公众号运营": ("wechat_mp", "wechat_mp_page"),
 }
 
 # 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报

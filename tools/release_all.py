@@ -919,6 +919,16 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             print("[中止] 视频号解析退化（点了没反应 / 混付费链路 / 清单漏登记），先修好再发版。")
             return 1
 
+        # ★ 2026-11-23 公众号运营页：按 okdata 官方技术文档接 wechat_mp 接口
+        #   （搜号 / 历史文章 / 正文 / 互动 / 评论 / 搜一搜）。钉住 capability
+        #   映射（打错接口就是白花钱）、付费闸门与 Worker.start()、以及新增页
+        #   的接入清单；渲染用假响应，全程不联网不扣费。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_wechat_mp.py")],
+                      "公众号运营（okdata 映射 / 付费闸门 / 接入清单 / 离屏冒烟）")
+        if code != 0:
+            print("[中止] 公众号运营退化（接口映射错 / 闸门失效 / 清单漏登记），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")

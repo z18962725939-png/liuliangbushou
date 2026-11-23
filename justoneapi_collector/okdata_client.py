@@ -103,6 +103,17 @@ ENDPOINT_MAP: dict[tuple[str, str], str] = {
     ("wechat_channels", "user-profile-v1"): "wechat_channels.users.get",
     ("wechat_channels", "user-published-videos-v1"): "wechat_channels.users.videos.list",
     ("wechat_channels", "live-user-status-v1"): "wechat_channels.live.users.get",
+    # 微信公众号（2026-11-23 按 okdata 官方技术文档逐条核对）
+    # 账号搜索按返回条数计费（$0.058/条），其余按次 $0.02，页面上有明确提示。
+    # article-search-v1 在老工程里是「公众号文章搜索」，对应 okdata 的微信搜一搜
+    # 综合搜索（文章/视频混排，可用 type=article 只要文章）。
+    ("wechat_mp", "account-search-v1"): "wechat_mp.accounts.search",
+    ("wechat_mp", "account-historical-articles-v1"): "wechat_mp.accounts.articles.list",
+    ("wechat_mp", "account-historical-articles-v2"): "wechat_mp.accounts.articles.list",
+    ("wechat_mp", "article-details-v1"): "wechat_mp.articles.get",
+    ("wechat_mp", "article-metrics-v1"): "wechat_mp.articles.metrics",
+    ("wechat_mp", "article-comments-v1"): "wechat_mp.articles.comments.list",
+    ("wechat_mp", "article-search-v1"): "wechat.posts.search",
 }
 
 #: 老参数名 -> okdata 参数名。只保留这些白名单字段，避免把无意义参数发给
@@ -115,8 +126,12 @@ PARAM_ALIAS: dict[str, str] = {
     "keyword": "query", "query": "query", "q": "query", "keywordStr": "query",
     "maxCursor": "cursor", "max_cursor": "cursor", "cursor": "cursor",
     "nextCursor": "cursor", "pageToken": "cursor",
+    # 公众号：主页栏目 / 搜一搜时间窗与内容类型
+    "ghid": "id", "gh_id": "id", "biz": "id",
+    "publishedWithin": "published_within", "timeRange": "published_within",
 }
-_PASSTHROUGH = {"id", "url", "query", "cursor", "view", "fields", "sort", "lang"}
+_PASSTHROUGH = {"id", "url", "query", "cursor", "view", "fields", "sort",
+                "lang", "tab", "type", "published_within"}
 
 _ERROR_TEXT: dict[str, str] = {
     "invalid_params": "okdata 参数错误（不扣费），请检查关键词或账号 ID",

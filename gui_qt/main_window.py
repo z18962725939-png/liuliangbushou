@@ -30,6 +30,7 @@ from gui_qt.pages.trend_page import TrendPage
 from gui_qt.pages.video_download_page import VideoDownloadPage
 from gui_qt.pages.wechat_channels_page import WechatChannelsPage
 from gui_qt.pages.wechat_chat_page import WechatChatPage
+from gui_qt.pages.wechat_mp_page import WechatMpPage
 from gui_qt.subwindow import SubWindow
 from gui_qt.pages.watch_page import WatchPage
 from gui_qt.theme import accent_color, nav_active_icon_color, nav_text_color
@@ -46,7 +47,8 @@ from gui_qt.widgets.motion import fade_in, stagger
 NAV_GROUPS = [
     ("开始", ["工作台"]),
     # 短剧成片排在「视频下载」之后：下载拿素材 → 剪辑出成片，是一条上下游链路
-    ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片"]),
+    ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片",
+              "公众号运营"]),
     ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
     ("更多工具", ["数据采集", "批量采集", "直播监控", "GEO 监测", "报告",
                   "音视频转文本", "微信聊天整理"]),
@@ -107,6 +109,7 @@ _PAGE_CLASS = {
     "短剧解析": DramaParsePage,
     "音视频转文本": TranscribePage,
     "微信聊天整理": WechatChatPage,
+    "公众号运营": WechatMpPage,
     "设置": SettingsPage,
 }
 
@@ -272,6 +275,11 @@ _TABLE_COL_WIDTHS = {
     "大小": 76, "录制时间": 148,
     # v1.28.3 转录页状态表格：首列徽标最长是「源文件已更新」，64px 会截字
     "转录状态": 108, "大小": 84, "所在目录": 140, "转录稿": 96,
+    # v1.28.15 公众号运营四张表：ID/链接给足宽，短枚举压窄，长文本交给拉伸列
+    "公众号": 118, "微信号": 104, "原始ID": 154, "认证": 68,
+    "文章数": 72, "简介": 210, "阅读": 74, "链接": 170,
+    "评论者": 104, "内容": 240, "IP 属地": 92,
+    "类型": 68, "来源账号": 112, "阅读档位": 96,
 }
 
 # 装长文本的列：不给固定宽，让它吃掉剩下的横向空间。
@@ -280,7 +288,7 @@ _TABLE_COL_WIDTHS = {
 #   否则「正常」两个字会被撑进一块 350px 的空白里，比滚动条更难看。
 _TABLE_STRETCH = ("文件名", "标题", "评论内容", "消息", "参数(JSON)", "爆款Top5(标题|赞)",
                   "账号昵称", "博主昵称", "用户昵称", "作者", "关键词",
-                  "来源视频", "违规词", "引用信源", "触发原因")
+                  "来源视频", "违规词", "引用信源", "触发原因", "简介", "内容")
 
 
 def _tune_tables(page: QWidget) -> None:
@@ -369,6 +377,22 @@ _EMPTY_HINTS = {
          "在微信里多选聊天记录 →「合并转发」→ 保存到电脑得到 .zip，"
          "在上面选好文件点「开始解析」，消息会逐条列在这里。",
          "选择 ZIP…", "_pick_files"),
+    ],
+    # 公众号运营：四块工作区各有一张表，按首列表头名认领各自的空态。
+    # 按钮只负责「把人送到该填的地方」，不替用户发起付费请求。
+    "公众号运营": [
+        ("公众号", "还没有搜索公众号",
+         "填公众号名称或关键词，点「搜索公众号」，找到后可直接看它的历史文章。",
+         "填入示例", "_fill_demo"),
+        ("发布时间", "还没有历史文章",
+         "先在「找公众号」里选中一个号，或手动填 gh_ 原始 ID，点「查历史文章」。",
+         "去搜公众号", "_goto_accounts"),
+        ("评论者", "还没有文章评论",
+         "在「文章诊断」里粘贴公众号文章链接，点「仅评论」或「一次全查」。",
+         "去查文章", "_goto_article"),
+        ("类型", "还没有搜到选题",
+         "填行业或产品关键词，点「搜一搜」，可按相关/最新/最热和时间范围筛选。",
+         "填入示例", "_fill_search_demo"),
     ],
     # ★ v1.28.3：转录页原来用 QListWidget（自己画空态），换成状态表格后
     #   也要登记空态引导，否则全站「每张表都有空态」的规矩破一个口子。

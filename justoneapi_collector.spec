@@ -203,6 +203,8 @@ hiddenimports = [
     "gui_qt.pages.wechat_channels_page",
     # 2026-11-20 微信聊天整理（新增页 + 纯本地解析/导出模块，显式登记防裁）。
     "gui_qt.pages.wechat_chat_page",
+    # 2026-11-23 公众号运营（新增页；okdata 官方 wechat_mp 接口，随套餐赠送）。
+    "gui_qt.pages.wechat_mp_page",
     "justoneapi_collector.wechat_archive",
     "gui_qt.pages.comment_page",
     "gui_qt.pages.geo_page",
