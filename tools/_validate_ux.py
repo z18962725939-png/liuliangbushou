@@ -202,6 +202,12 @@ for _p in sorted((ROOT / "gui_qt" / "pages").glob("*.py")):
 check("★ 所有页面 set_value 位置参数不超过 3 个", not _bad, f"越界的位置：{_bad}")
 
 print()
+print("设置页「内容偏好」白屏回归（2026-11-23 客户截图）")
+_set_src = (ROOT / "gui_qt" / "pages" / "settings_page.py").read_text(encoding="utf-8")
+check("★ 内容偏好 host 必须挂进卡片布局（只设 parent 会整页空白）",
+      "self._pref_l.addWidget(self._pref_host)" in _set_src)
+
+print()
 print("=" * 62)
 print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
 if FAILED:

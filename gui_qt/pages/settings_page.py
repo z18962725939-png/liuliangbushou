@@ -103,6 +103,10 @@ class SettingsPage(QWidget):
         self._pref_v = QVBoxLayout(self._pref_host)
         self._pref_v.setContentsMargins(0, 0, 0, 0)
         self._pref_v.setSpacing(0)
+        # ★ 2026-11-23：必须把 host 挂进卡片布局。只设 parent 不进 layout
+        #   的控件是"游离子控件"，Qt 会把它挤成 0 尺寸 —— 客户看到的就是
+        #   「内容偏好」整页空白，只有左上角一丝残影（真实投诉截图）。
+        self._pref_l.addWidget(self._pref_host)
         self._lays["pref"].addWidget(self.pref_card)
         self._render_pref()
         # ★ 免费版（2026-10-23）：「内容偏好」是给工作台/选题页做推荐用的，
