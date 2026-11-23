@@ -131,7 +131,7 @@ class SettingsPage(QWidget):
         self.timeout_edit = QLineEdit(str(s.get("timeout", 120)))
         self.retries_edit = QLineEdit(str(s.get("max_retries", 3)))
         self.concurrency_edit = QLineEdit(str(s.get("max_concurrency", 5)))
-        self.cache_chk = QCheckBox("启用缓存（避免重复计费）")
+        self.cache_chk = QCheckBox("启用缓存（仅 JustOneAPI 通道；okdata 自带逐笔账单与服务端缓存）")
         self.cache_chk.setChecked(bool(s.get("cache_enabled", True)))
 
         al.addLayout(form_row("数据服务", self.provider_combo))
