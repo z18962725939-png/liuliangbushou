@@ -137,6 +137,7 @@ FEATURES: dict[str, str] = {
     "drama_parse": "短剧解析",
     "wechat_chat": "微信聊天整理",
     "wechat_mp": "公众号运营",
+    "xhs_notes": "小红书笔记",
 }
 ALL_FEATURES = tuple(FEATURES.keys())
 
@@ -169,6 +170,9 @@ FEATURE_BACKFILL: dict[str, str] = {
     # 公众号运营：调用客户自己的 okdata Key 付费接口，软件侧无边际成本，
     # 随采集套餐赠送；老授权码自动获得，不收回既有用例。
     "wechat_mp": "auto",
+    # 小红书笔记内容提取：调用客户自己的 okdata Key 付费接口，软件侧零边际
+    # 成本，随采集套餐赠送；老授权码自动获得。
+    "xhs_notes": "auto",
 }
 
 # 首批功能位（v1.0 起就随任意套餐售出）。

@@ -51,6 +51,8 @@ PAGE_FEATURE: dict[str, tuple[str, str]] = {
     "微信聊天整理": ("wechat_chat", "wechat_chat_page"),
     # 公众号运营：走 okdata 官方 wechat_mp 接口，随采集套餐赠送（auto）。
     "公众号运营": ("wechat_mp", "wechat_mp_page"),
+    # 小红书笔记：走 okdata 官方 xiaohongshu 接口，随采集套餐赠送（auto）。
+    "小红书笔记": ("xhs_notes", "xhs_notes_page"),
 }
 
 # 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报

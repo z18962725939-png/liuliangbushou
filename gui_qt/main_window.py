@@ -31,6 +31,7 @@ from gui_qt.pages.video_download_page import VideoDownloadPage
 from gui_qt.pages.wechat_channels_page import WechatChannelsPage
 from gui_qt.pages.wechat_chat_page import WechatChatPage
 from gui_qt.pages.wechat_mp_page import WechatMpPage
+from gui_qt.pages.xhs_notes_page import XhsNotesPage
 from gui_qt.subwindow import SubWindow
 from gui_qt.pages.watch_page import WatchPage
 from gui_qt.theme import accent_color, nav_active_icon_color, nav_text_color
@@ -48,7 +49,7 @@ NAV_GROUPS = [
     ("开始", ["工作台"]),
     # 短剧成片排在「视频下载」之后：下载拿素材 → 剪辑出成片，是一条上下游链路
     ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片",
-              "公众号运营"]),
+              "公众号运营", "小红书笔记"]),
     ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
     ("更多工具", ["数据采集", "批量采集", "直播监控", "GEO 监测", "报告",
                   "音视频转文本", "微信聊天整理"]),
@@ -110,6 +111,7 @@ _PAGE_CLASS = {
     "音视频转文本": TranscribePage,
     "微信聊天整理": WechatChatPage,
     "公众号运营": WechatMpPage,
+    "小红书笔记": XhsNotesPage,
     "设置": SettingsPage,
 }
 
@@ -280,6 +282,9 @@ _TABLE_COL_WIDTHS = {
     "文章数": 72, "简介": 210, "阅读": 74, "链接": 170,
     "评论者": 104, "内容": 240, "IP 属地": 92,
     "类型": 68, "来源账号": 112, "阅读档位": 96,
+    # v1.28.15 小红书笔记五张表：链接给足宽，数字列压窄，标题/内容走拉伸列
+    "发布时间": 148, "点赞": 74, "收藏": 74, "评论": 74,
+    "名次": 60, "联想词": 180,
 }
 
 # 装长文本的列：不给固定宽，让它吃掉剩下的横向空间。
@@ -288,7 +293,7 @@ _TABLE_COL_WIDTHS = {
 #   否则「正常」两个字会被撑进一块 350px 的空白里，比滚动条更难看。
 _TABLE_STRETCH = ("文件名", "标题", "评论内容", "消息", "参数(JSON)", "爆款Top5(标题|赞)",
                   "账号昵称", "博主昵称", "用户昵称", "作者", "关键词",
-                  "来源视频", "违规词", "引用信源", "触发原因", "简介", "内容")
+                  "来源视频", "违规词", "引用信源", "触发原因", "简介", "内容", "联想词")
 
 
 def _tune_tables(page: QWidget) -> None:
@@ -393,6 +398,24 @@ _EMPTY_HINTS = {
         ("类型", "还没有搜到选题",
          "填行业或产品关键词，点「搜一搜」，可按相关/最新/最热和时间范围筛选。",
          "填入示例", "_fill_search_demo"),
+    ],
+    # 小红书笔记：五张表按首列表头认领空态；按钮只送到输入处，不发起付费请求。
+    "小红书笔记": [
+        ("发布时间", "还没有搜到笔记",
+         "填行业或产品关键词，点「搜索笔记」，选中一篇可接着读全文。",
+         "填入示例", "_fill_search_demo"),
+        ("发布", "还没有博主笔记",
+         "填博主 24 位 ID，点「查博主笔记」列出TA发布的笔记。",
+         "去查博主", "_goto_user"),
+        ("评论者", "还没有笔记评论",
+         "在「笔记正文」里填笔记 ID，点「仅评论」或「正文 + 评论」。",
+         "去读正文", "_goto_content"),
+        ("标题", "还没有话题笔记",
+         "在「选题辅助」填话题页 ID，点「查话题笔记」。",
+         "去选题辅助", "_fill_topic_demo"),
+        ("名次", "还没有联想词",
+         "在「选题辅助」填种子关键词，点「查联想词」拿选题灵感。",
+         "填入示例", "_fill_topic_demo"),
     ],
     # ★ v1.28.3：转录页原来用 QListWidget（自己画空态），换成状态表格后
     #   也要登记空态引导，否则全站「每张表都有空态」的规矩破一个口子。

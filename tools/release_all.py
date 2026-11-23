@@ -929,6 +929,16 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             print("[中止] 公众号运营退化（接口映射错 / 闸门失效 / 清单漏登记），先修好再发版。")
             return 1
 
+        # ★ 2026-11-23 小红书笔记内容提取页：按 okdata 官方技术文档接
+        #   xiaohongshu 接口（搜笔记 / 博主笔记 / 正文 / 评论 / 话题 / 联想词）。
+        #   钉住正文绝不碰下载器的 note-details-v6、付费闸门与 Worker.start()、
+        #   新增页接入清单；渲染用假响应，全程不联网不扣费。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_xhs_notes.py")],
+                      "小红书笔记（okdata 映射 / 正文隔离 / 付费闸门 / 接入清单 / 离屏冒烟）")
+        if code != 0:
+            print("[中止] 小红书笔记退化（接口映射错 / 正文走错链路 / 清单漏登记），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")

@@ -84,6 +84,12 @@ ENDPOINT_MAP: dict[tuple[str, str], str] = {
     ("xiaohongshu", "note-search-v2"): "xiaohongshu.notes.search",
     ("xiaohongshu", "note-comments-v2"): "xiaohongshu.notes.comments.list",
     ("xiaohongshu", "comment-replies-v2"): "xiaohongshu.comments.replies.list",
+    # 小红书笔记内容提取（2026-11-23，独立 endpoint）：
+    #   note-content-v1 → notes.get 拿**正文文本**；刻意不复用下载器的
+    #   note-details-v6（那个是拿播放直链，okdata 不含播放地址，映射=白花钱）。
+    ("xiaohongshu", "note-content-v1"): "xiaohongshu.notes.get",
+    ("xiaohongshu", "topic-notes-v1"): "xiaohongshu.topics.notes.list",
+    ("xiaohongshu", "keyword-related-v1"): "xiaohongshu.keywords.related",
     # 快手
     ("kuaishou", "user-profile-v1"): "kuaishou.users.get",
     ("kuaishou", "user-search-v2"): "kuaishou.users.search",

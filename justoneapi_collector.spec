@@ -205,6 +205,8 @@ hiddenimports = [
     "gui_qt.pages.wechat_chat_page",
     # 2026-11-23 公众号运营（新增页；okdata 官方 wechat_mp 接口，随套餐赠送）。
     "gui_qt.pages.wechat_mp_page",
+    # 2026-11-23 小红书笔记（新增页；okdata 官方 xiaohongshu 接口，正文提取独立 endpoint）。
+    "gui_qt.pages.xhs_notes_page",
     "justoneapi_collector.wechat_archive",
     "gui_qt.pages.comment_page",
     "gui_qt.pages.geo_page",
