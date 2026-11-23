@@ -783,6 +783,15 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
                   "（客户会以为主播没开播），先修好再发版。")
             return 1
 
+        # ★ 2026-11-23 付费通道切换到 okdata：接口映射 / 参数改名 / 响应翻译 /
+        #   未映射接口明确失败 / zacao 免费链路隔离 / okdata 下直播零付费。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_okdata.py")],
+                      "okdata 付费通道：映射、翻译、错误与免费链路隔离")
+        if code != 0:
+            print("[中止] okdata 通道会误报成功、漏翻译字段，或把 zacao 免费链路"
+                  "卷进付费通道，先修好再发版。")
+            return 1
+
         # ★ 2026-11-06 客户「账号正在直播、工具显示未开播」：重建时丢了整套
         #   a_bogus 签名（resolve_by_web_rid 必抛 NameError），加上状态判定
         #   绑在「能否拿到流地址」上、解析失败又冒充未开播。这类退化不报错，

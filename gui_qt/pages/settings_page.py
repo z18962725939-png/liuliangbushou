@@ -116,6 +116,17 @@ class SettingsPage(QWidget):
         # 所以这里不再提供 Token 输入框 —— 激活授权码即可联网使用。
         api, al = vertical_card("接口与性能", self)
         s = self.ctx.settings
+        # ★ 2026-11-23：付费数据通道默认为 okdata；JustOneAPI 作为可切回的
+        #   原通道保留。视频直链解析始终走 video.zacao.top，与这里无关。
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("okdata（按次计费，推荐）", "okdata")
+        self.provider_combo.addItem("JustOneAPI（原通道）", "justoneapi")
+        current_provider = str(s.get("api_provider", "okdata") or "okdata")
+        idx = self.provider_combo.findData(current_provider)
+        self.provider_combo.setCurrentIndex(max(0, idx))
+        self.okdata_key_edit = QLineEdit(str(s.get("okdata_key") or ""))
+        self.okdata_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.okdata_key_edit.setPlaceholderText("okd_ 开头，在 okdata 控制台获取")
         self.base_url_edit = QLineEdit(s.get("base_url", "https://api.justoneapi.com"))
         self.timeout_edit = QLineEdit(str(s.get("timeout", 120)))
         self.retries_edit = QLineEdit(str(s.get("max_retries", 3)))
@@ -123,6 +134,8 @@ class SettingsPage(QWidget):
         self.cache_chk = QCheckBox("启用缓存（避免重复计费）")
         self.cache_chk.setChecked(bool(s.get("cache_enabled", True)))
 
+        al.addLayout(form_row("数据服务", self.provider_combo))
+        al.addLayout(form_row("okdata Key", self.okdata_key_edit))
         al.addLayout(form_row("API 地址", self.base_url_edit))
         al.addLayout(form_row("超时(秒)", self.timeout_edit))
         al.addLayout(form_row("最大重试", self.retries_edit))
@@ -133,10 +146,11 @@ class SettingsPage(QWidget):
         h = QHBoxLayout(); h.setSpacing(8); h.addWidget(save_btn); h.addStretch()
         al.addLayout(h)
         info = QLabel(
-            "接口凭证随授权码一起下发，激活后即可使用，无需另外填写。\n"
-            "若激活后仍提示「未连接采集服务」，说明这张授权码不含采集凭证 ——\n"
-            "请把「授权与激活」里的机器码发给服务方换一张带凭证的码。\n"
-            "设置保存在本机配置文件中，超时建议保持 120 秒以上。\n"
+            "okdata：到 okdata.online/zh/console 用邮箱注册（新账号送 $0.10 试用），\n"
+            "把 okd_ 开头的 Key 填到上面即可按次计费；余额不过期、无月费。\n"
+            "视频直链解析始终走免费的 zacao 通道，抖音开播监控走本机免费浏览器通道，\n"
+            "这两项不花 okdata 的钱。API 地址 / 重试 / 并发仅原通道使用。\n"
+            "切回 JustOneAPI 时，凭证仍随授权码下发，无需自己填写。\n"
             f"当前版本：v{branding.APP_VERSION}")
         info.setStyleSheet("color:#9CA3AF;font-size:12px;")
         al.addWidget(info)
@@ -574,6 +588,8 @@ class SettingsPage(QWidget):
         # 接口凭证由授权码内嵌提供，界面已不再让客户填写；
         # 但本机配置文件里若已存有 Token（作者自用 / 历史用户），必须原样保留，
         # 否则一保存就把联网能力弄丢了。
+        s["api_provider"] = self.provider_combo.currentData() or "okdata"
+        s["okdata_key"] = self.okdata_key_edit.text().strip()
         s["base_url"] = self.base_url_edit.text().strip()
         try:
             s["timeout"] = int(self.timeout_edit.text() or 120)
@@ -597,10 +613,15 @@ class SettingsPage(QWidget):
                 pass
             self.ctx.ensure_downloader()
             self.fb_status.setText("设置已保存，已接入采集服务（可直接解析 / 下载）")
-        else:
+        elif str(s.get("api_provider")) == "justoneapi":
             self.fb_status.setText(
                 "设置已保存；当前未激活授权码，处于演示模式。"
                 "请在下方「授权与激活」粘贴授权码后点「立即激活」")
+        else:
+            self.fb_status.setText(
+                "设置已保存；还没填 okdata Key，付费采集暂不可用。"
+                "请到 okdata.online 注册后把 okd_ 开头的 Key 填到上面。"
+                "（视频解析与下载仍可正常使用）")
 
     # ----------------------------------------------------------- 平台登录
     def _start_login(self, platform):

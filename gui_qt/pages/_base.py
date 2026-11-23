@@ -304,6 +304,12 @@ def _feature_ok(name: str, default: bool = True) -> bool:
 # 配置默认值（与旧版 gui.py 的 defaults 对齐；仅保留新版实际用到的键）
 _SETTINGS_DEFAULTS: dict = {
     "token": "",
+    # ★ 2026-11-23：付费数据通道默认 okdata（按次、价格公开、支持支付宝）。
+    # 视频直链仍走 video.zacao.top 免费解析，直播录制仍是本地 ffmpeg，互不影响。
+    # 原 JustOneAPI 通道保留，设置页可随时切回。
+    "api_provider": "okdata",
+    "okdata_key": "",
+    "okdata_base_url": "https://api.okdata.online",
     "base_url": "https://api.justoneapi.com",
     "timeout": 120,
     "max_retries": 3,
@@ -411,11 +417,58 @@ class AppContext:
 
     # ------------------------------------------------------------ 业务资源
     def connect_real_client(self) -> bool:
-        """构造真实采集 client：优先授权码内嵌 Token，其次设置里填的 Token。
+        """构造真实采集 client：按设置选择 okdata（默认）或原 JustOneAPI。
 
-        两者都没有 / 构造失败都安全回退演示模式（client=None），返回 False。
+        两家都没有凭证 / 构造失败都安全回退演示模式（client=None），返回 False。
+        视频直链解析不经过这里，始终走 video.zacao.top 免费通道。
         供启动时 build_context 与设置页保存/激活后即时调用。
         """
+        def _int(key, dv):
+            try:
+                return int(self.settings.get(key, dv) or dv)
+            except (TypeError, ValueError):
+                return dv
+
+        provider = str(self.settings.get("api_provider", "okdata") or "okdata").strip().lower()
+
+        # ---------------------------------------------------- okdata（默认）
+        if provider != "justoneapi":
+            try:
+                from justoneapi_collector.okdata_client import OkdataClient
+            except Exception as exc:  # noqa: BLE001
+                print(f"[流量捕手] 未能加载 okdata 通道，维持演示模式：{exc}")
+                return False
+            key = str(self.settings.get("okdata_key") or "").strip()
+            if not key:
+                # 老用户若把 okdata Key 放进授权码里（okd_ 开头），照样认。
+                try:
+                    from justoneapi_collector.licensing import embedded_token
+                    embedded = (embedded_token() or "").strip()
+                    if embedded.startswith("okd_"):
+                        key = embedded
+                except Exception:                        # noqa: BLE001
+                    pass
+            if not key:
+                self.client = None
+                return False
+            try:
+                self.client = OkdataClient(
+                    key=key,
+                    base_url=str(self.settings.get("okdata_base_url")
+                                 or "https://api.okdata.online"),
+                    timeout=_int("timeout", 30),
+                    max_retries=_int("max_retries", 1),
+                )
+                # ★ 不套 JustOneAPI 授权码额度闸门：那是按 JustOneAPI 次数发的，
+                #   okdata 有自己的 Key 预算上限和逐笔账单，套上去会误拦。
+                print("[流量捕手] 已接入 okdata 采集通道")
+                return True
+            except Exception as exc:  # noqa: BLE001
+                print(f"[流量捕手] okdata 通道构造失败，回退演示模式：{exc}")
+                self.client = None
+                return False
+
+        # ---------------------------------------------------- JustOneAPI（原通道）
         try:
             from justoneapi_collector.client import JustOneAPICollector
         except Exception as exc:  # noqa: BLE001
@@ -437,12 +490,6 @@ class AppContext:
             return False
 
         try:
-            def _int(key, dv):
-                try:
-                    return int(self.settings.get(key, dv) or dv)
-                except (TypeError, ValueError):
-                    return dv
-
             self.client = JustOneAPICollector(
                 token=token,
                 base_url=self.settings.get("base_url", "https://api.justoneapi.com"),

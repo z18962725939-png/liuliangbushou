@@ -135,6 +135,9 @@ hiddenimports = [
     #   读主页 profile 请求拿 live_status / room_id_str / web_rid。
     #   虽是 live_monitor 顶层静态引用，仍显式登记防打包裁掉。
     "justoneapi_collector.douyin_live_status_cdp",
+    # ★ 2026-11-23 付费数据通道 okdata：由 gui_qt/pages/_base.py 在函数体内
+    #   按设置动态 import，PyInstaller 静态扫不到，必须显式登记。
+    "justoneapi_collector.okdata_client",
     # ★ v1.24.6 服务端解析（抖音 / 小红书 / 快手的主力解析通道）。
     #   同样是 video_downloader._media_service_resolve() 内部的函数体 import，
     #   漏写这一行的后果一模一样：源码能跑、打出来的安装包直接不解析。

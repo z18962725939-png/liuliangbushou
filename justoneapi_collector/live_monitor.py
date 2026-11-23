@@ -613,6 +613,13 @@ class LiveMonitor:
         if sec_uid.startswith("web_rid:") or (st is not None and getattr(st, "live_url", "")):
             return self._check_by_link(sec_uid, st)
 
+        # ★ 2026-11-23：okdata 的账号资料接口不返回开播字段，拿它查直播会
+        #   把在播误判成「未开播」，还要花 $0.002。本机免费 CDP 已实测
+        #   4/4 准确且能回填 web_rid 取流，所以在 okdata 通道下直接走免费。
+        if (getattr(self.client, "provider", "") == "okdata"
+                and sec_uid.startswith("MS4wLj") and self.cdp_fallback_enabled):
+            return self._check_by_cdp(sec_uid, st)
+
         resp = self.client.request("douyin-tiktok-china", "user-profile-v3",
                                    {"secUid": sec_uid})
         if not resp.success or not isinstance(resp.data, dict):
@@ -631,8 +638,10 @@ class LiveMonitor:
                 self._targets[sec_uid] = st
             st.last_checked = time.time()
             if "INSUFFICIENT BALANCE" in msg.upper() or code == 601:
-                base_error = ("状态检查失败：采集账户余额不足，"
-                              "请到 api.justoneapi.com 充值后重试")
+                hint = str(getattr(self.client, "recharge_hint", "")
+                           or "api.justoneapi.com")
+                base_error = (f"状态检查失败：采集账户余额不足，"
+                              f"请到 {hint} 充值后重试")
             elif getattr(self.client, "token_invalid", False):
                 base_error = "状态检查失败：API Token 无效或未激活，请到设置页更新"
             else:
@@ -651,22 +660,7 @@ class LiveMonitor:
                 except Exception as exc:                # noqa: BLE001
                     snap = None
                     base_error += f"（免费通道异常：{exc}）"
-            if snap is not None and getattr(snap, "ok", False):
-                st.nickname = getattr(snap, "nickname", "") or st.nickname
-                st.live_status = int(getattr(snap, "live_status", 0) or 0)
-                st.is_live = (st.live_status == 1)
-                room = str(getattr(snap, "room_id", "") or "")
-                if room and room != "0":
-                    st.room_id = room
-                web_rid = str(getattr(snap, "web_rid", "") or "")
-                if web_rid:
-                    st.web_rid = web_rid
-                st.stream_error = ""
-                if not st.is_live:
-                    st.stream_url = ""
-                    st.hls_urls = {}
-                    st.flv_urls = {}
-                st.last_checked = time.time()
+            if snap is not None and self._apply_cdp_snapshot(st, snap):
                 return st
             # 兜底也失败：保留「状态未知」语义，把两条原因都说清楚
             if snap is not None and getattr(snap, "error", ""):
@@ -690,6 +684,48 @@ class LiveMonitor:
         st.avatar_url = urls[0] if urls else st.avatar_url
         st.follower_count = int(user.get("follower_count", 0) or 0)
         st.last_checked = time.time()
+        return st
+
+    def _apply_cdp_snapshot(self, st: LiveStatus, snap) -> bool:
+        """把免费浏览器查到的主页状态写进 LiveStatus；成功返回 True。"""
+        if snap is None or not getattr(snap, "ok", False):
+            return False
+        st.nickname = getattr(snap, "nickname", "") or st.nickname
+        st.live_status = int(getattr(snap, "live_status", 0) or 0)
+        st.is_live = (st.live_status == 1)
+        room = str(getattr(snap, "room_id", "") or "")
+        if room and room != "0":
+            st.room_id = room
+        web_rid = str(getattr(snap, "web_rid", "") or "")
+        if web_rid:
+            st.web_rid = web_rid
+        st.stream_error = ""
+        if not st.is_live:
+            st.stream_url = ""
+            st.hls_urls = {}
+            st.flv_urls = {}
+        st.last_checked = time.time()
+        return True
+
+    def _check_by_cdp(self, sec_uid: str, st: LiveStatus | None) -> LiveStatus | None:
+        """okdata 通道下的抖音开播检查：直接走免费主页 CDP，零付费调用。"""
+        if st is None:
+            st = LiveStatus(
+                sec_uid=sec_uid, nickname="", is_live=False,
+                live_status=0, room_id="0", avatar_url="", follower_count=0,
+            )
+            self._targets[sec_uid] = st
+        st.last_checked = time.time()
+        snap = None
+        try:
+            snap = self.home_cdp().fetch(sec_uid)
+        except Exception as exc:                          # noqa: BLE001
+            st.stream_error = f"状态检查失败：免费通道异常：{exc}"[:400]
+            return st
+        if self._apply_cdp_snapshot(st, snap):
+            return st
+        detail = str(getattr(snap, "error", "") or "免费通道未返回状态")
+        st.stream_error = f"状态检查失败：{detail}"[:400]
         return st
 
     def _check_tiktok(self, sec_uid: str, st: LiveStatus | None) -> LiveStatus | None:
