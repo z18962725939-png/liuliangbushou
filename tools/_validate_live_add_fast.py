@@ -88,6 +88,15 @@ check("短链采用真 web_rid，不拿 room_id 冒充",
       uid3 != "web_rid:9988776655", uid3)
 check("短链解析出的真实昵称被采用", nick3 == "短链主播", nick3)
 
+# ★ 2026-11-23：客户把抖音分享文案整段粘进来（带中文前缀），
+# 必须先抠出链接再解析，不能把整段文字当 URL 发请求。
+calls2.clear()
+ok6, _, uid6 = dm.add_target_by_link(
+    "搜索，查看TA的更多作品。 https://v.douyin.com/ShareText/ ，复制此链接打开抖音")
+check("分享文案整段能提取链接", ok6 and calls2 == ["https://v.douyin.com/ShareText/"],
+      str(calls2))
+check("分享文案提取后目标正确", uid6 == "web_rid:5566778899", uid6)
+
 # 第三方桩 / 旧数据没有 web_rid 字段时，仍可回落 room_id（不比旧版差）
 dm._resolver.resolve_auto = lambda u: SimpleNamespace(room_id="1122334455",
                                                        anchor_name="")

@@ -510,6 +510,13 @@ class LiveMonitor:
         import re
 
         s = (live_url or "").strip()
+        # ★ 2026-11-23：客户常把抖音分享文案整段粘进来（例：
+        #   「搜索，查看TA的更多作品。 https://v.douyin.com/xxx/」）。
+        #   解析器只认纯 URL，整段文字会被当 URL 请求而失败，最后报
+        #   「无法从链接/ID 提取 web_rid」。先把文案里的 http(s) 链接抠出来。
+        m_url = re.search(r"https?://[^\s\u4e00-\u9fff]+", s)
+        if m_url:
+            s = m_url.group(0).rstrip(".,;，。；")
         # ★ TikTok 直播间链接 / @主播号走独立适配层，绝不丢给抖音解析器
         #   （旧行为会把链接原样交给抖音 webcast，客户只看到「无法提取 web_rid」）。
         if tiktok_live.is_tiktok_input(s):
