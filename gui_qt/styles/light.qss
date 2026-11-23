@@ -387,18 +387,18 @@ QPushButton#NavItem:hover {
     background: #E7E9ED;
     color: #0B0E14;
 }
-/* 选中态（2026-10-17 二次改版：从「实心墨块」改成「淡填充 + 墨色指示条」）
-   实心块的问题是：整个侧栏像被荧光笔划了一道，跟内容区抢注意力 ——
-   而且苹果 / Linear 的侧栏选中都是"轻轻染一层"，靠左侧一道细条定位。
-   现在填充 #E9EBEF（比 hover 再深一档）+ 墨色 3px 指示条 + 加粗。 */
+/* 选中态（2026-11-23 视觉精修：墨色指示条 → 柠檬指示条 + 淡柠檬填充）
+   旧版填充 #E9EBEF + 墨色竖条，在浅色侧栏里像一段灰底表格行，跟内容区的
+   能量色脱节。现在和深色主题统一成「柠檬竖条 + 淡柠檬底」——选中一眼可见，
+   但仍然只是一层淡染，不会回到「整条荧光笔」的老问题。 */
 QPushButton#NavItem:checked {
-    background: #E9EBEF;
-    border-left: 3px solid #0B0E14;
+    background: #F2F7E3;
+    border-left: 3px solid #C4F13E;
     color: #0B0E14;
     font-weight: 600;
 }
 QPushButton#NavItem:checked:hover {
-    background: #E1E4E9;
+    background: #DFF3A8;
     color: #0B0E14;
 }
 

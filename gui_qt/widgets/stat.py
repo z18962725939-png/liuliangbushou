@@ -762,7 +762,10 @@ class _StepCell(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(52, 12, 14, 12)
+        # ★ 2026-11-23：工作台把三步扩成五步，每格宽度从 ~340px 收到 ~200px。
+        #   序号圆点的左内边距 52→44、圆点 26→22，给正文多让出 20px，
+        #   五格并排时说明文字仍是一行、不会高低错落。
+        lay.setContentsMargins(44, 12, 10, 12)
         lay.setSpacing(3)
         self.title_lab = QLabel(title)
         self.title_lab.setFont(ui_font(13, QFont.Weight.DemiBold))
@@ -804,17 +807,20 @@ class _StepCell(QFrame):
         #   眼睛在页面上滑动时找不到"起点"。三步走的序号正好是这个位置：
         #   一、二、三 本来就是阅读顺序的锚点，给它们上能量色，
         #   整页就有节奏了，而柠檬仍然只在"正在发生的事"上出现。
-        d = 26.0
-        dot = QRectF(14, rect.center().y() - d / 2, d, d)
+        d = 22.0
+        dot = QRectF(10, rect.center().y() - d / 2, d, d)
         acid_edge = QColor(p["acid"])
-        acid_edge.setAlphaF(0.50 + 0.45 * t)
+        acid_edge.setAlphaF(0.75 + 0.25 * t)
         fill = QColor(p["acid"])
-        fill.setAlphaF(0.14 + 0.62 * t)
+        # ★ 2026-11-23 实拍修正：五步并排后圆点从 26px 缩到 22px，
+        #   原来 0.14 的淡填充在深色下几乎融进背景，里面的墨字看不清。
+        #   静止就给到 0.62（Hover 近实心），序号在任何主题下都读得出来。
+        fill.setAlphaF(0.62 + 0.33 * t)
         q.setPen(QPen(acid_edge, 1.0))
         q.setBrush(fill)
         q.drawEllipse(dot)
         # 序号：柠檬底上必须是墨字（深色主题也一样，柠檬是浅色块）
-        f = ui_font(11, QFont.Weight.DemiBold)
+        f = ui_font(12, QFont.Weight.DemiBold)
         q.setFont(f)
         q.setPen(QColor("#0B0E14"))
         q.drawText(dot, Qt.AlignmentFlag.AlignCenter, self._num)
