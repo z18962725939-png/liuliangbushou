@@ -14,7 +14,9 @@
     "script",
     "drama",
     "drama_parse",
-    "wechat_chat"
+    "wechat_chat",
+    "wechat_mp",
+    "xhs_notes"
   ],
   "backfill": {
     "keyword": "auto",
@@ -23,7 +25,9 @@
     "script": "auto",
     "drama": "auto",
     "drama_parse": "auto",
-    "wechat_chat": "auto"
+    "wechat_chat": "auto",
+    "wechat_mp": "auto",
+    "xhs_notes": "auto"
   },
-  "built_at": "2026-11-21 13:43:21"
+  "built_at": "2026-11-24 18:50:10"
 }

@@ -322,26 +322,52 @@ def sync_github(new_ver: str, notes: str) -> None:
     else:
         print("   无待提交改动（可能已提交过），跳过 commit")
 
-    # 2) push：先按当前代理配置推，失败再清代理直连推
-    #    （Clash 没开时全局 http.proxy=127.0.0.1:7897 不通，得绕开）
-    pushed = False
-    for extra in ([], ["-c", "http.proxy=", "-c", "https.proxy="]):
+    # 2) push：★ 2026-11-24 重写——GCM 弹窗会让整条发版链卡死
+    #    2026-11-23 发 v1.28.15 后台跑到这一步直接挂住：凭据管理器里存了两份
+    #    github.com 凭据（x-access-token 的 PAT ＋ 账号 OAuth），GCM 弹出
+    #    「Select an account」GUI 等人点，没人点就永远等下去。
+    #    更坑的是 subprocess.run(timeout=300) 杀不掉孙进程 git-remote-https，
+    #    它一直持有 stdout 管道，communicate() 于是无限等待 —— 日志冻结 20 分钟，
+    #    后面四件套全被堵死。
+    #    两件事一起修：
+    #      ① 有令牌就把令牌拼进推送地址：完全不经过凭据管理器，天然不弹窗；
+    #      ② 超时后 taskkill /F /T 杀整棵进程树，绝不许孙进程拖住发版。
+    tok = gh_token()
+    slug = os.environ.get("GITHUB_REPO", "z18962725939-png/liuliangbushou")
+    target = f"https://{tok}@github.com/{slug}.git" if tok else "origin"
+    push_env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never")
+
+    def _push_once(proxy_args: list[str]) -> tuple[bool, str]:
+        p = subprocess.Popen(["git", *proxy_args, "push", target, "main"],
+                             cwd=str(ROOT), stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, env=push_env)
         try:
-            p = subprocess.run(["git", *extra, "push", "origin", "main"],
-                               cwd=str(ROOT), capture_output=True, text=True,
-                               timeout=300)
+            out = p.communicate(timeout=300)[0] or ""
         except subprocess.TimeoutExpired:
-            continue
-        if p.returncode == 0:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           capture_output=True, check=False)
+            try:
+                out = p.communicate(timeout=15)[0] or ""
+            except subprocess.TimeoutExpired:
+                out = ""
+            return False, "超时（已杀进程树）"
+        if tok:
+            out = out.replace(tok, "***")      # 令牌绝不进日志
+        return p.returncode == 0, out.strip()[:200]
+
+    pushed = False
+    # 先按当前代理配置推，失败再清代理直连（Clash 没开时 7897 不通，得绕开）
+    for proxy_args in ([], ["-c", "http.proxy=", "-c", "https.proxy="]):
+        ok, msg = _push_once(proxy_args)
+        if ok:
             pushed = True
             print("   已推送 origin/main")
             break
-        print(f"   [重试] 换直连再推：{(p.stderr or p.stdout).strip()[:80]}")
+        print(f"   [重试] push 未成功：{msg[:100]}")
     if not pushed:
         print("   [警告] push 失败，线上发布不受影响；稍后手动 git push origin main")
 
     # 3) 建 Release（幂等；没有令牌就给手动指引）
-    tok = gh_token()
     if not tok:
         print("   [提醒] 未拿到 GITHUB_TOKEN（凭据管理器里也没有），Release 未建")
         print(f"     手动补：GITHUB_TOKEN=ghp_xxx {PY} tools/make_gh_releases.py {new_ver}")
