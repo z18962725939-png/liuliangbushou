@@ -285,11 +285,23 @@ def gh_token() -> str:
     tok = os.environ.get("GITHUB_TOKEN", "").strip()
     if tok:
         return tok
+    # ★ 2026-11-24：GCM 里存了多份 github.com 凭据时，非交互模式会直接拒答
+    #   （fatal: Cannot prompt because user interactivity has been disabled），
+    #   发版链于是拿不到令牌。加一层本地文件后备：用户目录 `~/.tc_push_token`，
+    #   一次性写入、不进仓库。优先级：环境变量 → 本地文件 → GCM。
+    try:
+        _local = Path.home() / ".tc_push_token"
+        if _local.is_file():
+            _t = _local.read_text(encoding="utf-8").strip()
+            if _t:
+                return _t
+    except Exception:                                          # noqa: BLE001
+        pass
     try:
         env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="echo")
         p = subprocess.run(["git", "credential", "fill"], cwd=str(ROOT),
                            input="protocol=https\nhost=github.com\n\n",
-                           capture_output=True, text=True, timeout=20, env=env)
+                           capture_output=True, text=True, timeout=45, env=env)
         for line in p.stdout.splitlines():
             if line.startswith("password="):
                 return line.split("=", 1)[1].strip()
