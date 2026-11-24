@@ -188,43 +188,35 @@ hiddenimports = [
     "gui_qt.theme",
     "gui_qt.icons",
     "gui_qt.pages",
-    "gui_qt.pages._base",
-    "gui_qt.pages.settings_page",
-    "gui_qt.pages.transcribe_page",
-    "gui_qt.pages.live_page",
-    "gui_qt.pages.competitor_page",
+# >>> PAGE-REGISTRY BEGIN spec_hidden >>>
+    "gui_qt.pages.home_page",
     "gui_qt.pages.topic_page",
-    "gui_qt.pages.watch_page",
-    "gui_qt.pages.report_page",
+    "gui_qt.pages.keyword_page",
+    "gui_qt.pages.script_page",
     "gui_qt.pages.video_download_page",
-    # 2026-11-20 视频号解析（新增页；走免费 media_parser，不占功能位）。
     "gui_qt.pages.wechat_channels_page",
-    # 2026-11-20 微信聊天整理（新增页 + 纯本地解析/导出模块，显式登记防裁）。
-    "gui_qt.pages.wechat_chat_page",
-    # 2026-11-23 公众号运营（新增页；okdata 官方 wechat_mp 接口，随套餐赠送）。
-    "gui_qt.pages.wechat_mp_page",
-    # 2026-11-23 小红书笔记（新增页；okdata 官方 xiaohongshu 接口，正文提取独立 endpoint）。
-    "gui_qt.pages.xhs_notes_page",
-    "justoneapi_collector.wechat_archive",
-    "gui_qt.pages.comment_page",
-    "gui_qt.pages.geo_page",
-    # v1.26.0 短剧成片（DramaClip 剪辑引擎）。
-    # ★ 剪辑引擎跑在**子进程**里（drama_bridge 用 subprocess 拉起外部 exe），
-    #   主进程这边只剩桥接与下载器两个模块 —— 页面是顶层 import，
-    #   但两者都用到动态属性（队列/线程），显式列出才不会在打包后被裁掉。
+    "gui_qt.pages.drama_parse_page",
+    "justoneapi_collector.drama_api",
+    "justoneapi_collector.drama_public_rank",
     "gui_qt.pages.drama_page",
     "justoneapi_collector.drama_bridge",
     "justoneapi_collector.drama_bundle",
-    # 2026-11-14 短剧解析（HTTP 直连 XiaoYingAPI，与上面的剪辑引擎不是一条链）。
-    # drama_api 里 httpx / json / branding 都在函数体内 import，显式登记防裁；
-    # 页面也是新增页，打包后曾多次出现「只见状态栏不动」的静默缺失。
-    "gui_qt.pages.drama_parse_page",
-    "justoneapi_collector.drama_api",
-    # 2026-11-14 免凭证公开热榜降级源（httpx 在函数体内 import，显式登记防裁）。
-    "justoneapi_collector.drama_public_rank",
-    # 评论区截流核心（页面里 import，静态分析可能漏）
+    "gui_qt.pages.wechat_mp_page",
+    "gui_qt.pages.xhs_notes_page",
+    "gui_qt.pages.competitor_page",
+    "gui_qt.pages.comment_page",
     "justoneapi_collector.comment_mining",
-    # 引导条组件与「使用教程」对话框（被各页面 main_window 动态引用）
+    "gui_qt.pages.watch_page",
+    "gui_qt.pages.trend_page",
+    "gui_qt.pages.live_page",
+    "gui_qt.pages.geo_page",
+    "gui_qt.pages.report_page",
+    "gui_qt.pages.transcribe_page",
+    "gui_qt.pages.wechat_chat_page",
+    "justoneapi_collector.wechat_archive",
+    "gui_qt.pages.settings_page",
+# >>> PAGE-REGISTRY END spec_hidden <<<
+# 引导条组件与「使用教程」对话框（被各页面 main_window 动态引用）
     "gui_qt.widgets",
     "gui_qt.widgets.guide",
     "gui_qt.guide_dialog",

@@ -27,52 +27,40 @@ from justoneapi_collector import licensing                      # noqa: E402
 # 导航页面 → (功能位, 页面模块文件名)
 # ★ 新增页面必须在这里登记一行，否则本脚本会报「未登记的功能位」。
 # ---------------------------------------------------------------------------
+# >>> PAGE-REGISTRY BEGIN feature_sync >>>
 PAGE_FEATURE: dict[str, tuple[str, str]] = {
-    "关键词抓取": ("keyword", "keyword_page"),
-    "视频下载": ("download", "video_download_page"),
-    "直播监控": ("live", "live_page"),
     "选题挖掘": ("analyze", "topic_page"),
+    "关键词抓取": ("keyword", "keyword_page"),
+    "文案仿写": ("script", "script_page"),
+    "视频下载": ("download", "video_download_page"),
+    "短剧解析": ("drama_parse", "drama_parse_page"),
+    "短剧成片": ("drama", "drama_page"),
+    "公众号运营": ("wechat_mp", "wechat_mp_page"),
+    "小红书笔记": ("xhs_notes", "xhs_notes_page"),
     "竞品体检": ("analyze", "competitor_page"),
     "评论区截流": ("comment", "comment_page"),
-    "GEO 监测": ("geo", "geo_page"),
     "复盘监控": ("analyze", "watch_page"),
+    "直播监控": ("live", "live_page"),
+    "GEO 监测": ("geo", "geo_page"),
     "报告": ("report", "report_page"),
-    "文案仿写": ("script", "script_page"),
     "音视频转文本": ("transcribe", "transcribe_page"),
-    # 短剧成片：剪辑全在本机跑，作者只有一次 450MB COS 流量（约两毛钱），
-    # 没有按次成本，所以功能位策略是 auto（买了就有），不是 deny。
-    "短剧成片": ("drama", "drama_page"),
-    # 短剧解析：把客户给的短剧链接/文本解析出镜头与时间线，同属 auto 策略，
-    # 与「短剧成片」是一对上下游入口（解析 → 成片），各自独立页面。
-    "短剧解析": ("drama_parse", "drama_parse_page"),
-    # 微信聊天整理：纯本地解析 ZIP + 写笔记，零边际成本，auto 策略。
     "微信聊天整理": ("wechat_chat", "wechat_chat_page"),
-    # 公众号运营：走 okdata 官方 wechat_mp 接口，随采集套餐赠送（auto）。
-    "公众号运营": ("wechat_mp", "wechat_mp_page"),
-    # 小红书笔记：走 okdata 官方 xiaohongshu 接口，随采集套餐赠送（auto）。
-    "小红书笔记": ("xhs_notes", "xhs_notes_page"),
 }
 
-# 没有独立页面、属于「跨页面能力」的功能位，显式登记以免被反向检查误报
 PAGE_FEATURE_EXTRA: dict[str, str] = {
     "export": "各页面的「导出」按钮共用，无独立页面",
-    # ★ 2026-11-23：两个通用接口调试页下线，但 collect/batch 是**已签发授权码**
-    #   里的真实功能位，删掉会让老客户手里的码出现「未知功能位」异常，也会
-    #   破坏发卡工具与兼容门禁。这里只标记「无页面」，授权数据保持不动。
-    "collect": "历史授权位：数据采集页已下线，保留兼容已发授权码",
-    "batch": "历史授权位：批量采集页已下线，保留兼容已发授权码",
+    "collect": "历史授权位：对应页面已下线，保留兼容已发授权码",
+    "batch": "历史授权位：对应页面已下线，保留兼容已发授权码",
 }
 
-# 不单独计费的入口页：不占功能位，免登记
-NAV_NO_FEATURE: set[str] = {"工作台", "数据趋势", "视频号解析"}
-# 工作台＝首页总览，只是其它功能的入口；
-# 数据趋势＝本地历史记录的查看页，属于基础能力（老客户升级即可用），不单独计费
-# 视频号解析＝走免费的 video.zacao.top（作者自己的 key，不从客户扣），
-# 与「视频下载」同一条链路、同样不占功能位、不接付费闸门。
-
+NAV_NO_FEATURE: set[str] = {
+    "工作台",
+    "视频号解析",
+    "数据趋势",
+}
+# >>> PAGE-REGISTRY END feature_sync <<<
 PASSED: list[str] = []
 FAILED: list[str] = []
-
 
 def check(name: str, cond: bool, detail: str = "") -> None:
     if cond:
@@ -81,7 +69,6 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     else:
         FAILED.append(f"{name} :: {detail}")
         print(f"  [FAIL] {name} :: {detail}")
-
 
 def nav_pages() -> list[str]:
     """从 main_window.py 里读出导航结构（用 AST，不启动界面）。"""
@@ -93,7 +80,6 @@ def nav_pages() -> list[str]:
                     groups = ast.literal_eval(node.value)
                     return [p for _g, items in groups for p in items]
     raise RuntimeError("没在 main_window.py 里找到 NAV_GROUPS")
-
 
 print("1) 导航页面 ↔ 功能位登记")
 pages = nav_pages()

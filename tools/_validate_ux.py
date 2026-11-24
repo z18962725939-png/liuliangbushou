@@ -24,7 +24,6 @@ sys.path.insert(0, str(ROOT))
 PASSED: list[str] = []
 FAILED: list[str] = []
 
-
 def check(name: str, cond: bool, detail: str = "") -> None:
     if cond:
         PASSED.append(name)
@@ -32,7 +31,6 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     else:
         FAILED.append(f"{name} :: {detail}")
         print(f"  [FAIL] {name} :: {detail}")
-
 
 def read(rel: str) -> str:
     return (ROOT / rel).read_text(encoding="utf-8")
@@ -86,10 +84,15 @@ check("所有导航项都有对应页面类",
 print()
 print("2) 功能一个都没丢（改导航不能弄丢入口）")
 
-EXPECTED = ["关键词抓取", "视频下载", "直播监控",
-            "选题挖掘", "竞品体检", "评论区截流", "GEO 监测", "复盘监控",
-            "报告", "文案仿写", "音视频转文本", "数据趋势", "设置",
-            "短剧成片", "微信聊天整理", "视频号解析", "公众号运营", "小红书笔记"]
+# >>> PAGE-REGISTRY BEGIN ux_expected >>>
+EXPECTED = [
+    "关键词抓取", "视频下载", "直播监控", "选题挖掘",
+    "竞品体检", "评论区截流", "GEO 监测", "复盘监控",
+    "报告", "文案仿写", "音视频转文本", "数据趋势",
+    "设置", "短剧成片", "微信聊天整理", "视频号解析",
+    "公众号运营", "小红书笔记",
+]
+# >>> PAGE-REGISTRY END ux_expected <<<
 missing = [p for p in EXPECTED if p not in all_pages]
 check("原有入口全在导航里（一个都没丢）", not missing, f"丢了：{missing}")
 # ★ 2026-11-23：两个通用接口调试页已下线，钉死不许从导航里爬回来。

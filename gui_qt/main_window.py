@@ -11,27 +11,28 @@ from gui_qt.guide_dialog import open_guide
 from gui_qt.icons import (group_caret_icon, help_icon, logo_icon, nav_icon,
                           theme_toggle_icon)
 from gui_qt.pages._base import AppContext
-from gui_qt.pages.comment_page import CommentPage
-from gui_qt.pages.competitor_page import CompetitorPage
-from gui_qt.pages.drama_page import DramaPage
-from gui_qt.pages.drama_parse_page import DramaParsePage
-from gui_qt.pages.geo_page import GeoPage
+# >>> PAGE-REGISTRY BEGIN page_imports >>>
 from gui_qt.pages.home_page import HomePage
-from gui_qt.pages.keyword_page import KeywordPage
-from gui_qt.pages.live_page import LivePage
-from gui_qt.pages.report_page import ReportPage
-from gui_qt.pages.script_page import ScriptPage
-from gui_qt.pages.settings_page import SettingsPage
 from gui_qt.pages.topic_page import TopicPage
-from gui_qt.pages.transcribe_page import TranscribePage
-from gui_qt.pages.trend_page import TrendPage
+from gui_qt.pages.keyword_page import KeywordPage
+from gui_qt.pages.script_page import ScriptPage
 from gui_qt.pages.video_download_page import VideoDownloadPage
 from gui_qt.pages.wechat_channels_page import WechatChannelsPage
-from gui_qt.pages.wechat_chat_page import WechatChatPage
+from gui_qt.pages.drama_parse_page import DramaParsePage
+from gui_qt.pages.drama_page import DramaPage
 from gui_qt.pages.wechat_mp_page import WechatMpPage
 from gui_qt.pages.xhs_notes_page import XhsNotesPage
-from gui_qt.subwindow import SubWindow
+from gui_qt.pages.competitor_page import CompetitorPage
+from gui_qt.pages.comment_page import CommentPage
 from gui_qt.pages.watch_page import WatchPage
+from gui_qt.pages.trend_page import TrendPage
+from gui_qt.pages.live_page import LivePage
+from gui_qt.pages.geo_page import GeoPage
+from gui_qt.pages.report_page import ReportPage
+from gui_qt.pages.transcribe_page import TranscribePage
+from gui_qt.pages.wechat_chat_page import WechatChatPage
+from gui_qt.pages.settings_page import SettingsPage
+# >>> PAGE-REGISTRY END page_imports <<<
 from gui_qt.theme import accent_color, nav_active_icon_color, nav_text_color
 from gui_qt.widgets.command_palette import install_shortcut
 from gui_qt.widgets.empty import attach_empty_hint, refresh_empty_hints
@@ -43,17 +44,43 @@ from gui_qt.widgets.motion import fade_in, stagger
 # 看不懂的下拉框，第一印象就是"难"。现在：工作台打头，天天用的排前面，低频的
 # 收进「更多工具」。2026-11-23 起「数据采集」「批量采集」两个通用调试页已下线
 # ——同类需求由「关键词抓取」「公众号运营」「小红书笔记」等专用页承接。
+# >>> PAGE-REGISTRY BEGIN nav_groups >>>
 NAV_GROUPS = [
-    ("开始", ["工作台"]),
-    # 短剧成片排在「视频下载」之后：下载拿素材 → 剪辑出成片，是一条上下游链路
-    ("常用", ["选题挖掘", "关键词抓取", "文案仿写", "视频下载", "视频号解析", "短剧解析", "短剧成片",
-              "公众号运营", "小红书笔记"]),
-    ("分析", ["竞品体检", "评论区截流", "复盘监控", "数据趋势"]),
-    ("更多工具", ["直播监控", "GEO 监测", "报告",
-                  "音视频转文本", "微信聊天整理"]),
-    ("设置", ["设置"]),
+    ("开始", [
+        "工作台",
+    ]),
+    ("常用", [
+        "选题挖掘",
+        "关键词抓取",
+        "文案仿写",
+        "视频下载",
+        "视频号解析",
+        # 短剧解析 → 短剧成片是一对上下游入口
+        "短剧解析",
+        # 排在「视频下载」之后：下载拿素材 → 剪辑出成片
+        "短剧成片",
+        "公众号运营",
+        "小红书笔记",
+    ]),
+    ("分析", [
+        "竞品体检",
+        "评论区截流",
+        "复盘监控",
+        # 数据趋势不进使用教程（本地历史查看页，无独立操作）
+        "数据趋势",
+    ]),
+    ("更多工具", [
+        "直播监控",
+        "GEO 监测",
+        "报告",
+        "音视频转文本",
+        "微信聊天整理",
+    ]),
+    ("设置", [
+        "设置",
+    ]),
 ]
-
+# >>> PAGE-REGISTRY END nav_groups <<<
 # ★ 免费版导航（2026-10-23）——只有三个入口，一个都不许加回来。
 #   客户要的很明确：「只有视频解析和直播录制的功能工具」。所以：
 #     · 「视频下载」放第一组并默认打开：这是客户装它的唯一理由；
@@ -64,12 +91,13 @@ NAV_GROUPS = [
 #   授权和额度，摆上去只剩两张看不懂的空卡。
 #   也不加任何「更多工具」：付费页在免费版里点开只会弹「需要激活」，
 #   那正是客户这次投诉的观感——一排点不动的按钮。
+# >>> PAGE-REGISTRY BEGIN free_nav >>>
 FREE_NAV_GROUPS = [
-    ("下载", ["视频下载"]),
-    ("工具", ["直播监控"]),
-    ("设置", ["设置"]),
+    ("下载", ['视频下载']),
+    ("工具", ['直播监控']),
+    ("设置", ['设置']),
 ]
-
+# >>> PAGE-REGISTRY END free_nav <<<
 if branding.APP_IS_FREE:
     NAV_GROUPS = FREE_NAV_GROUPS
 
@@ -88,30 +116,30 @@ _NAV_PINNED = ("开始", "设置")
 _NAV_DEFAULT_COLLAPSED = ("分析", "更多工具")
 _NAV_STATE_KEY = "nav_collapsed"
 
+# >>> PAGE-REGISTRY BEGIN page_class >>>
 _PAGE_CLASS = {
     "工作台": HomePage,
+    "选题挖掘": TopicPage,
     "关键词抓取": KeywordPage,
+    "文案仿写": ScriptPage,
     "视频下载": VideoDownloadPage,
     "视频号解析": WechatChannelsPage,
-    "直播监控": LivePage,
-    "选题挖掘": TopicPage,
-    "竞品体检": CompetitorPage,
-    "评论区截流": CommentPage,
-    "GEO 监测": GeoPage,
-    "复盘监控": WatchPage,
-    "数据趋势": TrendPage,
-    "报告": ReportPage,
-    "文案仿写": ScriptPage,
-    "短剧成片": DramaPage,
     "短剧解析": DramaParsePage,
-    "音视频转文本": TranscribePage,
-    "微信聊天整理": WechatChatPage,
+    "短剧成片": DramaPage,
     "公众号运营": WechatMpPage,
     "小红书笔记": XhsNotesPage,
+    "竞品体检": CompetitorPage,
+    "评论区截流": CommentPage,
+    "复盘监控": WatchPage,
+    "数据趋势": TrendPage,
+    "直播监控": LivePage,
+    "GEO 监测": GeoPage,
+    "报告": ReportPage,
+    "音视频转文本": TranscribePage,
+    "微信聊天整理": WechatChatPage,
     "设置": SettingsPage,
 }
-
-
+# >>> PAGE-REGISTRY END page_class <<<
 # ----------------------------------------------------------------------
 #  单页故障降级（2026-10-19）
 #
