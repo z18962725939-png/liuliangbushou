@@ -59,7 +59,21 @@ COLS_KEYWORD = ["名次", "联想词"]
 _COST_HINT = (
     "按 okdata 官方价：小红书笔记每个接口 $0.02/次（正文、评论、搜笔记、话题笔记、联想词均同价）；"
     "查无结果也照常计费，参数错误不扣费。请先在「设置 → 数据服务」填好自己的 okd_ Key 并确认余额。"
+    "「正文 + 评论」会串行调用正文和评论共 2 次，预估 $0.04，请确认余额充足再点。"
 )
+
+# 空结果也照常计费，明示一次，免得客户以为没花钱。
+_BILLED_EMPTY = "（本次查询已计费）"
+
+
+def _key_hint(ctx) -> str:
+    """按当前数据服务商给出凭证文案：okdata 填 Key，JustOneAPI 填 Token。"""
+    try:
+        provider = str((getattr(ctx, "settings", {}) or {}).get(
+            "api_provider", "okdata") or "okdata").strip().lower()
+    except Exception:                                  # noqa: BLE001
+        provider = "okdata"
+    return "okd_ 开头的 Key" if provider != "justoneapi" else "API Token"
 
 
 def _payload(worker, client, endpoint: str, params: dict) -> dict:
@@ -152,7 +166,6 @@ class XhsNotesPage(QWidget):
             "search": [], "user_notes": [], "comment": [], "topic": [], "keyword": [],
         }
         self._cursor = {"search": "", "user_notes": ""}
-        self._has_more = {"search": False, "user_notes": False}
         self._detail_text = ""
         self.status = StatusLine("选一块工作区开始：搜笔记 → 看博主 → 提取正文", parent=self)
         self._build()
@@ -183,7 +196,10 @@ class XhsNotesPage(QWidget):
             return
         client = getattr(self.ctx, "client", None)
         if client is None:
-            self._say("数据服务未连接，请到「设置 → 数据服务」填好 okd_ Key", "error")
+            self._say("数据服务未连接，请到「设置 → 数据服务」填 " + _key_hint(self.ctx), "error")
+            return
+        elif getattr(client, "provider", "") != "okdata":
+            self._say("这两个功能仅支持 okdata 通道，请在 设置 → 数据服务 切换数据服务商为 okdata", "error")
             return
         self.progress.setValue(0)
         self._say(f"正在{label}…", "idle")
@@ -362,7 +378,8 @@ class XhsNotesPage(QWidget):
         self._cursor["search"] = cursor if more else ""
         self.next_search_btn.setEnabled(bool(cursor and more))
         self._say(f"找到 {len(rows)} 篇笔记，累计 {len(self._rows['search'])} 篇"
-                  "（列表是摘要，点「读这篇正文」取全文）", "ok" if rows else "warn")
+                  "（列表是摘要，点「读这篇正文」取全文）"
+                  + ("" if rows else _BILLED_EMPTY), "ok" if rows else "warn")
 
     def _search_to_content(self):
         r = self.search_table.currentRow()
@@ -454,7 +471,8 @@ class XhsNotesPage(QWidget):
         cursor, more = _page_info(getattr(resp, "data", None))
         self._cursor["user_notes"] = cursor if more else ""
         self.next_user_notes_btn.setEnabled(bool(cursor and more))
-        self._say(f"列出 {len(rows)} 篇笔记，累计 {len(self._rows['user_notes'])} 篇",
+        self._say(f"列出 {len(rows)} 篇笔记，累计 {len(self._rows['user_notes'])} 篇"
+                  + ("" if rows else _BILLED_EMPTY),
                   "ok" if rows else "warn")
 
     def _user_notes_to_content(self):
@@ -537,7 +555,10 @@ class XhsNotesPage(QWidget):
             return
         client = getattr(self.ctx, "client", None)
         if client is None:
-            self._say("数据服务未连接，请到「设置 → 数据服务」填好 okd_ Key", "error")
+            self._say("数据服务未连接，请到「设置 → 数据服务」填 " + _key_hint(self.ctx), "error")
+            return
+        elif getattr(client, "provider", "") != "okdata":
+            self._say("这两个功能仅支持 okdata 通道，请在 设置 → 数据服务 切换数据服务商为 okdata", "error")
             return
         self.progress.setValue(0)
         self._say("正在读取笔记…", "idle")
@@ -587,7 +608,7 @@ class XhsNotesPage(QWidget):
             notes.append(f"评论失败：{cmt_err}")
         elif result.get("comments") is not None:
             self._apply_comments(result["comments"])
-        self._say("；".join(notes) if notes else "笔记内容读取完成",
+        self._say("；".join(notes) if notes else "笔记内容读取完成" + _BILLED_EMPTY,
                   "error" if notes else "ok")
 
     def _on_comments_only(self, payload: dict):
@@ -695,7 +716,8 @@ class XhsNotesPage(QWidget):
             lambda x: _favorites(_metrics(x)),
             lambda x: x.get("url"),
         ])
-        self._say(f"话题下找到 {len(rows)} 篇热门笔记", "ok" if rows else "warn")
+        self._say(f"话题下找到 {len(rows)} 篇热门笔记"
+                  + ("" if rows else _BILLED_EMPTY), "ok" if rows else "warn")
 
     def _topic_to_content(self):
         r = self.topic_table.currentRow()
@@ -740,7 +762,8 @@ class XhsNotesPage(QWidget):
             lambda x: x.get("rank"),
             lambda x: x.get("word"),
         ])
-        self._say(f"找到 {len(rows)} 个联想词（可拿去做选题/标题）", "ok" if rows else "warn")
+        self._say(f"找到 {len(rows)} 个联想词（可拿去做选题/标题）"
+                  + ("" if rows else _BILLED_EMPTY), "ok" if rows else "warn")
 
     # ------------------------------------------------------------------
     #  导出

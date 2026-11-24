@@ -142,7 +142,7 @@ _PASSTHROUGH = {"id", "url", "query", "cursor", "view", "fields", "sort",
 _ERROR_TEXT: dict[str, str] = {
     "invalid_params": "okdata 参数错误（不扣费），请检查关键词或账号 ID",
     "unauthorized": "okdata Key 无效或未激活，请到设置页填写 okd_ 开头的 Key",
-    "insufficient_balance": "okdata 余额不足，请到 okdata 控制台充值后重试",
+    "insufficient_balance": "okdata 余额不足",
     "not_found": "okdata 查无此项（这次已按规则计费）",
     "rate_limited": "okdata 请求过于频繁，稍后重试",
     "capability_paused": "okdata 接口暂停（不扣费），稍后重试",
@@ -198,10 +198,14 @@ def _decorate(capability: str, obj: Any) -> dict:
     author = obj.get("author") if isinstance(obj.get("author"), dict) else {}
     metrics = obj.get("metrics") if isinstance(obj.get("metrics"), dict) else {}
     images = obj.get("images") if isinstance(obj.get("images"), list) else []
-    text = obj.get("text") or obj.get("title") or ""
+    # 正文归一：真实接口可能把全文放在 content / body / desc 而非 text，
+    # 这里按 text > content > body > desc 优先级收敛到 text，页面只读 text 即可。
+    text = (obj.get("text") or obj.get("content") or obj.get("body")
+            or obj.get("desc") or obj.get("title") or "")
     if obj.get("id"):
         for k in ("aweme_id", "note_id", "video_id", "item_id", "post_id"):
             _set(d, k, obj["id"])
+    _set(d, "text", text)
     _set(d, "desc", text)
     _set(d, "title", obj.get("title") or text[:80])
     _set(d, "nickname", author.get("name") or author.get("username") or "")
@@ -377,6 +381,10 @@ class OkdataClient:
 
             message = (_ERROR_TEXT.get(code) or
                        f"okdata 调用失败（HTTP {resp.status_code}，{code or '未知错误'}）")
+            if code == "insufficient_balance":
+                # 余额不足时给出精确充值地址；内容提取页直接上屏 resp.message，
+                # 拼在这里一次到位，不必每个页面各写一遍。
+                message += f"，请到 {OkdataClient.recharge_hint} 充值后重试"
             detail = raw.get("message") or raw.get("reason") or ""
             if detail and detail not in message:
                 message += f"：{str(detail)[:120]}"

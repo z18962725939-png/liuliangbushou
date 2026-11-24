@@ -62,8 +62,11 @@ check("主窗口导出按钮带 tooltip（客户知道点了会发生什么）",
 lp = read("gui_qt/pages/live_page.py")
 check("直播页有失败详情窗统一工厂 _open_fail_dialog",
       "def _open_fail_dialog" in lp)
-check("直播页两处失败窗都走统一工厂（rec_fail + _on_record_done）",
-      lp.count("self._open_fail_dialog(") == 2,
+# 2026-11-24：轮询自动录制失败也复用了同一个工厂（_on_auto_record），调用点从
+# 2 增到 3，这是正确的复用而非退化。断言只要求「至少两处且都走工厂」，不写死计数；
+# 若有人退回直接 QMessageBox.warning 显示失败详情，下面的 setDetailedText 检查会拦住。
+check("直播页失败窗都走统一工厂（手动+录制完成+轮询自动录制）",
+      lp.count("self._open_fail_dialog(") >= 2,
       f"实际 {lp.count('self._open_fail_dialog(')} 处")
 check("失败窗不再用 QMessageBox 的英文详情按钮（setDetailedText）",
       "setDetailedText" not in lp, "Qt 硬编码「Show Details...」，客户看不懂")

@@ -129,6 +129,18 @@ try:
 except SyntaxError as exc:
     chk("AST 解析", False, str(exc))
 
+print("\n== 2b. 内容提取健壮性（provider 守卫 / 正文字段兼容）==")
+chk("两个付费入口都有 okdata provider 守卫",
+    src.count('getattr(client, "provider", "") != "okdata"') >= 2)
+chk("provider 不符时提示切回 okdata", "这两个功能仅支持 okdata 通道" in src)
+okc_src = (ROOT / "justoneapi_collector" / "okdata_client.py").read_text(encoding="utf-8")
+chk("正文兼容链 text>content>body>desc",
+    'obj.get("text") or obj.get("content") or obj.get("body")' in okc_src
+    and 'or obj.get("desc")' in okc_src
+    and '_set(d, "text", text)' in okc_src)
+chk("余额不足提示带精确充值地址", "OkdataClient.recharge_hint" in okc_src)
+chk("空结果明示已计费", "_BILLED_EMPTY" in src and "（本次查询已计费）" in src)
+
 print("\n== 3. 接入清单（漏一处打包后静默失效）==")
 def read(rel: str) -> str:
     try:

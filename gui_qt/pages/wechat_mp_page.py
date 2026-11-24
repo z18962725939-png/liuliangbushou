@@ -55,7 +55,21 @@ COLS_SEARCH = ["类型", "发布时间", "标题", "来源账号", "阅读档位
 _COST_HINT = (
     "按 okdata 官方价：搜公众号 $0.058/条（单次最多 $0.58），其余每次 $0.02；"
     "查无结果也照常计费。请先在「设置 → 数据服务」填好自己的 okd_ Key 并确认余额。"
+    "「一次全查」会串行调用正文 + 互动 + 评论共 3 次，预估 $0.06，请确认余额充足再点。"
 )
+
+# 空结果也照常计费，明示一次，免得客户以为没花钱。
+_BILLED_EMPTY = "（本次查询已计费）"
+
+
+def _key_hint(ctx) -> str:
+    """按当前数据服务商给出凭证文案：okdata 填 Key，JustOneAPI 填 Token。"""
+    try:
+        provider = str((getattr(ctx, "settings", {}) or {}).get(
+            "api_provider", "okdata") or "okdata").strip().lower()
+    except Exception:                                  # noqa: BLE001
+        provider = "okdata"
+    return "okd_ 开头的 Key" if provider != "justoneapi" else "API Token"
 
 
 def _payload(worker, client, endpoint: str, params: dict) -> dict:
@@ -146,7 +160,6 @@ class WechatMpPage(QWidget):
             "account": [], "article": [], "comment": [], "search": [],
         }
         self._cursor = {"article": "", "search": ""}
-        self._has_more = {"article": False, "search": False}
         self._detail_text = ""
         self.status = StatusLine("选一块工作区开始：找号 → 看文章 → 查数据", parent=self)
         self._build()
@@ -177,7 +190,10 @@ class WechatMpPage(QWidget):
             return
         client = getattr(self.ctx, "client", None)
         if client is None:
-            self._say("数据服务未连接，请到「设置 → 数据服务」填好 okd_ Key", "error")
+            self._say("数据服务未连接，请到「设置 → 数据服务」填 " + _key_hint(self.ctx), "error")
+            return
+        elif getattr(client, "provider", "") != "okdata":
+            self._say("这两个功能仅支持 okdata 通道，请在 设置 → 数据服务 切换数据服务商为 okdata", "error")
             return
         self.progress.setValue(0)
         self._say(f"正在{label}…", "idle")
@@ -320,7 +336,8 @@ class WechatMpPage(QWidget):
             lambda x: _num(x.get("posts")),
             lambda x: x.get("bio"),
         ])
-        self._say(f"找到 {len(rows)} 个公众号（搜索按返回条数计费，翻页请再次搜索）",
+        self._say(f"找到 {len(rows)} 个公众号（搜索按返回条数计费，翻页请再次搜索）"
+                  + ("" if rows else _BILLED_EMPTY),
                   "ok" if rows else "warn")
 
     def _account_to_articles(self):
@@ -422,7 +439,8 @@ class WechatMpPage(QWidget):
         self._cursor["article"] = cursor if more else ""
         self.next_article_btn.setEnabled(bool(cursor and more))
         self._say(f"列出 {len(rows)} 篇文章，累计 {len(self._rows['article'])} 篇"
-                  "（历史文章列表通常不含阅读数，点「查互动数据」另查）",
+                  "（历史文章列表通常不含阅读数，点「查互动数据」另查）"
+                  + ("" if rows else _BILLED_EMPTY),
                   "ok" if rows else "warn")
 
     def _picked_article_url(self) -> str:
@@ -514,7 +532,10 @@ class WechatMpPage(QWidget):
             return
         client = getattr(self.ctx, "client", None)
         if client is None:
-            self._say("数据服务未连接，请到「设置 → 数据服务」填好 okd_ Key", "error")
+            self._say("数据服务未连接，请到「设置 → 数据服务」填 " + _key_hint(self.ctx), "error")
+            return
+        elif getattr(client, "provider", "") != "okdata":
+            self._say("这两个功能仅支持 okdata 通道，请在 设置 → 数据服务 切换数据服务商为 okdata", "error")
             return
         self.progress.setValue(0)
         self._say("正在查询文章数据…", "idle")
@@ -568,7 +589,7 @@ class WechatMpPage(QWidget):
                     lambda x: str(x.get("created_at") or "")[:19].replace("T", " "),
                     lambda x: x.get("ip_location") or x.get("ip"),
                 ])
-        self._say("；".join(notes) if notes else "文章数据查询完成",
+        self._say("；".join(notes) if notes else "文章数据查询完成" + _BILLED_EMPTY,
                   "error" if notes else "ok")
 
     def _save_markdown(self):
@@ -689,7 +710,8 @@ class WechatMpPage(QWidget):
         cursor, more = _page_info(getattr(resp, "data", None))
         self._cursor["search"] = cursor if more else ""
         self.next_search_btn.setEnabled(bool(cursor and more))
-        self._say(f"找到 {len(rows)} 条结果，累计 {len(self._rows['search'])} 条",
+        self._say(f"找到 {len(rows)} 条结果，累计 {len(self._rows['search'])} 条"
+                  + ("" if rows else _BILLED_EMPTY),
                   "ok" if rows else "warn")
 
     def _search_to_diag(self):

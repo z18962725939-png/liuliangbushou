@@ -318,7 +318,14 @@ check("状态显示扫描/命中", "30" in page.status.text() and "1" in page.st
 check("demo 判定", ctx.demo is True)
 page2 = CommentPage(ctx)
 check("未连接服务时表是空的", page2.table.rowCount() == 0)
-check("未连接服务时提示明确", "未连接采集服务" in page2.status.text(), page2.status.text())
+# 2026-11-23 起文案由 connection_diagnosis() 按通道精确生成（缺 okdata Key /
+# 授权码缺凭证 分开说），比旧的笼统「未连接采集服务」更准。断言改为验「有明确
+# 警示且给出可操作方向」，不再钉死某句过时文案。
+_status_txt = page2.status.text()
+check("未连接服务时提示明确",
+      bool(_status_txt) and ("未连接" in _status_txt or "请先" in _status_txt
+                             or "Key" in _status_txt or "激活" in _status_txt),
+      _status_txt)
 
 print()
 print("=" * 62)

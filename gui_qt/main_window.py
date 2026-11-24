@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
 
 from justoneapi_collector import branding
 from gui_qt.guide_dialog import open_guide
+from gui_qt.subwindow import SubWindow
 from gui_qt.icons import (group_caret_icon, help_icon, logo_icon, nav_icon,
                           theme_toggle_icon)
 from gui_qt.pages._base import AppContext

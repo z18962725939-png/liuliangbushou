@@ -75,7 +75,7 @@ def main():
 
     from gui_qt.theme import apply_theme
     from gui_qt.pages._base import AppContext
-    from gui_qt.pages.live_page import LivePage
+    from gui_qt.pages.live_page import LivePage, _short_fail_reason
     from justoneapi_collector.live_monitor import LiveStatus
 
     app = QApplication(sys.argv)
@@ -158,6 +158,48 @@ def main():
     check("检查失败" in page.status.text() or "失败" in page.status.text(),
           f"异常不吞掉，明确报错：{page.status.text()}")
     stub.raise_on_check = False
+
+    print("\n=== 7) 轮询自动录制失败回调被 UI 消费（P0 回归） ===")
+    # live_monitor 的轮询 / do_record 跑在后台线程，不能直接碰 Qt 控件：
+    # 必须经 QMetaObject.invokeMethod(..., Qt.QueuedConnection) 投递回主线程。
+    page_src = open(os.path.join(ROOT, "gui_qt", "pages", "live_page.py"),
+                    encoding="utf-8").read()
+    check("QMetaObject.invokeMethod" in page_src and "Qt.QueuedConnection" in page_src,
+          "轮询回调走 invokeMethod + QueuedConnection 回主线程")
+    check(all(f"on_{name}=self." in page_src
+              for name in ("status_change", "tick", "auto_record")),
+          "三个回调全部接线（status_change / tick / auto_record）")
+    check("def _on_auto_record" in page_src
+          and "_short_fail_reason(text)" in page_src
+          and "setToolTip" in page_src,
+          "主线程槽 _on_auto_record 存在且失败原因压短上屏")
+
+    # 模拟回调已投递到主线程：直接调槽，验证「失败不再静默」。
+    uid = "web_rid:7695002154"
+    page.table.setRowCount(0)
+    page._add_row("老桃带你玩", "链接", "直播中", uid, "7695002154", "-",
+                  sec_uid=uid)
+    dialogs = []
+    page._open_fail_dialog = lambda *a: dialogs.append(a)
+    fail_msg = "自动解析直播流失败：403 Forbidden\n诊断：同一个出口也拉不到流"
+    page._on_auto_record(uid, "fail", fail_msg)
+    short = _short_fail_reason(fail_msg)
+    cell = page.table.item(0, 2)
+    check(cell is not None and cell.text() == short,
+          "fail：状态列显示短原因" + (f"（实际：{cell.text()}）" if cell else ""))
+    check(cell is not None and cell.toolTip() == fail_msg,
+          "fail：状态列 tooltip 带完整原因" + (f"（实际：{cell.toolTip()}）" if cell else ""))
+    check(short in page.status.text(),
+          "fail：状态栏给出可行动提示" + f"（实际：{page.status.text()}）")
+    check(len(dialogs) == 1, "fail：多行原因弹可复制详情窗" + str(dialogs))
+
+    page._on_auto_record(uid, "start", "started")
+    check("已自动开始录制" in page.status.text(),
+          "start：状态栏确认已开录" + f"（实际：{page.status.text()}）")
+    page._on_auto_record(uid, "stop", "博主已下播，录制已停止")
+    cell = page.table.item(0, 2)
+    check(cell is not None and cell.text() == "未开播",
+          "stop：状态列复位为未开播" + (f"（实际：{cell.text()}）" if cell else ""))
 
     print("\n" + ("全部通过 ✅" if not _fail else f"存在失败项 ❌ {len(_fail)} 条"))
     for f in _fail:

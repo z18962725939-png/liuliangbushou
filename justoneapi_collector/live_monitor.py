@@ -1114,6 +1114,26 @@ class LiveMonitor:
                             # Just went live → auto-resolve + record
                             def do_record(su=sec_uid):
                                 ok, msg = self.auto_record(su)
+                                if not ok:
+                                    # ★ 自动录制失败补一次只读出网实测：
+                                    #   _check_tiktok 的 2 分钟重扫只在 stream_error
+                                    #   非空时触发，TUN 直连「状态查得到、拉不到流」
+                                    #   时 stream_error 为空 ⇒ 永不重扫。这里把
+                                    #   「直连 / 代理 / 无出口」并进反馈帮客户定性。
+                                    #   绝不把结果写回代理状态：那会牵动出口状态机。
+                                    target = self._targets.get(su)
+                                    is_tiktok = (bool(target and target.platform == "tiktok")
+                                                 or str(su).startswith("tiktok:"))
+                                    if is_tiktok:
+                                        try:
+                                            _proxy, mode = tiktok_live.detect_egress(
+                                                timeout=2.0, budget=5.0)
+                                            label = {"direct": "直连/TUN",
+                                                     "proxy": "代理",
+                                                     "none": "无出口"}.get(mode, mode)
+                                            msg = f"{msg}（出网实测：{label}）"
+                                        except Exception:           # noqa: BLE001
+                                            pass
                                 if on_auto_record:
                                     try:
                                         status = "start" if ok else "fail"
@@ -1830,23 +1850,6 @@ class LiveMonitor:
                 st.is_recording = False
                 st.record_start_time = 0.0
         return len(live)
-
-    # ==================================================================
-    #  Stream URL helpers
-    # ==================================================================
-
-    def try_build_stream_url(self, room_id: str) -> str | None:
-        """
-        Attempt to construct a stream URL from a room_id.
-
-        NOTE: Douyin's CDN URL format changes frequently and this may not
-        work. This is a best-effort fallback; users should paste the
-        actual stream URL when known.
-        """
-        if not room_id or room_id == "0":
-            return None
-        # Common fallback patterns — may not work for all rooms
-        return f"https://pull-flv-f77.douyincdn.com/thirdparty/stream-{room_id}.flv"
 
     def close(self):
         self.stop_polling()

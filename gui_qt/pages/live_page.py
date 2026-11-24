@@ -10,7 +10,7 @@ live_monitor.LiveMonitor（经 AppContext.ensure_monitor 注入）。
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, QMetaObject, Q_ARG, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMessageBox,
@@ -910,7 +910,12 @@ class LivePage(QWidget):
         if sdir:
             self.ctx.set_setting("lm_save_dir", sdir)
         self.ctx.save_settings()
-        dm.start_polling(interval=interval)
+        dm.start_polling(
+            interval=interval,
+            on_status_change=self._poll_status_change,
+            on_tick=self._poll_tick,
+            on_auto_record=self._poll_auto_record,
+        )
         if not dm.ffmpeg_path():
             self.status.setText(f"监控中（每 {interval} 秒）—— 注意：未找到 ffmpeg，开播自动录制不会生效")
         else:
@@ -924,6 +929,97 @@ class LivePage(QWidget):
             except Exception:  # noqa: BLE001
                 pass
         self.status.setText("已停止监控")
+
+    # ------------------------------------------- 轮询回调（后台线程 → 主线程）
+    # ★ live_monitor 的轮询 / 自动录制跑在后台线程，不能直接碰 Qt 控件。
+    #   下面三个 _poll_* 是「投递器」：只把数据 marshalling 回主线程，
+    #   真正的界面刷新由 @Slot 槽在主线程做，绝不跨线程读写控件。
+    def _poll_status_change(self, st):
+        QMetaObject.invokeMethod(
+            self, "_on_poll_status_change", Qt.QueuedConnection,
+            Q_ARG(str, str(getattr(st, "sec_uid", "") or "")))
+
+    def _poll_tick(self, checked, total):
+        QMetaObject.invokeMethod(
+            self, "_on_poll_tick", Qt.QueuedConnection,
+            Q_ARG(int, int(checked or 0)), Q_ARG(int, int(total or 0)))
+
+    def _poll_auto_record(self, uid, status, msg):
+        QMetaObject.invokeMethod(
+            self, "_on_auto_record", Qt.QueuedConnection,
+            Q_ARG(str, str(uid or "")), Q_ARG(str, str(status or "")),
+            Q_ARG(str, str(msg or "")))
+
+    @Slot(str)
+    def _on_poll_status_change(self, uid: str):
+        """轮询期间开播/下播翻转：刷新状态列与房间号（主线程）。"""
+        dm = self._daemon()
+        if dm is None:
+            return
+        row = self._row_for(uid)
+        if row < 0:
+            return
+        try:
+            st = next((t for t in dm.get_targets()
+                       if str(getattr(t, "sec_uid", "") or "") == uid), None)
+        except Exception:  # noqa: BLE001
+            st = None
+        if st is None:
+            return
+        unknown = (getattr(st, "stream_error", "") or "").startswith("状态检查失败")
+        label = ("状态未知" if unknown
+                 else ("直播中" if getattr(st, "is_live", False) else "未开播"))
+        self._set_cell(row, 2, label,
+                       (getattr(st, "stream_error", "") or "") if unknown else "")
+        it = self.table.item(row, 2)
+        if it is not None:
+            it.setForeground(self._color_for_status(label))
+        self._set_cell(row, 3, getattr(st, "room_id", "") or "-")
+
+    @Slot(int, int)
+    def _on_poll_tick(self, checked: int, total: int):
+        """每轮扫完同步录制列；状态栏故意不写，免得盖掉刚上屏的失败结论。"""
+        dm = self._daemon()
+        if dm is not None:
+            self._sync_recording_rows(dm)
+
+    @Slot(str, str, str)
+    def _on_auto_record(self, uid: str, status: str, msg: str):
+        """轮询自动录制结果上屏（主线程）：fail 显示原因 / start 刷新录制列 / stop 复位。
+
+        ★ 这是「检测到开播却静默失败」的最后一环：live_monitor 里精心构造的
+          on_auto_record 回调过去没有消费者。状态栏是单行，只放短结论；
+          完整原因进 tooltip 和可复制的详情窗（与手动录制失败同一套呈现）。
+        """
+        row = self._row_for(uid)
+        if status == "fail":
+            text = (msg or "").strip()
+            if row >= 0:
+                self._set_cell(row, 2, _short_fail_reason(text), text)
+            self.status.setText(
+                f"检测到正在直播，但录制未启动：{_short_fail_reason(text)}")
+            try:
+                self.status.setToolTip(text)
+            except Exception:  # noqa: BLE001
+                pass
+            if len(text.splitlines()) > 1:
+                self._fail_box = self._open_fail_dialog(
+                    "录制没有启动起来",
+                    "轮询中检测到开播，但自动录制没能启动。",
+                    text)
+        elif status == "start":
+            self.status.setText("检测到正在直播，已自动开始录制")
+            dm = self._daemon()
+            if dm is not None:
+                self._sync_recording_rows(dm)
+            if row >= 0:
+                self.table.selectRow(row)
+        elif status == "stop":
+            if row >= 0:
+                self._set_cell(row, 2, "未开播")
+                self._set_cell(row, 4, "-")
+                self._set_cell(row, 5, "-")
+            self.status.setText("博主已下播，录制已停止")
 
     def _check_now(self):
         dm = self._ensure_daemon()

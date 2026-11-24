@@ -181,6 +181,15 @@ c = _translate("douyin.videos.comments.list", {"code": "ok", "data": {"items": [
 check("评论内容别名 content", c.get("content") == "好内容")
 check("评论点赞别名 digg_count", c.get("digg_count") == 12)
 
+# 正文兼容：真实接口可能把全文放 content/body/desc，统一归一到 text。
+for _field in ("content", "body", "desc"):
+    _r = _translate("xiaohongshu.notes.get", {
+        "code": "ok", "data": {"item": {_field: "正文文本"}}})
+    check(f"正文兼容 {_field} → text", _r.get("item", {}).get("text") == "正文文本")
+_r = _translate("xiaohongshu.notes.get", {"code": "ok", "data": {"item": {
+    "text": "T", "content": "C", "body": "B", "desc": "D"}}})
+check("正文优先级 text>content>body>desc", _r["item"].get("text") == "T")
+
 # ------------------------------------------------------------------ 调用与错误
 c, http = make_client(raw_list)
 resp = c.request("douyin-tiktok-china", "user-published-videos-v1", {"secUid": "abc"})
@@ -204,6 +213,7 @@ c, http = make_client({"code": "insufficient_balance", "charged": False}, status
 resp = c.request("douyin", "user-profile-v3", {"secUid": "abc"})
 check("402 失败", resp.success is False)
 check("402 提示 okdata 余额不足", "okdata 余额不足" in resp.message)
+check("402 充值引导拼上精确地址", OkdataClient.recharge_hint in resp.message)
 
 c, http = make_client({"code": "ok", "data": {}}, status=200)
 resp = c.request("douyin", "user-profile-v3", {"secUid": "abc"})

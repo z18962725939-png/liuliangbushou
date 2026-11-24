@@ -140,7 +140,12 @@ ctx2.settings["douyin_cookie_ts"] = "10-11 20:00"
 page = SettingsPage(ctx2)
 check("启动时回显已登录", "已登录" in page._login_status["douyin"].text(),
       f"→ {page._login_status['douyin'].text()}")
-check("退出登录按钮出现", page._logout_btns["douyin"].isVisibleTo(page) or page._logout_btns["douyin"].isVisible())
+# 离屏父窗口未 show 时 isVisible()/isVisibleTo() 恒为 False（Qt 语义），
+# 不能用它判断「逻辑上是否显示」——真机父窗口 show 后按钮由 _mark_logged_in
+# 置 setVisible(True)，这里改为断言「没有被显式隐藏」，才算回显正确。
+_logout_btn = page._logout_btns["douyin"]
+check("退出登录按钮出现", not _logout_btn.isHidden(),
+      f"isHidden={_logout_btn.isHidden()}（离屏下 isVisible 恒 False，不可用作判据）")
 page._logout("douyin")
 check("退出登录后清空", "未登录" in page._login_status["douyin"].text()
       and not ctx2.settings.get("douyin_cookie"))

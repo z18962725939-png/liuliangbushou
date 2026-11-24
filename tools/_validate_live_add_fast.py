@@ -155,6 +155,31 @@ check("检查失败不冒充未开播",
       st_bad is not None and st_bad.stream_error.startswith("状态检查失败"),
       getattr(st_bad, "stream_error", ""))
 
+# ★ P1 回归：余额不足提示要指向明确的充值入口，不能 fallback 到裸域名。
+from justoneapi_collector.client import JustOneAPICollector  # noqa: E402
+
+check("主通道有 recharge_hint 属性", bool(getattr(JustOneAPICollector, "recharge_hint", "")))
+check("recharge_hint 不是 api.justoneapi.com 裸域名",
+      "api.justoneapi.com" not in JustOneAPICollector.recharge_hint
+      and "justoneapi.com" in JustOneAPICollector.recharge_hint,
+      JustOneAPICollector.recharge_hint)
+
+
+class _BadClientWithHint(_BadClient):
+    recharge_hint = JustOneAPICollector.recharge_hint
+
+
+dm_hint = LiveMonitor(_BadClientWithHint(),
+                      save_dir=Path(tempfile.mkdtemp(prefix="lm_hint_")),
+                      cdp_fallback=False)
+dm_hint._save_state = lambda: True
+_, _, uid_hint = dm_hint.add_target_by_link(SECU)
+st_hint = dm_hint.check_once(uid_hint)
+hint_msg = getattr(st_hint, "stream_error", "")
+check("余额不足文案用的是 recharge_hint 而非裸域名 fallback",
+      JustOneAPICollector.recharge_hint in hint_msg
+      and "请到 api.justoneapi.com" not in hint_msg, hint_msg)
+
 # ★ 2026-11-23 回归：付费查不到状态时走 CDP 免费兜底（不冒充未开播）
 class _FakeHomeCDP:
     def __init__(self, snap=None):

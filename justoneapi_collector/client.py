@@ -59,6 +59,11 @@ class JustOneAPICollector:
         **overrides: Override any Config field at construction time.
     """
 
+    # 余额不足时给客户一个明确的充值入口，而不是裸域名 api.justoneapi.com。
+    # 源码里能确认的控制台入口是 dashboard.justoneapi.com（见 guide.py 的
+    # Token 获取引导）；具体充值页地址仍需产品确认后再细化。
+    recharge_hint = "JustOneAPI 控制台（dashboard.justoneapi.com）"
+
     def __init__(
         self,
         token: str | None = None,

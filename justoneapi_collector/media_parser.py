@@ -251,13 +251,17 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
     body: dict[str, Any] | None = None
     # ★ 429（限流）单独给一次重试：批量导入几百条时，服务端对"每分钟多少次"
     #   有软限制，撞上就整条失败太亏 —— 而 429 意味着这次**没被处理**，
-    #   重试不会重复扣费。别把客户端超时也重试（那会让批量变慢一倍）。
+    #   重试不会重复扣费。
     # ★ 2026-11-14 客户「tk 无法提取」实测：服务端抓 TikTok 是**间歇性**的，
     #   同一条完整链接连打 3 次里 2 次 200 成功、1 次 502「链接不可访问」。
     #   客户试一次撞上 502 就以为软件不支持。只对 TikTok + 500/502 重发一次，
     #   1.5 秒间隔；其它平台的失败多半是链接真失效，重试无益还拖慢批量。
+    # ★ 2026-11-24：网络超时/瞬时连接失败同样给**恰好 1 次**短间隔（1 秒）重试，
+    #   与 429/502 共用下面同一个 3 次总上限。初衷仍是"批量不能慢一倍"：
+    #   只有第一次抖动才重发，第二次还失败就立刻认输，绝不放开成无限重试。
     _is_tk = "tiktok.com" in payload_text.lower()
     _retried_5xx = False
+    _retried_net = False
     for attempt in (1, 2, 3):
         try:
             with httpx.Client(
@@ -269,6 +273,12 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
                 trust_env=False,          # ★ 服务端在境外，走系统代理反而常超时
             ) as c:
                 r = c.post(f"{BASE_URL}/api/parse", json={"text": payload_text})
+                # ★ 204 是服务端明确的"没有内容"、body 是空的 —— 这是独立的
+                #   语义，不能混进"非 JSON 响应"里让排查没方向。
+                #   （下载侧 CDN 的 204 空文件走 video_downloader 的 st_size
+                #     判据，与本处解析响应无关，别改成同一套处理。）
+                if getattr(r, "status_code", None) == 204:
+                    return None, "解析服务返回空结果(204)，内容可能不可用或服务端异常"
                 try:
                     body = r.json()
                 except Exception:                               # noqa: BLE001
@@ -277,6 +287,11 @@ def parse(text: str, api_key: str = "", timeout: float = DEFAULT_TIMEOUT
             cls = type(e).__name__
             # 超时/网络类：客户做不了任何事，但要让他知道是网络而不是链接坏了
             if "Timeout" in cls or "Connect" in cls or "Network" in cls:
+                # 偶发抖动只救一次；救不回来立刻认输，批量不会整体翻倍。
+                if not _retried_net:
+                    _retried_net = True
+                    time.sleep(1.0)
+                    continue
                 return None, "连不上解析服务（网络超时）—— 换条网络或稍后再试这一条"
             return None, f"解析服务请求失败（{cls}）—— 稍后再试这一条"
 

@@ -398,7 +398,8 @@ def video_file_path(video, save_dir: Path) -> tuple[Path, str]:
     filename = f"{author}_{desc}_{getattr(video, 'video_id', '')}.mp4"
     save_path = save_dir / filename
     # 文件名本身会让 open() 失败的（超长/保留名/结尾点号），换短名
-    return VideoDownloader._prepare_path(save_dir, save_path, video.video_id)
+    return VideoDownloader._prepare_path(save_dir, save_path,
+                                         getattr(video, "video_id", ""))
 
 
 def video_is_downloaded(video, save_dir) -> bool:
@@ -1705,7 +1706,6 @@ class VideoDownloader:
             share_url=str(target or "").strip(),
             image_list=images,
             platform=plat,
-            **({"duration": 0} if False else {}),          # 占位：保持字段顺序可读
         ) if not extra else VideoInfo(
             video_id=str(data.get("video_id") or "").strip(),
             desc=str(data.get("title") or "").strip(),
@@ -3445,24 +3445,40 @@ class VideoDownloader:
 
         # ---- 第 2 段：缺直链的条目走 zacao.top 补（免费端口，不花接口钱）
         missing = [v for v in videos if not v.no_watermark_url]
+        svc_unavailable = ""
         if missing:
+            # ★ 2026-11-24：批量补全前先探活一次。站点整体挂掉时再逐条 parse
+            #   会失败 N 次（慢，而且每条吐一句客户看不懂的错），这里一次探活
+            #   失败就整批短路，只给一句统一的人话。单条解析不经过这里，
+            #   调用契约（返回 (videos, error_msg)）也完全不变。
             try:
-                from .media_parser import parse as _svc_parse
+                from .media_parser import health as _svc_health
+                _ok, _note = _svc_health()
             except Exception:                           # noqa: BLE001
-                _svc_parse = None
-            for i, v in enumerate(missing):
-                if _svc_parse is not None:
-                    try:
-                        data, _r = _svc_parse(v.share_url)
-                    except Exception:                   # noqa: BLE001
-                        data = None
-                    if data and data.get("video_url"):
-                        v.no_watermark_url = str(data["video_url"])
-                if i < len(missing) - 1:
-                    time.sleep(0.6)     # 对齐批量导入节流节奏，别触发服务端 429
+                _ok, _note = False, "探活异常"
+            if not _ok:
+                svc_unavailable = "解析服务当前不可用"
+            else:
+                try:
+                    from .media_parser import parse as _svc_parse
+                except Exception:                           # noqa: BLE001
+                    _svc_parse = None
+                for i, v in enumerate(missing):
+                    if _svc_parse is not None:
+                        try:
+                            data, _r = _svc_parse(v.share_url)
+                        except Exception:                   # noqa: BLE001
+                            data = None
+                        if data and data.get("video_url"):
+                            v.no_watermark_url = str(data["video_url"])
+                    if i < len(missing) - 1:
+                        time.sleep(0.6)     # 对齐批量导入节流节奏，别触发服务端 429
         ok = sum(1 for v in videos if v.no_watermark_url)
-        note = f"快手作品 {len(videos)} 条" + (
-            f"，{len(videos) - ok} 条暂缺下载地址（可重新解析）" if ok < len(videos) else "")
+        note = f"快手作品 {len(videos)} 条"
+        if svc_unavailable:
+            note += f"，{svc_unavailable}，{len(missing)} 条暂缺下载地址（稍后再试）"
+        elif ok < len(videos):
+            note += f"，{len(videos) - ok} 条暂缺下载地址（可重新解析）"
         self._last_list_note = note
         return videos, partial_err
 
@@ -3514,7 +3530,6 @@ class VideoDownloader:
             reasons.append(f"ID {vid[:10]}… 查询无结果")
         # 2) 从 URL 提取 ID 直查
         for url in urls:
-            v = platform == "douyin" and None
             # 不同平台 ID 在 URL 里的形态不同：小红书 noteId、快手 photoId、TikTok id
             m = re.search(r"(?:video|note|v|share/video|share/note)/([A-Za-z0-9_\-]+)", url)
             if m and not m.group(1).isdigit():
@@ -3549,26 +3564,6 @@ class VideoDownloader:
                 reasons.append(f"接口异常({type(e).__name__})")
         return None, "；".join(reasons) if reasons else "未识别到有效链接"
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def resolve_share_link_with_reason(self, share_text: str,
                                       platform: str = "auto") -> tuple[VideoInfo | None, str]:
         """解析作品分享链接/ID → VideoInfo。platform='auto' 时按域名自动分流。"""
@@ -3586,11 +3581,6 @@ class VideoDownloader:
             return self._resolve_share_link_with_reason_p(platform, share_text)
         # —— 以下为抖音原逻辑（保持不动）——
         return self._resolve_douyin_share_link_with_reason(share_text)
-
-
-
-
-
 
     def resolve_blogger_link(self, profile_text: str,
                              platform: str = "auto") -> BloggerInfo | None:
