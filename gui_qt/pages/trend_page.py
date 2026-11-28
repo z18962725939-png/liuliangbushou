@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from ._base import connect_guarded
 from ._base import (confirm_destructive, danger_button, page_title, section_header)
 from gui_qt.widgets.kit import DisclosurePanel, MetricBoard
 from gui_qt.widgets.stat import TrendChart, palette
@@ -123,10 +124,10 @@ class TrendPage(QWidget):
         ctl.addStretch()
         self.prune_btn = QPushButton("清理一年前的记录")
         self.prune_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.prune_btn.clicked.connect(self._on_prune)
+        connect_guarded(self.prune_btn.clicked, lambda *_: self._on_prune(), on_error=lambda msg: self.status.setText(msg), label="on prune")
         ctl.addWidget(self.prune_btn)
         self.clear_btn = danger_button("清空全部记录")
-        self.clear_btn.clicked.connect(self._on_clear)
+        connect_guarded(self.clear_btn.clicked, lambda *_: self._on_clear(), on_error=lambda msg: self.status.setText(msg), label="on clear")
         ctl.addWidget(self.clear_btn)
         top_l.addLayout(ctl)
         root.addWidget(top)
@@ -228,11 +229,11 @@ class TrendPage(QWidget):
         row4.addStretch()
         self.copy_btn = QPushButton("复制选中链接")
         self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.copy_btn.clicked.connect(self._copy_link)
+        connect_guarded(self.copy_btn.clicked, lambda *_: self._copy_link(), on_error=lambda msg: self.status.setText(msg), label="copy link")
         row4.addWidget(self.copy_btn)
         self.export_btn = QPushButton("导出 Excel")
         self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         row4.addWidget(self.export_btn)
         lib_l.addLayout(row4)
 

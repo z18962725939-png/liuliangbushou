@@ -361,7 +361,7 @@ class HomePage(QWidget):
             # 图标染成能量色（浅色 #C4F13E / 深色 #C8F751），落在柠檬浅底上
             card = ActionCard(nav_icon(name, palette(self._mode)["acid"], 24),
                               name, desc, self._mode, badge, vertical=True)
-            card.clicked.connect(lambda _c=False, n=name: self._goto(n))
+            connect_guarded(card.clicked, lambda *_: self._goto(n), on_error=lambda msg: None, label="goto")  # 首页无状态栏，异常已由守卫写日志
             gl.addWidget(card, i // 3, i % 3)
             self._cards.append(card)
             self._card_pairs.append((card, name))
@@ -386,7 +386,7 @@ class HomePage(QWidget):
             b = QPushButton(name)
             b.setObjectName("ToolPill")
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _c=False, n=name: self._goto(n))
+            connect_guarded(b.clicked, lambda *_: self._goto(n), on_error=lambda msg: None, label="goto")  # 首页无状态栏，异常已由守卫写日志
             self.more_row.addWidget(b)
         self.more_row.addStretch()
         root.addLayout(self.more_row)
@@ -411,7 +411,7 @@ class HomePage(QWidget):
           客户不会读更新日志，但会看见右上角有个能点的东西。
         """
         pill = _SearchPill(self._mode)
-        pill.clicked.connect(self._open_palette)
+        connect_guarded(pill.clicked, lambda *_: self._open_palette(), on_error=lambda msg: None, label="open palette")  # 首页无状态栏，异常已由守卫写日志
         self._pill = pill
         return pill
 
@@ -762,7 +762,7 @@ class HomePage(QWidget):
         if not logged and state == "licensed":
             hints.append("没登录抖音：作品抓取会走付费接口，同样的数据多花额度。")
         if not unlimited and limit > 0 and used >= limit:
-            hints.append("今日额度已用完，明天 16:00 自动重置。")
+            hints.append("今日额度已用完，明天 0 点自动重置。")
         self.checker.setToolTip(" · ".join(hints) if hints else "三项都正常，直接点下面的功能开工。")
         self._style_check_pill(pending)
         # P2：作业卡每次刷新都重画（含切主题后的进度点颜色）

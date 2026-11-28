@@ -2,8 +2,8 @@
 import traceback
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QPushButton, QScrollArea,
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QMainWindow, QPushButton, QScrollArea,
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from justoneapi_collector import branding
@@ -54,12 +54,16 @@ NAV_GROUPS = [
         "选题挖掘",
         "关键词抓取",
         "文案仿写",
+    ]),
+    ("素材与短剧", [
         "视频下载",
         "视频号解析",
         # 短剧解析 → 短剧成片是一对上下游入口
         "短剧解析",
         # 排在「视频下载」之后：下载拿素材 → 剪辑出成片
         "短剧成片",
+    ]),
+    ("平台内容", [
         "公众号运营",
         "小红书笔记",
     ]),
@@ -697,7 +701,7 @@ class MainWindow(QMainWindow):
 
         nav = QFrame()
         nav.setObjectName("NavBar")
-        nav.setFixedWidth(220)
+        nav.setFixedWidth(252)
         nv = QVBoxLayout(nav)
         nv.setContentsMargins(12, 16, 12, 16)
         nv.setSpacing(4)
@@ -727,11 +731,16 @@ class MainWindow(QMainWindow):
             body = QFrame()
             body.setObjectName("NavGroupBody")
             body.setFrameShape(QFrame.Shape.NoFrame)
-            bv = QVBoxLayout(body)
-            # 二级比一级右缩 14px：层级是"退"出来的，不是靠加粗描出来的
-            bv.setContentsMargins(14, 2, 0, 6)
-            bv.setSpacing(4)
+            # ★ 组内功能项卡片化（2026-11-25）：分组头 / 手风琴骨架一律不动，
+            #   只把组内二级入口从竖排文字改成 2 列网格 —— 每项是一块可点的
+            #   卡片，客户说"直接选择点击，对应右侧展开"。
+            #   单功能组（开始 / 设置 / 免费版各组）自然退化成单列。
+            bv = QGridLayout(body)
+            bv.setContentsMargins(8, 2, 8, 8)
+            bv.setHorizontalSpacing(8)
+            bv.setVerticalSpacing(8)
             self._group_bodies[group] = []
+            cols = max(1, min(2, len(items)))
 
             gt = QPushButton(group)
             # 分组标题用 11px：它是"分隔标签"，不该跟导航项抢视觉重量。
@@ -781,13 +790,14 @@ class MainWindow(QMainWindow):
             hide_head = group in _NAV_PINNED and len(items) == 1
             if hide_head:
                 gt.setVisible(False)
-            for name in items:
+            for idx, name in enumerate(items):
                 btn = QPushButton(name)
                 btn.setObjectName("NavItem")
                 btn.setCheckable(True)
                 btn.setIconSize(QSize(18, 18))
                 btn.clicked.connect(lambda _checked=False, n=name: self._switch(n))
-                bv.addWidget(btn)
+                # idx 从 0 起：// cols 是行，% cols 是列
+                bv.addWidget(btn, idx // cols, idx % cols)
                 self._nav_buttons.append((name, btn))
                 self._group_bodies[group].append(btn)
                 # ★ 单个页面构造失败绝不能拖垮整个窗口（2026-10-19 客户报障）：
@@ -984,6 +994,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------- 一级菜单（手风琴）
     def _collapsible_groups(self) -> list:
         """可折叠的一级菜单名（「开始」「设置」不参与 —— 见 _NAV_PINNED 注释）。"""
+        # ★ 2026-11-24 P0：免费版只有「下载」「工具」「设置」三组、每组一个
+        #   功能，折叠毫无价值；而启动时的手风琴会把同时摊开的两组压成一组，
+        #   第二个真功能「直播监控」就这么被藏起来了。免费版一律常驻、
+        #   不参与自动折叠；完整版逻辑原样保留。
+        if branding.APP_IS_FREE:
+            return []
         return [g for g, _items in NAV_GROUPS if g not in _NAV_PINNED]
 
     def _is_expanded(self, group: str) -> bool:

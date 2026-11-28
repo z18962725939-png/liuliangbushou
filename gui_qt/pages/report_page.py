@@ -10,7 +10,7 @@ from ._base import danger_button, guide_banner, page_title, vertical_card, Statu
 
 # ★ 2026-10-31 重建补回：下面这些 import 在源码反向重建时丢失，
 #   页面一打开就 NameError（按 pyflakes 的 undefined name 定位）。
-from ._base import require_feature
+from ._base import connect_guarded, require_feature
 
 
 class ReportPage(QWidget):
@@ -38,10 +38,15 @@ class ReportPage(QWidget):
 
         r2 = QHBoxLayout()
         b_gen = QPushButton("生成报告"); b_gen.setObjectName("Primary")
-        b_gen.clicked.connect(self._generate)
-        b_xlsx = QPushButton("导出 Excel"); b_xlsx.clicked.connect(self._export_xlsx)
-        b_html = QPushButton("导出 HTML"); b_html.clicked.connect(self._export_html)
+        connect_guarded(b_gen.clicked, lambda *_: self._generate(), on_error=lambda msg: self.status.setText(msg), label="generate")
+        b_xlsx = QPushButton("导出 Excel"); connect_guarded(b_xlsx.clicked, lambda *_: self._export_xlsx(), on_error=lambda msg: self.status.setText(msg), label="export xlsx")
+        b_html = QPushButton("导出 HTML"); connect_guarded(b_html.clicked, lambda *_: self._export_html(), on_error=lambda msg: self.status.setText(msg), label="export html")
         b_open = QPushButton("打开报告目录")
+        b_open.setToolTip("在文件管理器里打开报告默认保存目录")
+        # on_error 必须是延迟求值：self.status 在本方法末尾才创建，
+        # 直接传 self.status.setText 会在参数求值瞬间就抛 AttributeError。
+        connect_guarded(b_open.clicked, lambda *_: self._open_report_dir(),
+                        on_error=lambda msg: self.status.setText(msg), label="打开报告目录")
         r2.addWidget(b_gen); r2.addWidget(b_xlsx); r2.addWidget(b_html); r2.addWidget(b_open)
         r2.addStretch()
         top_l.addLayout(r2)
@@ -78,15 +83,38 @@ class ReportPage(QWidget):
         except ValueError:
             days = 7
         try:
-            project = pm.current_project()
-            tower = pm.watch_tower(project)
+            # projects.py:263-267：current 是 @property，不能写成 pm.current()；
+            # 旧的 current_project() 根本不存在。两种历史写法都兼容一下。
+            cur = getattr(pm, "current", None)
+            project = cur() if callable(cur) else cur
+            if project is None:
+                ensure = getattr(pm, "ensure_default", None)
+                project = ensure() if callable(ensure) else None
+            if project is None:
+                self.status.setText("项目数据未就绪：请先在「设置」中配置项目")
+                self.status.mark("warn")
+                return
+            # build_report 的第二个参数是 WatchTower（reporter.py:167），不是
+            # ProjectManager 上的方法。ops_ui.py:759 用项目根目录下的「监控数据」
+            # 建塔，PySide 周报页沿用同一份数据源，两边口径一致。
             from justoneapi_collector.reporter import build_report
+            from justoneapi_collector.watchtower import WatchTower
+            tower = WatchTower(project.root / "监控数据")
             data = build_report(project, tower, period_days=days)
             self._data = data
             self.conclusion.setText("\n".join(build_highlights(data)) if (build_highlights := _highlights()) else "报告已生成")
+            if not data.accounts and not data.posts:
+                # 数据为空是正常状态，不是故障：给可操作说明，别让用户以为白点了。
+                self.conclusion.setText(
+                    "作品塔尚未积累：项目目录「监控数据」里还没有账号/作品快照。\n"
+                    "· 请到「复盘监控」加入账号并点「立即刷新快照」：刷新会同时写粉丝"
+                    "事实表和作品塔（本项目报告的数据源）；\n"
+                    "· 若该次接口未返回作品列表，作品塔只建粉丝基线，作品明细仍为空；"
+                    "快照落盘后再生成即可看到结论。")
             self.status.setText(f"已生成 {data.period_text} 报告")
         except Exception as e:  # noqa: BLE001
             self.status.setText(f"生成失败：{e}")
+            self.status.mark("error")
 
     def _export_xlsx(self):
         if self._data is None:
@@ -102,6 +130,18 @@ class ReportPage(QWidget):
             self.status.setText(f"已导出：{path}")
         except Exception as e:  # noqa: BLE001
             self.status.setText(f"导出失败：{e}")
+
+    def _open_report_dir(self):
+        """打开报告默认保存目录（桌面工作目录）；不存在就先建，失败给明话。"""
+        from pathlib import Path
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        from justoneapi_collector import branding
+        base = Path.home() / "Desktop" / branding.DESKTOP_WORK_DIR
+        d = base / "报告"
+        d.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+        self.status.setText(f"已打开报告目录：{d}")
 
     def _export_html(self):
         if self._data is None:

@@ -1,0 +1,80 @@
+sequenceDiagram
+    autonumber
+    actor 用户
+    participant 页面 as VideoDownloadPage
+    participant Worker
+    participant 下载器 as VideoDownloader
+    participant 归一 as KsNormalizer
+    participant 付费 as OkdataClient
+    participant SSR as KsSsrFallback
+    participant 直链 as MediaParser
+    participant 下载层 as 下载层(_download_once/_download_images)
+
+    用户->>页面: 粘贴快手主页链接，点「拉取列表」
+    页面->>页面: _fetch_list() 既有闸门不动（_ensure_real_downloader）
+    页面->>Worker: Worker(_fetch_ks_list_task, ...) + connect_guarded + start()
+    Worker->>下载器: list_kuaishou_blogger_videos(url, max_pages=30, on_progress)
+
+    下载器->>下载器: _resolve_kuaishou_uid() → 数字 userId（objectId）
+    loop 最多 30 页，每页 on_progress 只 1 次
+        下载器->>付费: request("kuaishou","user-published-videos-v2", {userId, cursor})
+        付费->>付费: _query() 白名单过滤 → /v1/kuaishou/users/videos/list
+        付费-->>下载器: ApiResponse(success, code, message, data)
+
+        alt 成功且 feeds 非空
+            下载器->>归一: ks_normalize_to_video_info(raw, KS_SCHEMA_OKDATA)
+            归一-->>下载器: (VideoInfo, why)  why 非空记结构告警
+            下载器->>下载器: 按 video_id 去重、追加 videos
+            下载器->>下载器: 双读分页 next_cursor/has_more 或 pcursor/no_more
+        else 失败信号命中（配置/网络/限流/结构/内容，见第 6 节）
+            下载器->>下载器: 记降级原因类别 config/network/limit/schema，不整批短路
+            下载器->>SSR: ks_fetch_ssr_first_page(主页链接)
+            SSR->>SSR: iPhone UA GET → raw_decode(window.INIT_STATE)
+            alt SSR 拿到 feeds
+                SSR-->>下载器: (feeds, author, reason="")
+                下载器->>归一: 逐条 ks_normalize_to_video_info(feed, KS_SCHEMA_SSR)
+                归一-->>下载器: (VideoInfo, why)
+                下载器->>下载器: 标记「免费首屏兜底生效」+ 首屏边界 has_more=False
+            else SSR 无 INIT_STATE 或 feeds 为空
+                SSR-->>下载器: ([], {}, reason=具体类别)
+                下载器->>下载器: 仅双重确认后才允许 ks_fail_text("empty")
+            end
+            下载器->>下载器: break（首屏不翻页）
+        end
+    end
+
+    Note over 下载器,直链: 第 2 段：缺直链条目逐条补全，单条失败隔离
+    下载器->>直链: health()（探活失败只记原因，继续逐条）
+    loop 每条 missing（0.6s 节流）
+        下载器->>直链: parse(v.share_url)
+        直链-->>下载器: (data, reason)  data 含 video_url/images/videos/audio_url
+        alt 解析成功
+            下载器->>归一: ks_merge_parser_data(v, data)
+            归一-->>下载器: 更新 no_watermark_url / image_list / cover_url + 备注
+        else 单条失败
+            下载器->>下载器: 记 ks_fail_text(类别)，继续下一条，不中断整批
+        end
+    end
+    下载器->>下载器: 组装 _last_list_note（四段条数 + 降级原因 + 首屏提示）
+    下载器-->>Worker: (videos, err)
+    Worker->>页面: done(result)
+    页面->>页面: _on_list_fetched → 状态行分段上屏 + 首屏边界明示
+    页面->>页面: _on_list_finished → 按钮恢复可点
+
+    用户->>页面: 勾选条目，点「下载选中」
+    页面->>Worker: Worker(_download_task, ..., media_type)
+    Worker->>下载器: download_videos(videos, media_type)
+    loop 每条（三段进度：列表/补直链/下载；支持「停止」）
+        下载器->>下载器: 按条目分流：图集(image_list 非空且无直链) → media_type="image"
+        alt 视频条目
+            下载器->>下载层: _download_once(url, ..., save_path)
+            下载层->>下载层: .tmp + Range（206 追加 / 200 重写）+ 网络类最多 3 次重试
+            下载层-->>下载器: (ok, err) 成功才 rename()
+        else 图集条目
+            下载器->>下载层: _download_images(video, subdir)
+            下载层-->>下载器: (Path, err) 已有图片跳过
+        end
+        下载器->>下载器: 单条失败隔离，记具体原因，继续下一条
+    end
+    下载器-->>页面: 逐条 emit_item / 汇总
+    页面->>用户: 状态行显示四段成功失败条数与真实原因

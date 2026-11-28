@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QLineEdit,
                                QHBoxLayout, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ._base import connect_guarded
 from ._base import (StatusLine, Worker, append_log, card, form_row, guide_banner,
                     log_panel, page_title, row_widget, vertical_card)
 
@@ -68,15 +69,15 @@ class CollectPage(QWidget):
         pf.addLayout(self.params_container)
         pbtns = QHBoxLayout()
         pbtns.setSpacing(8)
-        b_add = QPushButton("添加参数"); b_add.clicked.connect(self._add_param_row)
-        b_clr = QPushButton("清空"); b_clr.clicked.connect(self._clear_params)
+        b_add = QPushButton("添加参数"); connect_guarded(b_add.clicked, lambda *_: self._add_param_row(), on_error=lambda msg: self.status.setText(msg), label="add param row")
+        b_clr = QPushButton("清空"); connect_guarded(b_clr.clicked, lambda *_: self._clear_params(), on_error=lambda msg: self.status.setText(msg), label="clear params")
         pbtns.addWidget(b_add); pbtns.addWidget(b_clr); pbtns.addStretch()
         pf.addLayout(pbtns)
         top_l.addLayout(pf)
 
         self.execute_btn = QPushButton("执行采集")
         self.execute_btn.setObjectName("Primary")
-        self.execute_btn.clicked.connect(self._execute)
+        connect_guarded(self.execute_btn.clicked, lambda *_: self._execute(), on_error=lambda msg: self.status.setText(msg), label="execute")
         top_l.addWidget(self.execute_btn)
         root.addWidget(top)
 
@@ -96,9 +97,9 @@ class CollectPage(QWidget):
         res_l.addWidget(self.table, 1)
 
         ex = QHBoxLayout(); ex.setSpacing(8)
-        b_json = QPushButton("导出 JSON"); b_json.clicked.connect(lambda: self._export("json"))
-        b_csv = QPushButton("导出 CSV"); b_csv.clicked.connect(lambda: self._export("csv"))
-        b_xlsx = QPushButton("导出 Excel"); b_xlsx.clicked.connect(lambda: self._export("xlsx"))
+        b_json = QPushButton("导出 JSON"); connect_guarded(b_json.clicked, lambda *_: self._export("json"), on_error=lambda msg: self.status.setText(msg), label="export")
+        b_csv = QPushButton("导出 CSV"); connect_guarded(b_csv.clicked, lambda *_: self._export("csv"), on_error=lambda msg: self.status.setText(msg), label="export")
+        b_xlsx = QPushButton("导出 Excel"); connect_guarded(b_xlsx.clicked, lambda *_: self._export("xlsx"), on_error=lambda msg: self.status.setText(msg), label="export")
         ex.addWidget(b_json); ex.addWidget(b_csv); ex.addWidget(b_xlsx); ex.addStretch()
         res_l.addLayout(ex)
         root.addWidget(res, 1)
@@ -165,7 +166,7 @@ class CollectPage(QWidget):
         def _remove():
             self._clear_layout(h)
             self.param_rows = [r for r in self.param_rows if r[2] is not h]
-        rm.clicked.connect(_remove)
+        connect_guarded(rm.clicked, lambda *_: _remove(), on_error=lambda msg: self.status.setText(msg), label="remove")
 
     def _clear_params(self):
         for (_k, _v, h, _rm) in self.param_rows:

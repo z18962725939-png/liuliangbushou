@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog,
                                QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
+from ._base import connect_guarded
 from ._base import (StatusLine, Worker, append_log, confirm_destructive,
                     connection_diagnosis, danger_button, fill_platform_box,
                     form_row, guide_banner, log_panel, page_title, vertical_card)
@@ -111,7 +112,7 @@ class CommentPage(QWidget):
         self.import_btn = QPushButton("导入「关键词抓取」Excel")
         self.import_btn.setToolTip("直接读取关键词抓取导出的 Excel 里的链接列，"
                                    "不用手工复制粘贴")
-        self.import_btn.clicked.connect(self._import_excel)
+        connect_guarded(self.import_btn.clicked, lambda *_: self._import_excel(), on_error=lambda msg: self.status.setText(msg), label="import excel")
         under.addWidget(self.import_btn)
         self.id_count = QLabel("")
         self.id_count.setStyleSheet("color:#6B7280;font-size:12px;")
@@ -211,15 +212,15 @@ class CommentPage(QWidget):
         # 中段的设置卡里，等于让客户跑到上面去处理下面的表格。
         self.run_btn = QPushButton("开始截流"); self.run_btn.setObjectName("Primary")
         self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.run_btn.clicked.connect(self._run)
+        connect_guarded(self.run_btn.clicked, lambda *_: self._run(), on_error=lambda msg: self.status.setText(msg), label="run")
         self.stop_btn = QPushButton("停止"); self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_run)
+        connect_guarded(self.stop_btn.clicked, lambda *_: self._stop_run(), on_error=lambda msg: self.status.setText(msg), label="stop run")
         self.export_btn = QPushButton("导出Excel"); self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         self.copy_btn = QPushButton("复制抖音号"); self.copy_btn.setEnabled(False)
-        self.copy_btn.clicked.connect(self._copy_ids)
+        connect_guarded(self.copy_btn.clicked, lambda *_: self._copy_ids(), on_error=lambda msg: self.status.setText(msg), label="copy ids")
         self.clear_btn = danger_button("清空结果"); self.clear_btn.setEnabled(False)
-        self.clear_btn.clicked.connect(self._clear)
+        connect_guarded(self.clear_btn.clicked, lambda *_: self._clear(), on_error=lambda msg: self.status.setText(msg), label="clear")
 
         r4 = QHBoxLayout()
         r4.setSpacing(8)

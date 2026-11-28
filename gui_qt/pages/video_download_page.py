@@ -99,8 +99,11 @@ def _fmt_size(n) -> str:
     return f"{n:.1f} GB"
 
 
-def _download_task(worker, downloader, videos, media_type="video"):
+def _download_task(worker, downloader, videos, media_type="video", should_stop=None):
     """后台批量下载任务（在 Worker 线程中运行）。media_type: video/audio/image/text。
+
+    ★ 2026-11-25：should_stop 是零参闭包（复用既有「停止导入」形态），运行中
+      点「停止」置位后，剩余未开始的条目跳过，不引入全局单例 / 1s 轮询。
 
     ★ v1.14.4：接 on_chunk 拿**实时字节进度**。
       以前只按「第几条下完」上报，一条 50 MB 的视频要下十几秒，进度条
@@ -174,6 +177,17 @@ def _download_task(worker, downloader, videos, media_type="video"):
         if _emit_item is not None:
             _emit_item((video, bool(path) and not err))
 
+    # ★ 停止标志透传给下载器：Worker 内每条开始前检查，未开始的跳过。
+    #   假下载器 / 旧实现可能没有 should_stop 形参（门禁、演示模式），
+    #   退化为不带该参数调用，保证既有调用契约零破坏。
+    if should_stop is not None:
+        try:
+            return downloader.download_videos(videos, on_progress=on_progress,
+                                              on_chunk=on_chunk, media_type=media_type,
+                                              should_stop=should_stop)
+        except TypeError as exc:
+            if "should_stop" not in str(exc):
+                raise
     return downloader.download_videos(videos, on_progress=on_progress,
                                       on_chunk=on_chunk, media_type=media_type)
 
@@ -213,7 +227,8 @@ def _fetch_list_task(worker, downloader, list_type, sec_uid, use_own,
     if err:
         return videos, err
     if not videos:
-        return [], "列表为空（该账号未公开此列表，或确实为空）"
+        # 不再把「该账号未公开/为空」当默认兜底；真实原因由下载器写入 _last_list_note
+        return [], "列表没有拉到作品 —— 请看状态栏的具体原因，或换一条链接再试"
     return videos, ""
 
 
@@ -251,7 +266,8 @@ def _fetch_ks_list_task(worker, downloader, url_text):
     if err and not videos:
         return [], err
     if not videos:
-        return [], "列表为空（该账号可能没有公开作品）"
+        # 不再默认归因「可能没有公开作品」；具体类别已由下载器 err / _last_list_note 给出
+        return [], "没拉到快手作品 —— 请看状态栏的具体原因，或换一条主页链接再试"
     return videos, err or ""
 
 
@@ -361,6 +377,7 @@ class VideoDownloadPage(QWidget):
         self._videos: list = []          # 与表格行一一对应的 VideoInfo（演示行为 None）
         self._resolve_worker = None
         self._download_worker = None
+        self._download_stop = False       # 下载「停止」标志（复用 Worker 信号，无全局单例）
         self._list_worker = None          # 博主列表批量拉取（作品/喜欢/收藏）
         self._batch_bloggers_worker = None  # 多博主串行批量采集（独立 worker，不与单次互斥）
         self._import_worker = None        # 批量导入（Excel / 粘贴链接）解析
@@ -476,7 +493,7 @@ class VideoDownloadPage(QWidget):
             if disabled:
                 b.setEnabled(False)
                 b.setToolTip("该平台不提供登录入口，作品链接直接粘贴即可解析")
-            b.clicked.connect(lambda _checked=False, p=plat, d=disabled: self._login(p, d))
+            connect_guarded(b.clicked, lambda *_: self._login(p, d), on_error=lambda msg: self.status.setText(msg), label="login")
             lr.addWidget(b)
         # ★ 2026-10-25（v1.24.6）：作品解析改成**服务端解析**之后，抖音 /
         #   小红书 / 快手三个平台都能下了，而且**都不需要登录** —— 打开链接的
@@ -506,7 +523,7 @@ class VideoDownloadPage(QWidget):
         ir.addWidget(self.url_edit, 1)
         self.resolve_btn = QPushButton("解析")
         self.resolve_btn.setObjectName("Primary")
-        self.resolve_btn.clicked.connect(self._resolve)
+        connect_guarded(self.resolve_btn.clicked, lambda *_: self._resolve(), on_error=lambda msg: self.status.setText(msg), label="resolve")
         ir.addWidget(self.resolve_btn)
         ml.addLayout(ir)
         root.addWidget(mid)
@@ -528,7 +545,7 @@ class VideoDownloadPage(QWidget):
         self.import_btn.setToolTip(
             "选择在「关键词抓取」页导出的 .xlsx / .csv，自动读取其中的「链接」列，\n"
             "逐条解析后全部加入下方列表并勾选，你只需再点「下载选中」。")
-        self.import_btn.clicked.connect(self._import_excel)
+        connect_guarded(self.import_btn.clicked, lambda *_: self._import_excel(), on_error=lambda msg: self.status.setText(msg), label="import excel")
         ir0.addWidget(self.import_btn)
         # ★ v1.24.6：客户原话「批量解析的失败率比较高，可以创建一个导入 txt
         #   格式的按钮，方便需要大批量解析的用户」。做几十上百条时没人愿意
@@ -544,15 +561,15 @@ class VideoDownloadPage(QWidget):
             "  https://v.douyin.com/xxxxx/\n"
             "行首的数字、标题、 emoji 都不影响识别（软件只抠链接）；\n"
             "记事本直接保存的 ANSI/GBK 也能读；重复链接会自动去重。")
-        self.import_txt_btn.clicked.connect(self._import_txt)
+        connect_guarded(self.import_txt_btn.clicked, lambda *_: self._import_txt(), on_error=lambda msg: self.status.setText(msg), label="import txt")
         ir0.addWidget(self.import_txt_btn)
         self.paste_btn = QPushButton("解析下方链接")
         self.paste_btn.setToolTip("解析下面文本框里粘贴的多行链接（一行一条）")
-        self.paste_btn.clicked.connect(self._resolve_pasted)
+        connect_guarded(self.paste_btn.clicked, lambda *_: self._resolve_pasted(), on_error=lambda msg: self.status.setText(msg), label="resolve pasted")
         ir0.addWidget(self.paste_btn)
         self.import_stop_btn = QPushButton("停止导入")
         self.import_stop_btn.setEnabled(False)
-        self.import_stop_btn.clicked.connect(self._stop_import)
+        connect_guarded(self.import_stop_btn.clicked, lambda *_: self._stop_import(), on_error=lambda msg: self.status.setText(msg), label="stop import")
         ir0.addWidget(self.import_stop_btn)
         ir0.addStretch()
         il.addLayout(ir0)
@@ -617,7 +634,7 @@ class VideoDownloadPage(QWidget):
         lr2.addWidget(self.list_url_edit, 1)
         self.fetch_list_btn = QPushButton("拉取列表")
         self.fetch_list_btn.setObjectName("Primary")
-        self.fetch_list_btn.clicked.connect(self._fetch_list)
+        connect_guarded(self.fetch_list_btn.clicked, lambda *_: self._fetch_list(), on_error=lambda msg: self.status.setText(msg), label="fetch list")
         lr2.addWidget(self.fetch_list_btn)
         ll.addLayout(lr2)
 
@@ -671,7 +688,7 @@ class VideoDownloadPage(QWidget):
         tb = QHBoxLayout()
         tb.setSpacing(8)
         self.sel_all = QCheckBox("全选")
-        self.sel_all.clicked.connect(self._toggle_all)
+        connect_guarded(self.sel_all.clicked, lambda checked=False, *_: self._toggle_all(checked), on_error=lambda msg: self.status.setText(msg), label="toggle all")
         tb.addWidget(self.sel_all)
         tb.addStretch()
         self.archive = QCheckBox("下载后归档到项目素材库")
@@ -680,7 +697,7 @@ class VideoDownloadPage(QWidget):
         # 破坏性动作放主操作左侧，样式弱化 + 二次确认（避免误点）
         self.clear_btn = danger_button("清空列表")
         self.clear_btn.setToolTip("清空下方待下载列表（不会删除已经下载到本地的文件）")
-        self.clear_btn.clicked.connect(self._clear_list)
+        connect_guarded(self.clear_btn.clicked, lambda *_: self._clear_list(), on_error=lambda msg: self.status.setText(msg), label="clear list")
         tb.addWidget(self.clear_btn)
         # 下载内容类型选择：视频 / 音频 / 图文 / 文案
         tb.addWidget(QLabel("下载内容"))
@@ -693,7 +710,7 @@ class VideoDownloadPage(QWidget):
         tb.addWidget(self.media_combo)
         self.download_btn = QPushButton("下载选中")
         self.download_btn.setObjectName("Primary")
-        self.download_btn.clicked.connect(self._download_selected)
+        connect_guarded(self.download_btn.clicked, lambda *_: self._on_download_button(), on_error=lambda msg: self.status.setText(msg), label="on download button")
         tb.addWidget(self.download_btn)
         root.addLayout(tb)
 
@@ -1363,7 +1380,7 @@ class VideoDownloadPage(QWidget):
             self.status.setText(f"拉取失败：{err}")
             return
         if not videos:
-            self.status.setText("拉取完成，但列表为空（可能该账号未公开或确实为空）")
+            self.status.setText("拉取完成但没拿到作品 —— 请看上面的具体原因，或换一条链接再试")
             return
         for v in videos:
             self._add_video_info_row(v)
@@ -1471,6 +1488,18 @@ class VideoDownloadPage(QWidget):
         self._sync_actions()
 
     # ----------------------------------------------------------- 下载
+    def _on_download_button(self):
+        """下载按钮分派：运行中=停止（按钮保持可点），空闲=正常下载。"""
+        if self._download_worker is not None and self._download_worker.isRunning():
+            self._stop_download()
+            return
+        self._download_selected()
+
+    def _stop_download(self):
+        self._download_stop = True
+        self.download_btn.setText("停止中…")
+        self.status.setText("正在停止下载…（已发出的会跑完，其余跳过）")
+
     def _download_selected(self):
         rows = self._checked_rows()
         if not rows:
@@ -1485,22 +1514,26 @@ class VideoDownloadPage(QWidget):
             self._prompt_need_token()
             return
         if self._download_worker is not None and self._download_worker.isRunning():
-            self.status.setText("已有下载任务在进行中…")
+            self.status.setText("已有下载任务在进行中…（再点一次「停止」可中止）")
             return
 
         self._apply_save_dir()
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("下载中…")
+        # ★ 运行中按钮保持可点，文案改「停止」（不 setEnabled(False) 代替控制）
+        self._download_stop = False
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("停止")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        self.status.setText(f"开始下载 {len(picked)} 条…")
+        self.status.setText(
+            f"正在下载第 0/{len(picked)} 条…（点「停止」可中止，已发出的会跑完）")
 
         media_type = self.media_combo.currentData() or "video"
         # ★ 2026-11-19：本轮逐条实时计数的基线。逐条信号边跑边加，done 时
         #   用 results 的真实结果**对账校正**，两个口径都以"这批"为单位。
         self._live_ok = 0
         self._live_fail = 0
-        w = Worker(_download_task, self.downloader, picked, media_type)
+        w = Worker(_download_task, self.downloader, picked, media_type,
+                   lambda: self._download_stop)
         w.progress.connect(self._on_dl_progress)
         # 逐条完成 → 实时 +1（数字滚动 + 该行状态列同步）
         connect_guarded(w.item_done, self._on_dl_item,
@@ -1593,13 +1626,21 @@ class VideoDownloadPage(QWidget):
         if any("写入失败" in (e or "") for _v, e in bad):
             write_hint = ("\n写入失败怎么办：到「设置 → 下载保存位置」换一个能写入的"
                           "目录（比如「文档」下的默认目录）再试一次。\n")
+        # ★ 2026-11-25 客户现场：选「图文(图集)」下视频作品 → 「这条是视频作品，
+        #   请切到「视频」」。三条通用建议（过期/目录/网络）没一条能解决，命中时优先显示。
+        type_hint = ""
+        if any(("下载类型" in (e or "") or "切到「视频」" in (e or "")
+                or "不是图集" in (e or "") or "视频作品" in (e or ""))
+               for _v, e in bad):
+            type_hint = ("\n★ 类型不匹配：这条是视频作品，请到上方「下载类型」切到「视频」"
+                         "再点下载；图集作品才选「图文(图集)」。下面三条建议解决不了这个问题。\n")
         note_block = f"\n{dir_note}\n" if dir_note else ""
         QMessageBox.warning(
             self, "下载未完成",
             f"成功 {ok} 条，失败 {fail} 条 → {actual_dir}\n"
             + note_block + "\n"
             + "\n".join(lines) + extra + "\n"
-            + write_hint + "\n"
+            + type_hint + write_hint + "\n"
             "最常见的三种情况：\n"
             "① 播放地址已过期 —— 把这条链接重新解析一次再下载；\n"
             "② 保存目录写不进去 —— 到「设置 → 下载保存位置」换个目录再试；\n"
@@ -1607,7 +1648,12 @@ class VideoDownloadPage(QWidget):
             "如果一直失败，把这段原因截图发给服务方即可定位。")
 
     def _on_dl_finished(self):
+        # 停止后 finished 在 done 之后触发：补一句「已停止」，按钮恢复「下载选中」仍可点
+        if getattr(self, "_download_stop", False):
+            self.status.setText(self.status.text() + "（本次已手动停止，未下载的可重新勾选再下）")
+            self._download_stop = False
         self.download_btn.setText("下载选中")
+        self.download_btn.setEnabled(True)
         self._sync_actions()
 
     # ------------------------------------------------------- 列表操作

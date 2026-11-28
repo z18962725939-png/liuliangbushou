@@ -83,12 +83,23 @@ SRT_LONG = SRT + """
 00:00:20,000 --> 00:00:45,000
 提前划定工作边界
 """
+# 另一种幻觉：整段都在视频长度之外（起点 33s > 31.5s），应当整条丢弃
+SRT_OUT = SRT + """
+5
+00:00:33,000 --> 00:00:45,000
+从长度之外才开始的一整段
+"""
 long_segs = vse.parse_srt(SRT_LONG)
 check("末段时间戳确实超出视频长度", long_segs[-1].end == 45.0, str(long_segs[-1].end))
 clamped = vse.clamp_segments(long_segs, 31.5)
 check("裁完后不超过视频长度", all(s.end <= 31.5 for s in clamped),
       str(max(s.end for s in clamped)))
-check("起始就在长度之外的整条丢掉", len(clamped) == 4, str(len(clamped)))
+# clamp_segments 的真实行为：起点在长度内的跨末端段会被裁到上限并保留（5 段），
+# 只有整段起点都在长度之外的才丢弃。两种用例分开钉，别混成一条过期期望。
+check("跨末端的段裁到上限后保留", len(clamped) == 5 and abs(clamped[-1].end - 31.5) < 1e-6,
+      f"{len(clamped)} 段，末段={clamped[-1].end}")
+out_clamped = vse.clamp_segments(vse.parse_srt(SRT_OUT), 31.5)
+check("起始就在长度之外的整条丢掉", len(out_clamped) == 4, str(len(out_clamped)))
 check("长度不明时保持原样", len(vse.clamp_segments(hallu, 0)) == len(hallu))
 
 print()
@@ -107,7 +118,11 @@ print()
 print("4) 带时间轴的原文拆解（这些数纯文本永远算不出来）")
 text = "\n".join(s.text for s in clamped)
 a = sr.analyze_source(text, 4.5, clamped)
-check("实测口播秒数来自时间轴", abs(a.speech_seconds - 9.2) < 0.2, str(a.speech_seconds))
+# 跨末端段被裁到 31.5s，口播秒数按时间轴末点算就是 31.5（不是 9.2）
+check("实测口播秒数来自时间轴", abs(a.speech_seconds - 31.5) < 0.2, str(a.speech_seconds))
+out_text = "\n".join(s.text for s in out_clamped)
+b = sr.analyze_source(out_text, 4.5, out_clamped)
+check("整段越界不污染口播秒数", abs(b.speech_seconds - 9.2) < 0.2, str(b.speech_seconds))
 check("真实语速算得出", a.real_wps > 0, str(a.real_wps))
 check("前 3 秒钩子窗口有内容", bool(a.hook_window), a.hook_window)
 check("节奏分桶非空", len(a.pace) >= 2, str(a.pace))

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ._base import connect_guarded
 from ._base import (
     StatusLine, Worker, connect_guarded, guide_banner, page_title,
     require_feature, vertical_card,
@@ -64,11 +65,11 @@ class WechatChatPage(QWidget):
         self.path_edit.setReadOnly(True)
         row1.addWidget(self.path_edit, 1)
         pick = QPushButton("选择 ZIP…", self)
-        pick.clicked.connect(lambda *_: self._pick_files())   # guard: 信号带参
+        connect_guarded(pick.clicked, lambda *_: self._pick_files(), on_error=lambda msg: self.status.setText(msg), label="pick files")   # guard: 信号带参
         row1.addWidget(pick)
         parse_btn = QPushButton("开始解析", self)
         parse_btn.setObjectName("Primary")
-        parse_btn.clicked.connect(lambda *_: self._parse())
+        connect_guarded(parse_btn.clicked, lambda *_: self._parse(), on_error=lambda msg: self.status.setText(msg), label="parse")
         row1.addWidget(parse_btn)
         cl1.addLayout(row1)
         hint = QLabel(
@@ -109,7 +110,7 @@ class WechatChatPage(QWidget):
         self.out_edit = QLineEdit(self._default_out, self)
         out_row.addWidget(self.out_edit, 1)
         out_pick = QPushButton("选择目录…", self)
-        out_pick.clicked.connect(lambda *_: self._pick_out())
+        connect_guarded(out_pick.clicked, lambda *_: self._pick_out(), on_error=lambda msg: self.status.setText(msg), label="pick out")
         out_row.addWidget(out_pick)
         cl3.addLayout(out_row)
         name_row = QHBoxLayout()
@@ -125,13 +126,13 @@ class WechatChatPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         self.copy_btn = QPushButton("复制到剪贴板", self)
-        self.copy_btn.clicked.connect(lambda *_: self._copy())
+        connect_guarded(self.copy_btn.clicked, lambda *_: self._copy(), on_error=lambda msg: self.status.setText(msg), label="copy")
         btn_row.addWidget(self.copy_btn)
         self.md_btn = QPushButton("导出 Markdown 文件夹", self)
-        self.md_btn.clicked.connect(lambda *_: self._export())
+        connect_guarded(self.md_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         btn_row.addWidget(self.md_btn)
         self.obs_btn = QPushButton("导出到 Obsidian 库", self)
-        self.obs_btn.clicked.connect(lambda *_: self._export(obsidian=True))
+        connect_guarded(self.obs_btn.clicked, lambda *_: self._export(obsidian=True), on_error=lambda msg: self.status.setText(msg), label="export")
         btn_row.addWidget(self.obs_btn)
         btn_row.addStretch()
         cl3.addLayout(btn_row)

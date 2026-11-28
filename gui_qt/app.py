@@ -26,6 +26,7 @@ from gui_qt.pages._base import AppContext  # noqa: E402
 from gui_qt.theme import apply_theme  # noqa: E402
 from gui_qt.main_window import MainWindow  # noqa: E402
 from gui_qt.update_flow import maybe_check_update  # noqa: E402
+from justoneapi_collector.projects import ProjectManager  # noqa: E402
 
 
 def _write_crash_log(exc: BaseException) -> str:
@@ -123,6 +124,16 @@ def build_context() -> AppContext:
     # （无 client 时 ensure_* 均直接返回 None，页面自动切演示模式）
     ctx.ensure_downloader()
     ctx.ensure_monitor()
+    # 复盘监控 / 报告等页要往项目里落盘。仅在真实模式注入：演示模式保持 None，
+    # 各页原有的演示分支（示例数据 + 演示提示）一行都不变。
+    # ensure_default() 让新安装也有可写的默认项目（GUI 没有创建项目的入口）。
+    if not ctx.demo:
+        try:
+            pm = ProjectManager()
+            pm.ensure_default()
+            ctx.project_manager = pm
+        except Exception:                                       # noqa: BLE001
+            ctx.project_manager = None
     return ctx
 
 

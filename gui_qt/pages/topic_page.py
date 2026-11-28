@@ -10,10 +10,11 @@ from PySide6.QtWidgets import (QComboBox, QHeaderView, QHBoxLayout, QLabel, QLin
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from ._base import (StatusLine, Worker, append_log, cell_num, confirm_destructive,
-                    connection_diagnosis, danger_button, fill_platform_box,
-                    guide_banner, log_panel, page_title, selected_row_links,
-                    send_to_script, vertical_card)
+from ._base import (StatusLine, Worker, append_log, cell_num, connect_guarded,
+                    confirm_destructive, connection_diagnosis, danger_button,
+                    fill_platform_box, guide_banner, log_panel, page_title,
+                    require_feature, selected_row_links, send_to_script,
+                    vertical_card)
 
 from gui_qt.widgets.stat import StatCard, TopBars, _fmt_num, stat_row
 
@@ -22,7 +23,9 @@ from justoneapi_collector.topic_mining import (COMMENT_EXPORT_COLUMNS,
                                               fetch_comments, mine_keywords_batch)
 
 # RANKED_POST_COLUMNS 的索引（概览统计要按列取值，写死下标容易错位，这里集中定义）
-_C_RATIO, _C_TITLE, _C_FANS, _C_DIGG = 0, 2, 4, 5
+# 列顺序见 RANKED_POST_COLUMNS：0爆粉比 1平台 2标题 3作者 4作者粉丝 …
+# 11链接
+_C_RATIO, _C_TITLE, _C_AUTHOR, _C_FANS, _C_DIGG, _C_LINK = 0, 2, 3, 4, 5, 11
 
 
 class TopicPage(QWidget):
@@ -49,23 +52,29 @@ class TopicPage(QWidget):
         self.keywords = QLineEdit("美妆,穿搭,减肥")
         r1.addWidget(self.keywords, 1)
         b_mine = QPushButton("开始挖掘"); b_mine.setObjectName("Primary")
-        b_mine.clicked.connect(self._mine)
+        connect_guarded(b_mine.clicked, lambda *_: self._mine(), on_error=lambda msg: self.status.setText(msg), label="mine")
         r1.addWidget(b_mine)
         top_l.addLayout(r1)
         r2 = QHBoxLayout()
         self.export_btn = QPushButton("导出Excel"); self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         b_copy = QPushButton("复制链接")
+        b_copy.setToolTip("复制选中作品链接到剪贴板（可多条）")
+        connect_guarded(b_copy.clicked, lambda *_: self._copy_links(),
+                        on_error=lambda msg: self.status.setText(msg), label="复制链接")
         b_watch = QPushButton("作者加入监控")
+        b_watch.setToolTip("把选中作品的作者链接加入「复盘监控」")
+        connect_guarded(b_watch.clicked, lambda *_: self._watch_authors(),
+                        on_error=lambda msg: self.status.setText(msg), label="作者加入监控")
         # 清空爆款结果：破坏性动作，样式弱化 + 二次确认
         self.clear_post_btn = danger_button("清空结果")
         self.clear_post_btn.setEnabled(False)
         self.clear_post_btn.setToolTip("清空下方爆款挖掘结果表格")
-        self.clear_post_btn.clicked.connect(self._clear_posts)
+        connect_guarded(self.clear_post_btn.clicked, lambda *_: self._clear_posts(), on_error=lambda msg: self.status.setText(msg), label="clear posts")
         self.script_btn = QPushButton("写同款文案")
         self.script_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.script_btn.setToolTip("把选中作品的链接带到「文案仿写」，直接扒口播稿再仿写")
-        self.script_btn.clicked.connect(self._to_script)
+        connect_guarded(self.script_btn.clicked, lambda *_: self._to_script(), on_error=lambda msg: self.status.setText(msg), label="to script")
         r2.addWidget(self.export_btn); r2.addWidget(b_copy); r2.addWidget(b_watch)
         r2.addWidget(self.script_btn)
         r2.addWidget(self.clear_post_btn)
@@ -103,12 +112,12 @@ class TopicPage(QWidget):
         self.post_ids.setMaximumHeight(60)
         r3.addWidget(self.post_ids, 1)
         b_cmt = QPushButton("挖掘评论"); b_cmt.setObjectName("Primary")
-        b_cmt.clicked.connect(self._mine_comments)
+        connect_guarded(b_cmt.clicked, lambda *_: self._mine_comments(), on_error=lambda msg: self.status.setText(msg), label="mine comments")
         self.cmt_export = QPushButton("导出评论"); self.cmt_export.setEnabled(False)
         self.clear_cmt_btn = danger_button("清空评论")
         self.clear_cmt_btn.setEnabled(False)
         self.clear_cmt_btn.setToolTip("清空下方评论洞察结果表格")
-        self.clear_cmt_btn.clicked.connect(self._clear_comments)
+        connect_guarded(self.clear_cmt_btn.clicked, lambda *_: self._clear_comments(), on_error=lambda msg: self.status.setText(msg), label="clear comments")
         r3.addWidget(b_cmt); r3.addWidget(self.cmt_export)
         r3.addWidget(self.clear_cmt_btn)
         cm_l.addLayout(r3)
@@ -125,8 +134,14 @@ class TopicPage(QWidget):
         self._sync_actions()
         self._update_overview()
         # 未连接服务时，进入页面就常驻提示，不必等用户点了"开始挖掘"才知道。
+        # ★ 2026-11-24 P0：统一走 connection_diagnosis()，别再写死「去激活」——
+        #   真实原因可能是授权码里没带采集凭证、或 okdata Key 没填，
+        #   已经激活的客户照着这句只会反复激活，等于把人引到死路。
+        #   状态栏只放诊断标题 + 压成一句的说明，细节交给点击后的弹窗。
         if self.ctx.demo:
-            self.status.setText("⚠ 未连接采集服务：挖掘前请先在「设置」激活授权码或填写 API Token")
+            title, hint = connection_diagnosis()
+            first = hint.split("\n\n")[0].replace("\n", " ")
+            self.status.setText(f"⚠ {title}：{first}")
             self.status.mark("error")
 
     def _sync_actions(self):
@@ -256,6 +271,75 @@ class TopicPage(QWidget):
         if not ok:
             self.status.mark("error")
 
+    def _copy_links(self):
+        """把选中作品链接复制到剪贴板——客户拿到链接才能去扒同款/投流。"""
+        links = selected_row_links(self.post_table, -1, limit=20)
+        if not links:
+            self.status.setText("先在结果表里点中一条作品，再点「复制链接」")
+            return
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText("\n".join(links))
+        self.status.setText(f"已复制 {len(links)} 条链接到剪贴板")
+
+    def _watch_authors(self):
+        """把选中作品的作者链接送进「复盘监控」——监控其粉丝/作品变化。"""
+        if not require_feature(self, "analyze", "作者加入监控"):
+            return
+        rows = set()
+        for idx in self.post_table.selectionModel().selectedRows():
+            row = idx.row()
+            link_it = self.post_table.item(row, _C_LINK)
+            author_it = self.post_table.item(row, _C_AUTHOR)
+            if link_it is None or not link_it.text().strip():
+                continue
+            rows.add((link_it.text().strip(),
+                      author_it.text().strip() if author_it else ""))
+        if not rows:
+            self.status.setText("先在结果表里点中一条作品，再点「作者加入监控」")
+            return
+        pm = getattr(self.ctx, "project_manager", None)
+        if pm is None:
+            # 真实模式由 build_context() 注入 ProjectManager；这里拿不到就如实提示，
+            # 绝不假装已监控（演示模式走的是更早的 ctx.demo 分支）。
+            self.status.setText(
+                f"已选中 {len(rows)} 位作者，但当前工作区未就绪；"
+                "请先在「设置」创建/打开项目后再加入监控")
+            self.status.mark("warn")
+            return
+        # projects.py:263-267：current 是 @property（不是方法！），
+        # 写成 pm.current() 会 TypeError: 'Project' object is not callable。
+        # 旧的 current_project() 更是不存在，callable 保护只是不崩却永远 fallback 到 None。
+        cur = getattr(pm, "current", None)
+        project = cur() if callable(cur) else cur
+        if project is None:
+            ensure = getattr(pm, "ensure_default", None)
+            project = ensure() if callable(ensure) else None
+        if project is None:
+            self.status.setText("请先创建或打开一个项目，再加入监控")
+            self.status.mark("warn")
+            return
+        added, failed = 0, 0
+        for link, author in rows:
+            try:
+                # Project.add_watch_author 才是真实存在的方法（projects.py:86），
+                # 旧代码里的 pm.add_watch_target 根本不存在。
+                if project.add_watch_author("douyin", link, author):
+                    added += 1
+                else:
+                    failed += 1            # 已在清单里
+            except Exception:                              # noqa: BLE001
+                failed += 1
+        save = getattr(pm, "save", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:                              # noqa: BLE001
+                pass
+        msg = f"已加入监控 {added} 位作者"
+        if failed:
+            msg += f"，未新增 {failed} 位（可能已存在）"
+        self.status.setText(msg)
+
     def apply_theme(self, mode: str):
         """主题切换：概览区的自绘组件要跟着换色。"""
         for c in (self.ov_count, self.ov_ratio, self.ov_digg):
@@ -313,7 +397,12 @@ class TopicPage(QWidget):
             self.status.setText("请至少填一个作品链接/ID")
             return
         if self.ctx.demo:
-            self.status.setText("⚠ 未连接采集服务，评论挖掘需要先激活授权码或填写 API Token")
+            # 与 _build_ui 的常驻提示同一口径：真实原因可能是授权码里没带
+            # 采集凭证、或 okdata Key 没填，统一走诊断，别把已激活的客户
+            # 引去反复激活；状态栏只放标题 + 压成一句的说明。
+            title, hint = connection_diagnosis()
+            first = hint.split("\n\n")[0].replace("\n", " ")
+            self.status.setText(f"⚠ {title}：{first}")
             self.status.mark("error")
             return
         plat = self.platform.currentData() or self.platform.currentText()

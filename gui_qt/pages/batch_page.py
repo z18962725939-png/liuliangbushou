@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QHeaderView, QHBoxLayout, QLabel,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from ._base import connect_guarded
 from ._base import Worker, guide_banner, page_title, require_feature, row_widget, vertical_card
 from ._base import StatusLine
 
@@ -51,7 +52,7 @@ class BatchPage(QWidget):
         head.addStretch()
         self.exec_btn = QPushButton("▶ 执行批量采集")
         self.exec_btn.setObjectName("Primary")
-        self.exec_btn.clicked.connect(self._execute)
+        connect_guarded(self.exec_btn.clicked, lambda *_: self._execute(), on_error=lambda msg: self.status.setText(msg), label="execute")
         head.addWidget(self.exec_btn)
         cl.addLayout(head)
 
@@ -113,7 +114,7 @@ class BatchPage(QWidget):
         h.setSpacing(8)
         for text, slot in specs:
             b = QPushButton(text)
-            b.clicked.connect(slot)
+            connect_guarded(b.clicked, lambda *_: slot(), on_error=lambda msg: self.status.setText(msg), label="slot")
             h.addWidget(b)
         lab = QLabel(tip)
         lab.setObjectName("Caption")

@@ -39,7 +39,7 @@ APP_IS_FREE = APP_EDITION == "free"
 APP_DISPLAY_NAME = f"{APP_NAME} 免费版" if APP_IS_FREE else APP_NAME
 APP_SLOGAN_FREE = "抖音视频下载 · 直播录制"
 APP_SLOGAN = "短视频运营 · 直播监控录制 · 音视频转文字"
-APP_VERSION = "1.28.15"
+APP_VERSION = "1.28.17"
 APP_PUBLISHER = "流量捕手工作室"
 APP_COPYRIGHT = f"Copyright © 2026 {APP_PUBLISHER}"
 

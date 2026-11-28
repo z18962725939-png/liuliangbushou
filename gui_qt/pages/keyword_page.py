@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QHeaderView, QHBoxLayout,
                                QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ._base import connect_guarded
 from ._base import (StatusLine, Worker, append_log, confirm_destructive, danger_button,
                     form_row, guide_banner, log_panel, page_title, vertical_card)
 
@@ -140,20 +141,20 @@ class KeywordPage(QWidget):
         r4 = QHBoxLayout()
         self.run_btn = QPushButton("开始抓取"); self.run_btn.setObjectName("Primary")
         self.run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.run_btn.clicked.connect(self._run)
+        connect_guarded(self.run_btn.clicked, lambda *_: self._run(), on_error=lambda msg: self.status.setText(msg), label="run")
         self.stop_btn = QPushButton("停止"); self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_run)
+        connect_guarded(self.stop_btn.clicked, lambda *_: self._stop_run(), on_error=lambda msg: self.status.setText(msg), label="stop run")
         self.export_btn = QPushButton("导出Excel"); self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         self.copy_btn = QPushButton("复制链接"); self.copy_btn.setEnabled(False)
-        self.copy_btn.clicked.connect(self._copy_links)
+        connect_guarded(self.copy_btn.clicked, lambda *_: self._copy_links(), on_error=lambda msg: self.status.setText(msg), label="copy links")
         self.clear_btn = danger_button("清空结果"); self.clear_btn.setEnabled(False)
-        self.clear_btn.clicked.connect(self._clear)
+        connect_guarded(self.clear_btn.clicked, lambda *_: self._clear(), on_error=lambda msg: self.status.setText(msg), label="clear")
         self.script_btn = QPushButton("写同款文案")
         self.script_btn.setEnabled(False)          # 有结果才可用，避免空点
         self.script_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.script_btn.setToolTip("把选中作品的链接带到「文案仿写」，直接扒口播稿再仿写")
-        self.script_btn.clicked.connect(self._to_script)
+        connect_guarded(self.script_btn.clicked, lambda *_: self._to_script(), on_error=lambda msg: self.status.setText(msg), label="to script")
         for b in (self.run_btn, self.stop_btn, self.export_btn, self.copy_btn,
                   self.script_btn, self.clear_btn):
             r4.addWidget(b)

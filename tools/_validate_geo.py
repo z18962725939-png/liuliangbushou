@@ -90,7 +90,9 @@ _calls = {"n": 0}
 
 def fake_post(url, body, api_key, timeout=60.0, **_kw):
     _calls["n"] += 1
-    q = (body.get("messages") or [{}])[1].get("content", "")
+    # 重试用例会直接调 _post_json 传裸 body（没有 messages），不能写死 [1]
+    msgs = body.get("messages") or [{}]
+    q = (msgs[1] if len(msgs) > 1 else msgs[0]).get("content", "")
     text = ANSWERS.get(q, "不知道，没有相关信息。")
     return True, json.dumps({"choices": [{"message": {"content": text}}]}, ensure_ascii=False)
 
@@ -184,6 +186,8 @@ def _fake_urlopen_factory(fail_code: int, fail_times: int, ok_body: str):
 
 
 _ok_body = json.dumps({"choices": [{"message": {"content": "斯堪尼亚"}}]}, ensure_ascii=False)
+# 重试逻辑住在真 _post_json 里：这里必须换回真身，否则 urlopen 的假响应永远用不上
+gm._post_json = _REAL_POST_JSON
 _hits["n"] = 0
 urllib.request.urlopen = _fake_urlopen_factory(429, 2, _ok_body)
 ok429, txt429 = gm._post_json("https://x.invalid/v1/chat/completions",
@@ -206,6 +210,7 @@ check("401 只请求了 1 次（没傻等）", _hits["n"] == 1, str(_hits["n"]))
 
 urllib.request.urlopen = _real_urlopen
 gm.time.sleep = _real_sleep
+gm._post_json = fake_post      # 还原假接口，后面的整轮体检还要用它
 
 # ---------------------------------------------------------------- 6 整轮体检
 print("6) 一轮体检汇总")
@@ -322,7 +327,8 @@ check("全部失败时建议提示限流", any("限流" in t for t in rep_fail.s
 
 # 部分失败：成功率和失败率必须分开统计，不能互相污染
 def fake_post_partial(url, body, api_key, timeout=60.0, **_kw):
-    q = (body.get("messages") or [{}])[1].get("content", "")
+    msgs = body.get("messages") or [{}]
+    q = (msgs[1] if len(msgs) > 1 else msgs[0]).get("content", "")
     if q == "会失败的提问":
         return False, "调用太频繁被限流（429），已自动重试仍未成功"
     return True, json.dumps({"choices": [{"message": {"content": "斯堪尼亚不错"}}]},

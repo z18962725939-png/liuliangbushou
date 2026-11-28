@@ -122,3 +122,10 @@ tcvenv/
 
 # 原型截图中间产物（对比图本体 samples/界面对比_*.png 要提交）
 /samples/prototype/_web_shot*.png
+
+# ---------------------------------------------------------------
+#  构建时注入的密钥：绝不提交（公开仓一旦提交等于公开）
+# ---------------------------------------------------------------
+justoneapi_collector/_builtin_key.py
+.trafficcatcher/
+secrets.env

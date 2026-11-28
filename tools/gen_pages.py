@@ -59,7 +59,7 @@ def render_page_imports() -> str:
 
 
 def render_nav_groups() -> str:
-    order = ["开始", "常用", "分析", "更多工具", "设置"]
+    order = ["开始", "常用", "素材与短剧", "平台内容", "分析", "更多工具", "设置"]
     lines = ["NAV_GROUPS = ["]
     for group in order:
         members = [p for p in real_pages() if p.group == group]

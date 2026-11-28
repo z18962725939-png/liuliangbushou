@@ -1,0 +1,132 @@
+classDiagram
+    class VideoInfo {
+        +str video_id
+        +str desc
+        +str author
+        +str sec_uid
+        +int create_time
+        +int duration
+        +int digg_count
+        +str cover_url
+        +str no_watermark_url
+        +str share_url
+        +list~str~ image_list
+        +str platform
+        +int comment_count
+        +int share_count
+    }
+
+    class ApiResponse {
+        +bool success
+        +Any code
+        +str message
+        +dict data
+        +dict raw_json
+    }
+
+    class VideoDownloader {
+        +client
+        +_last_list_note : str
+        +_resolve_kuaishou_uid(profile_text) tuple~str,str~
+        +list_kuaishou_blogger_videos(profile_text, max_pages, on_progress) tuple~list~VideoInfo~,str~
+        +_to_video_info_p(platform, raw) VideoInfo
+        +_reparse_for_fresh_url(video) VideoInfo
+        +_download_once(url, headers, save_path, on_chunk, trust_env) tuple~bool,str~
+        +_download_images(video, subdir) tuple~Path,str~
+        +download_video(video, subdir, on_chunk, media_type) tuple~Path,str~
+        +download_videos(videos, on_progress, on_chunk, media_type)
+    }
+
+    class OkdataClient {
+        +provider : str
+        +ENDPOINT_MAP
+        +PARAM_ALIAS
+        +_PASSTHROUGH
+        +capability_for(platform, endpoint) str
+        +_query(params) dict
+        +request(platform, endpoint, params) ApiResponse
+        +_translate(capability, raw) dict
+        +_decorate(capability, obj) dict
+    }
+
+    class MediaParser {
+        +parse(text, api_key, timeout) tuple~dict,str~
+        +_normalize_data(data, fallback_url) dict
+        +platform_from_url(url) str
+        +health(api_key, timeout) tuple~bool,str~
+    }
+
+    class KsNormalizer {
+        <<模块级纯函数组>>
+        +KS_SCHEMA_OKDATA
+        +KS_SCHEMA_LEGACY
+        +KS_SCHEMA_SSR
+        +KS_SCHEMA_PARSER
+        +ks_normalize_to_video_info(raw, source, share_url, author_fallback) tuple~VideoInfo,str~
+        +ks_merge_parser_data(video, data) list~str~
+        +ks_is_atlas(raw, source) bool
+        +ks_atlas_urls(raw, source) list~str~
+        +ks_fail_text(category) str
+    }
+
+    class KsSsrFallback {
+        <<模块级纯函数组>>
+        +_KS_MOBILE_UA : str
+        +ks_fetch_ssr_first_page(profile_text, timeout) tuple~list~dict~,dict,str~
+    }
+
+    class KsFailText {
+        <<常量表>>
+        +config : str
+        +network : str
+        +limit : str
+        +content : str
+        +schema : str
+        +link : str
+        +empty : str
+    }
+
+    class VideoDownloadPage {
+        +_fetch_list()
+        +_fetch_ks_list_task(worker, downloader, url_text)
+        +_batch_bloggers_task(worker, downloader, urls, list_type, platform, use_browser)
+        +_download_task(worker, downloader, videos, media_type)
+        +_on_list_fetched(result)
+        +_on_list_finished()
+        +status
+        +progress
+    }
+
+    class Worker {
+        +emit_progress(pct, msg)
+        +done
+        +error
+        +finished
+        +start()
+    }
+
+    class ValidateKsBatch {
+        <<tools 新增门禁>>
+        +check(name, ok, detail)
+        +校验免费兜底文案禁用词()
+        +校验首屏边界文案存在()
+        +校验归一化四类字段覆盖()
+        +校验Worker铁律()
+        +校验三链路边界()
+    }
+
+    VideoDownloader ..> OkdataClient : 列表请求（第 1 级完整采集通道）
+    VideoDownloader ..> MediaParser : 第 2 段补直链 health/parse
+    VideoDownloader ..> KsNormalizer : 四类 schema 归一为 VideoInfo
+    VideoDownloader ..> KsSsrFallback : 付费失败时免费首屏兜底
+    VideoDownloader ..> KsFailText : 失败原因分级取文案
+    VideoDownloader --> VideoInfo : 产出 / 就地更新
+    OkdataClient ..> ApiResponse : 返回
+    VideoDownloadPage ..> Worker : connect_guarded + start
+    VideoDownloadPage ..> VideoDownloader : 调用列表与下载
+    Worker ..> VideoDownloader : 后台线程执行
+    KsNormalizer ..> MediaParser : 消费第 ④ 类归一化 dict
+    KsSsrFallback ..> KsNormalizer : 产出第 ③ 类 feeds
+    ValidateKsBatch ..> KsNormalizer : 离线断言四类样本
+    ValidateKsBatch ..> VideoDownloadPage : 静态断言文案与 Worker
+    VideoDownloadPage ..> VideoInfo : 加入下载表

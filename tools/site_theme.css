@@ -994,6 +994,18 @@ section + section{border-top:1px solid var(--line-2)}
 .m-sub,.m-note{color:var(--ink2);font-size:var(--fs-sm);line-height:1.75}
 .m-note{margin-top:16px}
 .qr{width:180px;border-radius:12px;border:1px solid var(--line);margin:18px 0}
+/* ★ 联系弹窗两个二维码分区：付款码 / 个人好友码，标题明确防扫错。
+   个人码是竖版名片（820×1212），限宽 180px 并让弹窗可滚动，矮屏也不裁切。 */
+.qr-label{
+  margin-top:20px;font-size:var(--fs-sm);font-weight:600;color:var(--acid);
+  letter-spacing:.02em;
+}
+.qr-label-2{margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+.personal-qr{
+  width:180px;height:auto;border-radius:12px;border:1px solid var(--line);
+  margin:14px 0 0;display:block;
+}
+.modal-card{max-height:88vh;overflow-y:auto}
 
 /* 子页通用散文块 */
 .prose{max-width:74ch;color:var(--ink2);line-height:1.9;font-size:15.5px}
@@ -1540,4 +1552,10 @@ body.rail-page .wrap{padding-left:clamp(64px,9vw,132px)}
   background:var(--acid);color:#0B0E14;
   font:800 10.5px/1.7 var(--num,inherit);font-style:normal;
   letter-spacing:.08em;vertical-align:2px;
+}
+
+/* ★ 子页页脚「作者个人微信」缩略码（竖版名片，限宽避免撑破页脚列） */
+.f-qr{
+  width:104px;height:auto;display:block;margin:2px 0 4px;
+  border-radius:8px;border:1px solid var(--line);
 }

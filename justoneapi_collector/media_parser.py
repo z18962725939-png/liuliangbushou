@@ -49,12 +49,25 @@ from typing import Any
 BASE_URL = "https://video.zacao.top"
 
 # ★ 作者自己的解析服务 Key（mp_ 前缀）。
-#   允许被环境变量 TRAFFIC_MEDIA_KEY 覆盖 —— 哪天要换新串，
-#   不必改代码重新打包，设置一次环境变量就能顶上（换串应急用）。
-DEFAULT_API_KEY = os.getenv(
-    "TRAFFIC_MEDIA_KEY",
-    "mp_gSUiBNZBV7TRhcXRWaPmPk3U0wbuEVny",
-).strip()
+#   仓库里**不再保存 Key 字面量**：源码里只有加载逻辑，
+#   真正的串由构建时注入（tools/_inject_media_key.py 生成 _builtin_key.py，
+#   该文件已 gitignore）。优先级：环境变量 > 构建注入 > 空。
+#   换串应急：设置 TRAFFIC_MEDIA_KEY 后重启即可，不必重新打包。
+try:  # 构建时生成；开发机可能没有这个文件
+    from ._builtin_key import MEDIA_KEY as _BUILTIN_MEDIA_KEY
+except Exception:  # noqa: BLE001
+    _BUILTIN_MEDIA_KEY = ""
+
+
+def _load_media_key() -> str:
+    """环境变量优先，其次构建注入；都没有就返回空串（由调用方提示）。"""
+    env = os.getenv("TRAFFIC_MEDIA_KEY", "").strip()
+    if env:
+        return env
+    return str(_BUILTIN_MEDIA_KEY or "").strip()
+
+
+DEFAULT_API_KEY = _load_media_key()
 
 # 解析超时：服务端要去对方平台抓一次页面，偶尔会比较慢。
 # ★ 但也不能太久：批量导入 200 条时，每条多等 10 秒就是半小时。

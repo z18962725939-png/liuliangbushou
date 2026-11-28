@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QHeaderView, QHBoxLayout, QLabel,
                                QPushButton, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
+from ._base import connect_guarded
 from ._base import (StatusLine, Worker, confirm_destructive, danger_button,
                     guide_banner, page_title, vertical_card)
 
@@ -39,9 +40,9 @@ class CompetitorPage(QWidget):
 
         ctrl = QHBoxLayout()
         b_start = QPushButton("开始体检"); b_start.setObjectName("Primary")
-        b_start.clicked.connect(self._run)
+        connect_guarded(b_start.clicked, lambda *_: self._run(), on_error=lambda msg: self.status.setText(msg), label="run")
         self.export_btn = QPushButton("导出Excel"); self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         ctrl.addWidget(b_start); ctrl.addWidget(self.export_btn)
         # ★ 这行说明有 30 多个字，QLabel 默认不换行也不压缩，尺寸提示 650px，
         #   加上左边三个按钮就把整页顶宽 113px（视口 950），右侧表格列被切。

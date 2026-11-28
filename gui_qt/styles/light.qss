@@ -374,14 +374,28 @@ QLabel#CmdFoot {
 /* 导航项：左侧 3px 是给选中态预留的柠檬指示条，
    未选中时留同宽透明描边 —— 保证选中/未选中文字左边缘严格对齐 */
 QPushButton#NavItem {
-    background: transparent;
-    border: none;
-    border-left: 3px solid transparent;
-    border-radius: 8px;
-    padding: 8px 12px;
+    /* 组内入口卡片化（2026-11-25）：从「一条文字线」变成「一块可点的面」。
+       色值全部复用本文件已有令牌（#F5F6F8 画布 / #D8DBE0 描边），
+       不引入新色，theme.py 的 restyle_tree 置换表无需同步。 */
+    background: #F5F6F8;
+    border: 1px solid #D8DBE0;
+    border-radius: 10px;
+    padding: 8px 3px;
+    /* QSS 的 min-height 是「内容高度」，会再叠加上下 padding 与边框：
+       20 + 8*2 + 2 = 38px/卡。侧栏总高有限，9 张卡超 52px 就会把
+       分组容器挤扁、出现卡片互相压盖（实测 827px 需求 vs 760px 可用）。 */
+    min-height: 20px;
+    font-size: 12px;
     color: #566070;
-    text-align: left;
-    spacing: 8px;
+    text-align: center;
+    /* 侧栏 252px：2 列每卡 102px，扣掉 20px 图标后要给「音视频转文本」
+       这类 6 字标签留够宽度，spacing 收到 2px（12px 字号下实测 72px）。 */
+    spacing: 2px;
+    qproperty-iconSize: 20px 20px;
+}
+/* 卡片有描边了，就不能再靠 border:none 免掉键盘焦点环（品牌门禁 K 段）。 */
+QPushButton#NavItem:focus {
+    border: 1px solid #0B0E14;
 }
 QPushButton#NavItem:hover {
     background: #E7E9ED;

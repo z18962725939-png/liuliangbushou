@@ -344,6 +344,12 @@ _SETTINGS_DEFAULTS: dict = {
     "max_retries": 3,
     "max_concurrency": 5,
     "cache_enabled": True,
+    # ★ 2026-11-28 本机 media-parser 解析引擎（可选、免费、不花采集额度）。
+    #   默认关，配置后优先解析、失败自动回退既有 zacao / CDP 链路。
+    "local_parser_enabled": False,
+    "local_parser_base_url": "http://127.0.0.1:8051",
+    "local_parser_api_key": "",       # 仅自建 SaaS 模式才需要；默认免鉴权
+    "local_parser_dir": "",           # 服务目录，空则用 exe 同级的 media-parser
     # 强制登录开关：开启后未登录抖音不允许进入软件（见 gui_qt/login_gate.py）
     "require_login": True,
     "douyin_cookie": "",
@@ -940,7 +946,7 @@ class CollapseBox(QWidget):
         self.btn.setCheckable(True)
         self.btn.setChecked(not collapsed)
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn.clicked.connect(self._toggle)
+        connect_guarded(self.btn.clicked, lambda *_: self._toggle(), on_error=lambda msg: None, label="toggle")  # 折叠组件无状态栏，异常已由守卫写日志
         lay.addWidget(self.btn)
 
         self.body = QWidget()

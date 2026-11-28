@@ -77,9 +77,10 @@ check("snapshot_sources()" in main_src and main_src.find("snapshot_sources()")
       < main_src.find("save_state({"),
       "字节备份排在状态落盘之前")
 
-# 33 个中止判据不许被改动误删
+# 中止判据不许被改动误删：实际 56 个（2026-11-28 微信二维码门禁 +1 后贴紧实际值），
+# 下限直接钉 56，删掉任意一条都会当场报红，不再留十几条的宽松余量。
 n_abort = len(re.findall(r'print\("\[中止\]', src))
-check(n_abort >= 33, f"中止判据未减少（{n_abort} 个，基线 33）")
+check(n_abort >= 56, f"中止判据未减少（{n_abort} 个，基线 56）")
 
 # 状态文件必须落在已被 gitignore 的目录，公开仓看不到运行时状态
 check('INSTALLER_OUT / ".release_state.json"' in src,

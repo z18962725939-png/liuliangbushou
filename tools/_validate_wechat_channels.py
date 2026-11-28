@@ -41,6 +41,7 @@ def chk_soft(name: str, cond: bool, why: str = ""):
     门禁在站点抖动时误报红、卡住发版——与本脚本「不联网」的定位冲突。真正的
     功能断言在 §5（Path/失败原因/重解析）是离屏可重复的，不受此影响。
     """
+    global _PASSED
     if cond:
         _PASSED += 1
         print(f"OK   {name}")

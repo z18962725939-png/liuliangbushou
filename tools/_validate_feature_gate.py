@@ -296,9 +296,15 @@ finally:
     _dl.close()
     vdm.VideoDownloader._media_service_resolve = _real_svc
 
-# —— 服务端解析的新模块必须健在（key、错误码人话、平台名映射）——
+# —— 服务端解析的新模块必须健在（Key 注入、错误码人话、平台名映射）——
+#   ★ 2026-11-25：Key 不再写进源码（公开仓已泄露过）。判据改为：
+#     ① 源码里不允许出现 mp_ 字面量；② 必须保留环境变量 + 构建注入两条路。
+import re as _re_mp
 _mp = (ROOT / "justoneapi_collector" / "media_parser.py").read_text(encoding="utf-8")
-check("新解析模块内置了作者的 Key", "mp_gSUiBNZBV7TRhcXRWaPmPk3U0wbuEVny" in _mp)
+check("★ 解析模块不含 Key 字面量（构建时注入）",
+      not _re_mp.search(r"mp_[A-Za-z0-9]{16,}", _mp))
+check("解析模块支持环境变量与构建注入",
+      "_builtin_key" in _mp and "TRAFFIC_MEDIA_KEY" in _mp)
 check("★ 错误码全翻成了人话（404/429/500/502 都要有）",
       all(f"{c}:" in _mp for c in (400, 403, 404, 429, 500, 502)))
 check("平台名映射覆盖抖音/小红书/快手",

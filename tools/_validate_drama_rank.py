@@ -80,9 +80,22 @@ for _p in (ROOT / "gui_qt" / "pages").glob("*.py"):
 chk("全库 gui_qt/pages 无同类无效回调", not _bad_all, str(_bad_all[:5]))
 chk("无裸 .clicked.connect（槽抛异常会静默卡死）",
     ".clicked.connect(" not in DP)
-chk("全部 Worker 统一走 _wire_worker（含新增的公开热榜 Worker）",
-    DP.count("self._wire_worker(") == 5,
-    f"实际 {DP.count('self._wire_worker(')} 处")
+# ★ 不钉死数量：新增 SocialDataX 通道后 Worker 变多（余额/SD搜索/热榜/
+#   详情/下载）。改为验证「每个 Worker 都接了 _wire_worker 且真的 start」，
+#   这才是防「点了没反应」的不变量；写死 5 会随合法演进假红。
+#   ★ start 用 AST 数真实调用：源码注释里也写了 `w.start()`，字符串计数会多算。
+import ast as _ast  # noqa: E402
+_tree = _ast.parse(DP)
+_n_start = sum(
+    1 for n in _ast.walk(_tree)
+    if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+    and n.func.attr == "start" and isinstance(n.func.value, _ast.Name)
+    and n.func.value.id == "w")
+_n_worker = DP.count("Worker(self._run_")
+_n_wire = DP.count("self._wire_worker(")
+chk("Worker 全部走 _wire_worker 且每个都 start（不钉死数量、AST 数 start）",
+    _n_worker >= 5 and _n_wire == _n_worker and _n_start == _n_worker,
+    f"Worker {_n_worker} / wire {_n_wire} / start(AST) {_n_start}")
 chk("_wire_worker 的 done 与 error 都 guarded 且带 on_error",
     DP.count("connect_guarded(w.done") == 1 and
     DP.count("connect_guarded(w.error") == 1 and
@@ -92,10 +105,16 @@ _seg_rank = DP.split("def _do_rank", 1)[1].split("def _run_rank", 1)[0]
 chk("搜索仍前置凭证检查（不发注定失败的签名请求）",
     DP.count("self._ensure_credentials()") == 1 and
     "_ensure_credentials()" in _seg_search)
-chk("热榜无凭证时改走免凭证公开源，有凭证时仍走 drama_api.rank",
-    "drama_api.credentials_ready()" in _seg_rank and
-    "Worker(self._run_public_rank)" in _seg_rank and
+# ★ 2026-11-28 起热榜是三通道降级（SocialDataX → XiaoYingAPI → 公开榜），
+#   不再直接读 drama_api.credentials_ready()。验证「三条分支都在 +
+#   公开榜仍是最后兜底 + 热榜不强制前置凭证检查」这个等价不变量。
+chk("热榜三通道降级：SD / XiaoYingAPI / 免凭证公开榜都在，公开榜兜底",
+    "_active_channel()" in _seg_rank and
+    "_CH_SD" in _seg_rank and "_CH_XY" in _seg_rank and
     "Worker(self._run_rank)" in _seg_rank and
+    "Worker(self._run_public_rank)" in _seg_rank and
+    _seg_rank.rfind("Worker(self._run_public_rank)") >
+    _seg_rank.rfind("Worker(self._run_rank)") and
     "_ensure_credentials()" not in _seg_rank)
 chk("凭证设置弹窗存在且 secret 用密码回显",
     "def _edit_credentials" in DP and "QLineEdit.EchoMode.Password" in DP)
@@ -192,14 +211,17 @@ with mock.patch.object(drama_api, "credentials_ready", return_value=True), \
     chk("[D] Worker 抛异常：状态栏写明失败原因",
         "模拟线程内异常" in page._status.text(), repr(page._status.text()))
 
-# --- 弹窗：真点「设置凭证」按钮，用 patch 掉 exec 避免模态阻塞；
-#     若 QDialogButtonBox 枚举 / EchoMode 写错，guarded 会把异常写进状态栏
+# --- 弹窗：真点凭证/通道按钮，用 patch 掉 exec 避免模态阻塞；
+#     若 QDialogButtonBox 枚举 / EchoMode 写错，guarded 会把异常写进状态栏。
+#     ★ 2026-11-28 按钮拆成「设置通道」(SocialDataX) 与「备用凭证」(XiaoYing)，
+#       旧文案「设置凭证」已不存在；按语义找，仍验证「按钮存在且不卡死」。
 from PySide6.QtWidgets import QDialog  # noqa: E402
 with mock.patch.object(QDialog, "exec",
                        return_value=int(QDialog.DialogCode.Rejected)):
     cred_btn = next((b for b in page.findChildren(QPushButton)
-                     if b.text() == "设置凭证"), None)
-    chk("[弹窗] 找到「设置凭证」按钮", cred_btn is not None)
+                     if b.text() in ("设置通道", "备用凭证", "设置凭证")), None)
+    chk("[弹窗] 找到凭证/通道设置按钮", cred_btn is not None,
+        str([b.text() for b in page.findChildren(QPushButton)][:12]))
     cred_btn.click()
     pump(200)
     chk("[弹窗] 凭证对话框构造无异常（状态栏没有 guarded 报错）",

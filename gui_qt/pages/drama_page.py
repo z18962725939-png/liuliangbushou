@@ -81,6 +81,10 @@ class DramaPage(QWidget):
         root.setContentsMargins(24, 24, 24, 24)
         root.setSpacing(14)
         root.addWidget(page_title("短剧成片"))
+        sub = QLabel("已授权短剧从建剧集、扫集数到分析导出的一站式工作台。")
+        sub.setObjectName("Caption")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
         root.addWidget(guide_banner("短剧成片", self))
 
         # ★ 2026-10-27：1541px → 分两档「剧集 / 成片」。
@@ -125,11 +129,11 @@ class DramaPage(QWidget):
         #   客户真正等的是下载，把 450 写在按钮上会让人以为要下 450，
         #   结果进度条跑得比预期快 —— 这种"惊喜"是拿信息不准换来的，不要。
         self.dl_btn = QPushButton("下载剪辑组件（约 420MB，只下一次）")
-        self.dl_btn.clicked.connect(self._download_bundle)
+        connect_guarded(self.dl_btn.clicked, lambda *_: self._download_bundle(), on_error=lambda msg: self.status.setText(msg), label="download bundle")
         self.dl_btn.setVisible(False)
         btn_row.addWidget(self.dl_btn)
         self.open_dir_btn = QPushButton("打开素材输出目录")
-        self.open_dir_btn.clicked.connect(self._open_outputs)
+        connect_guarded(self.open_dir_btn.clicked, lambda *_: self._open_outputs(), on_error=lambda msg: self.status.setText(msg), label="open outputs")
         btn_row.addWidget(self.open_dir_btn)
         btn_row.addStretch()
         eng_l.addLayout(btn_row)
@@ -152,11 +156,11 @@ class DramaPage(QWidget):
 
         pb = QHBoxLayout()
         self.new_btn = QPushButton("新增剧集（选素材文件夹）")
-        self.new_btn.clicked.connect(self._new_project)
+        connect_guarded(self.new_btn.clicked, lambda *_: self._new_project(), on_error=lambda msg: self.status.setText(msg), label="new project")
         self.refresh_btn = QPushButton("刷新")
-        self.refresh_btn.clicked.connect(self._refresh_projects)
+        connect_guarded(self.refresh_btn.clicked, lambda *_: self._refresh_projects(), on_error=lambda msg: self.status.setText(msg), label="refresh projects")
         self.del_btn = QPushButton("删除剧集")
-        self.del_btn.clicked.connect(self._delete_project)
+        connect_guarded(self.del_btn.clicked, lambda *_: self._delete_project(), on_error=lambda msg: self.status.setText(msg), label="delete project")
         for b in (self.new_btn, self.refresh_btn, self.del_btn):
             pb.addWidget(b)
         pb.addStretch()
@@ -176,9 +180,9 @@ class DramaPage(QWidget):
 
         eb = QHBoxLayout()
         self.analyze_btn = QPushButton("分析选中剧集（转写 + 场景 + 字幕）")
-        self.analyze_btn.clicked.connect(self._analyze)
+        connect_guarded(self.analyze_btn.clicked, lambda *_: self._analyze(), on_error=lambda msg: self.status.setText(msg), label="analyze")
         self.scan_btn = QPushButton("重新扫描")
-        self.scan_btn.clicked.connect(self._scan)
+        connect_guarded(self.scan_btn.clicked, lambda *_: self._scan(), on_error=lambda msg: self.status.setText(msg), label="scan")
         for b in (self.analyze_btn, self.scan_btn):
             eb.addWidget(b)
         eb.addStretch()
@@ -198,9 +202,9 @@ class DramaPage(QWidget):
 
         ob = QHBoxLayout()
         self.export_btn = QPushButton("生成成片并导出")
-        self.export_btn.clicked.connect(self._export)
+        connect_guarded(self.export_btn.clicked, lambda *_: self._export(), on_error=lambda msg: self.status.setText(msg), label="export")
         self.open_out_btn = QPushButton("打开成片目录")
-        self.open_out_btn.clicked.connect(self._open_outputs)
+        connect_guarded(self.open_out_btn.clicked, lambda *_: self._open_outputs(), on_error=lambda msg: self.status.setText(msg), label="open outputs")
         for b in (self.export_btn, self.open_out_btn):
             ob.addWidget(b)
         ob.addStretch()

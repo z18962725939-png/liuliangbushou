@@ -42,6 +42,8 @@ EXT_ZIP_URL = _site_build.EXT_ZIP_URL
 
 BRAND = seo.BRAND
 WECHAT_ID = "zsx807108536"
+# 与 build_site.py 共用同一份作者个人微信加好友码（相对路径，不内联）。
+PERSONAL_QR_ASSET = "assets/wechat-personal-qr.jpg"
 
 # ─────────────────────────────────────────────────────────────────────
 #  共用骨架：导航 / 页脚 / 内链
@@ -133,7 +135,10 @@ def _footer(version: str) -> str:
         '        <a href="index.html#download">下载安装</a>\n'
         '        <a href="faq.html">常见问题</a>\n'
         '        <a href="changelog.html">更新日志</a>\n'
-        f"        <span>微信：{WECHAT_ID}</span>\n"
+        '        <span>扫码加作者个人微信 ↓</span>\n'
+        f'        <img class="f-qr" src="{PERSONAL_QR_ASSET}" '
+        'alt="作者个人微信二维码" loading="lazy">\n'
+        f"        <span>微信号：{WECHAT_ID}（二维码失效时搜索）</span>\n"
         "      </div>\n"
         "    </div>\n"
         '    <div class="f-bot">\n'
@@ -190,7 +195,8 @@ def _cta_download(version: str, size_mb: str, free_url: str = "",
         f"  <b>下载 {BRAND} v{version}</b>（Windows 10 / 11，安装包 {size_mb}）\n"
         "  <p>装上就能用：视频下载与直播录制永久免费、不限次数，不需要激活码。"
         "采集、仿写、截流这类要调接口的功能，用授权码解锁。"
-        f"下载与激活有疑问，加微信 {WECHAT_ID} ，一步步带你走完。</p>\n"
+        "下载与激活有疑问，扫码加作者个人微信，一步步带你走完"
+        f"（微信号 {WECHAT_ID}）。</p>\n"
         '  <p style="margin-top:16px">'
         '<a class="btn btn-key" href="index.html#download">去下载页面</a></p>\n'
         "</div>"
@@ -738,7 +744,7 @@ def body_price(version: str, size_mb: str) -> str:
         list_block("关于授权", [
             "一码一机：一个授权码绑定一台电脑。",
             "换电脑把新机器码发给作者，免费重发一张，不重复收费。",
-            "购买与售后走微信，作者本人对接，不是机器人客服。",
+            "购买与售后扫码加作者个人微信，作者本人对接，不是机器人客服。",
         ]),
         _cta_download(version, size_mb),
     ]), kick="细则")

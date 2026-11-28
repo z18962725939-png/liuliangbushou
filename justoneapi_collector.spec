@@ -66,6 +66,13 @@ _BUNDLED_CPU = PROJECT_ROOT / "assets" / "whisper_cpu"
 if _BUNDLED_CPU.exists():
     datas.append((str(_BUNDLED_CPU), "whisper_cpu"))
 
+# ★ 自带本机解析引擎离线包（约 33 MB）：Python 3.10.11 + 全部依赖 + 71 解析器源码快照。
+#   客户机「一键部署」直接从这里解压，不需要装 Python / 不需要联网 / 不受 2027 上游停更影响。
+#   local_media_parser.bundled_zip() 在冻结态从 _MEIPASS 找它。
+_BUNDLED_PARSER_ZIP = PROJECT_ROOT / "assets" / "local_parser_portable.zip"
+if _BUNDLED_PARSER_ZIP.exists():
+    datas.append((str(_BUNDLED_PARSER_ZIP), "."))
+
 # 自带 ffmpeg（约 200MB）：直播录制 / 音视频抽取 / 转写都依赖它。
 # PyInstaller 6.x 的 one-folder 会把 datas 落到 dist/流量捕手/_internal/ffmpeg/，
 # 运行时各模块按 _MEIPASS/ffmpeg 与 exe 同级/_internal/ffmpeg 自动发现
@@ -142,6 +149,9 @@ hiddenimports = [
     #   同样是 video_downloader._media_service_resolve() 内部的函数体 import，
     #   漏写这一行的后果一模一样：源码能跑、打出来的安装包直接不解析。
     "justoneapi_collector.media_parser",
+    # ★ 2026-11-28 本机 media-parser 引擎：video_downloader 两个解析入口都在
+    #   函数体内 import，静态扫不到；漏登记会导致启用后本机解析静默失效。
+    "justoneapi_collector.local_media_parser",
     # ★ v1.24.6 服务端解析（抖音/小红书/快手的主力解析通道）。
     #   同样是 video_downloader._media_service_resolve() 内部的函数体 import，
     #   漏写这一行的后果一模一样：源码能跑、安装包报 ImportError 直接不解析。

@@ -1,0 +1,10 @@
+#!/bin/sh
+# 提交前扫密钥。启用一次即可：
+#   git config core.hooksPath .githooks
+# 跳过（不推荐）：git commit --no-verify
+if [ -x "C:/Python310/python.exe" ]; then
+  PY="C:/Python310/python.exe"
+else
+  PY=python
+fi
+exec "$PY" tools/_scan_secrets.py --staged

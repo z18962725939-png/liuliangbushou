@@ -127,8 +127,20 @@ def _bad_on_error(src: str) -> list[str]:
 
 chk("无 on_error=self._status.set（Worker 从不启动的老伤）",
     not _bad_on_error(DP), str(_bad_on_error(DP)))
-chk("公开榜 Worker 也走 _wire_worker", DP.count("self._wire_worker(") == 5,
-    f"实际 {DP.count('self._wire_worker(')} 处")
+# ★ 不钉死数量：新增 SocialDataX 通道后 Worker 变多。验证等价不变量——
+#   每个 Worker 都接了 _wire_worker 且真的 start（start 用 AST 数，注释里也有）。
+import ast as _ast  # noqa: E402
+_tree = _ast.parse(DP)
+_n_start = sum(
+    1 for n in _ast.walk(_tree)
+    if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+    and n.func.attr == "start" and isinstance(n.func.value, _ast.Name)
+    and n.func.value.id == "w")
+_n_worker = DP.count("Worker(self._run_")
+_n_wire = DP.count("self._wire_worker(")
+chk("公开榜 Worker 也走 _wire_worker 且每个都 start（不钉死数量、AST 数 start）",
+    _n_worker >= 5 and _n_wire == _n_worker and _n_start == _n_worker,
+    f"Worker {_n_worker} / wire {_n_wire} / start(AST) {_n_start}")
 
 print("\n[3] 功能：内联 JSON 解析、去重、字段映射、失败兜底")
 from justoneapi_collector import drama_public_rank as pub  # noqa: E402

@@ -131,7 +131,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="视频下载", cls="VideoDownloadPage", module="video_download_page",
-        group="常用", feature="download",
+        group="素材与短剧", feature="download",
         aliases=("spxz", "下载", "视频", "去水印", "保存", "素材", "搬运"),
         free_group="下载",
         icon='<rect x="3" y="5" width="13" height="14" rx="2"/>'
@@ -142,7 +142,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="视频号解析", cls="WechatChannelsPage", module="wechat_channels_page",
-        group="常用", feature=None,
+        group="素材与短剧", feature=None,
         aliases=("sphjx", "视频号", "微信视频号", "weixin", "channels",
                  "sph", "视频号链接", "解析视频号"),
         icon='<path d="M21 11.5a8 8 0 01-8 8 8.7 8.7 0 01-3-.6L4 21l1.3-4.2A8 8 0 1121 11.5z"/>'
@@ -153,7 +153,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="短剧解析", cls="DramaParsePage", module="drama_parse_page",
-        group="常用", feature="drama_parse",
+        group="素材与短剧", feature="drama_parse",
         aliases=("djjx", "拆解", "分镜解析", "镜头解析", "剧本拆解",
                  "分析短剧", "拉片", "剧本题"),
         note="短剧解析 → 短剧成片是一对上下游入口",
@@ -163,7 +163,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="短剧成片", cls="DramaPage", module="drama_page",
-        group="常用", feature="drama",
+        group="素材与短剧", feature="drama",
         aliases=("djcp", "短剧", "成片", "剪辑", "切片", "混剪", "竖屏",
                  "自动剪辑", "剧集", "解说", "卡点"),
         note="排在「视频下载」之后：下载拿素材 → 剪辑出成片",
@@ -173,7 +173,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="公众号运营", cls="WechatMpPage", module="wechat_mp_page",
-        group="常用", feature="wechat_mp",
+        group="平台内容", feature="wechat_mp",
         aliases=("gzhyy", "公众号", "微信公众", "wechat mp", "mp.weixin",
                  "原创文章", "历史文章", "阅读数", "搜一搜", "gh_"),
         icon='<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/>'
@@ -184,7 +184,7 @@ PAGES: tuple[PageSpec, ...] = (
     ),
     PageSpec(
         name="小红书笔记", cls="XhsNotesPage", module="xhs_notes_page",
-        group="常用", feature="xhs_notes",
+        group="平台内容", feature="xhs_notes",
         aliases=("xhsbj", "小红书", "rednote", "xiaohongshu", "xhs",
                  "笔记提取", "笔记正文", "种草笔记", "全文", "联想词"),
         icon='<rect x="4" y="3" width="16" height="18" rx="2"/>'

@@ -50,6 +50,14 @@ PAGE_URL = "https://liuliangbushou-1258850027.cos-website.ap-guangzhou.myqcloud.
 WECHAT_ID = "zsx807108536"
 BRAND = "流量捕手"
 
+# ★ 作者个人微信「加好友」二维码（对外联系用）。
+#   与 tools/pay_qr/wechat.png 的「收款码」是两码事，严格区分、绝不互相替换：
+#     · 收款码 → 客户购买授权时付款，替换掉就收不到钱；
+#     · 个人码 → 咨询 / 售后 / 加好友，扫了是加人不是付款。
+#   两者在联系弹窗里分成上下两个带标题的区块，避免客户扫错。
+PERSONAL_QR_SRC = ROOT / "docs" / "contact" / "wechat-personal-qr.jpg"
+PERSONAL_QR_ASSET = "assets/wechat-personal-qr.jpg"
+
 # 官网用到的界面截图：(源文件名去扩展名, COS 上传名)
 SITE_SHOTS = [
     ("视频下载", "shot-video-download.png"),
@@ -568,7 +576,7 @@ $EXT_SECTION
             <div>SHA256：<code>$SHA256</code></div>
           </div>
           $NOTES_BLOCK
-          <div class="wx-note">售后与授权：微信 <b>$WECHAT_ID</b></div>
+          <div class="wx-note">售后与授权：<a href="javascript:void(0)" onclick="openPay()">扫码加作者微信</a>，或搜索 <b>$WECHAT_ID</b></div>
         </div>
         <div class="dl-side">
           <a class="dl-btn" href="$DL_URL">⬇ 下载 Windows 版</a>
@@ -590,7 +598,7 @@ $EXT_SECTION
       <div class="faq-head rv">
         <span class="kick">常见问题</span>
         <h2>你可能想问</h2>
-        <p>没答上的，直接加微信 $WECHAT_ID 问。</p>
+        <p>没答上的，<a href="javascript:void(0)" onclick="openPay()">扫码加作者个人微信</a>问。</p>
       </div>
       <div class="rv">
         $FAQ_ITEMS
@@ -640,7 +648,8 @@ $CHANGELOG_SECTION
       </div>
       <div class="f-col">
         <h5>联系</h5>
-        <span>微信：$WECHAT_ID</span>
+        <a href="javascript:void(0)" onclick="openPay()">扫码加作者微信</a>
+        <span>微信号：$WECHAT_ID</span>
         <span>版本：v$VERSION</span>
         <span>系统：Windows 10 / 11</span>
       </div>
@@ -653,13 +662,20 @@ $CHANGELOG_SECTION
 </footer>
 
 <!-- 联系 / 付款弹窗 -->
+<!-- ★ 两个二维码严格分区：上面「收款码」是付款专用（客户付钱靠它），
+     下面「个人微信二维码」只用于加好友咨询 / 售后。绝不互相替换，
+     否则客户扫了好友码付不了款。 -->
 <div class="modal" id="payModal">
   <div class="modal-card">
     <h3>联系作者</h3>
     <p class="m-sub">购买授权、试用咨询、产品建议都走这里</p>
+    <div class="qr-label">① 购买授权 · 付款码</div>
     $QR_IMG_BLOCK
-    <div class="wx">微信：<b>$WECHAT_ID</b></div>
     <p class="m-note">$PAY_NOTE</p>
+    <div class="qr-label qr-label-2">② 咨询 / 售后 · 加作者个人微信</div>
+    $PERSONAL_QR_IMG
+    <div class="wx">微信号：<b>$WECHAT_ID</b>（二维码失效时搜索添加）</div>
+    <p class="m-note">上面是付款码、下面是加好友码，别扫错；加好友不收费。</p>
     <button class="btn btn-ghost" onclick="closePay()">关闭</button>
   </div>
 </div>
@@ -1193,6 +1209,13 @@ def build_html(*, version: str, published: str, size: int, url: str, sha256: str
     promo = "首购 19.9 元即得 38 天（31 天 + 赠送 7 天），到期后续费 29.9 元/月，数据不丢。"
     pay_note = pay.get("pay_note") or "长按二维码 → 识别图中二维码 → 付款"
     qr_block = f'<div class="qr">{qr_img}</div>' if qr_img else ""
+    # ★ 个人微信「加好友」码走相对路径引用，不内嵌 base64：
+    #   首页已有 <400KB 硬门禁，99KB 图片内嵌会直接撑爆。
+    #   构建时由 copy_personal_qr() 复制进 standalone/assets/。
+    personal_qr_img = (
+        f'<img class="personal-qr" src="{PERSONAL_QR_ASSET}" '
+        'alt="作者个人微信二维码，长按识别添加好友" loading="lazy">'
+    )
     pill_note = "新增「添加即录制」" if version.startswith("1.2") else "持续更新中"
     try:
         import build_changelog as _bclog
@@ -1244,6 +1267,7 @@ def build_html(*, version: str, published: str, size: int, url: str, sha256: str
         FAQ_ITEMS=build_faq(),
         NOTES_BLOCK=build_notes(notes, version),
         QR_IMG_BLOCK=qr_block,
+        PERSONAL_QR_IMG=personal_qr_img,
         PAY_NOTE=pay_note,
         WECHAT_ID=WECHAT_ID,
         PROMO=promo,
@@ -1364,6 +1388,15 @@ def main() -> int:
               "→ standalone/assets/")
     if not copied:
         print("   [提示] 歌单里没有 mp3，播放器改用内置合成曲（无需外部文件）")
+
+    # ★ 1.9) 作者个人微信「加好友」二维码 → standalone/assets/。
+    #   与下面第 2 步的「收款码」是两张不同的图、两种用途，绝不互相覆盖。
+    print("=== 1.9) 作者个人微信二维码 ===")
+    if PERSONAL_QR_SRC.is_file():
+        shutil.copy2(PERSONAL_QR_SRC, STANDALONE / PERSONAL_QR_ASSET)
+        print(f"   [OK] {PERSONAL_QR_SRC.name} → standalone/{PERSONAL_QR_ASSET}")
+    else:
+        print(f"   [警告] 缺 {PERSONAL_QR_SRC}，联系弹窗里的加好友码会显示不出来")
 
     print("=== 2) 收款码 ===")
     qr_img = ""

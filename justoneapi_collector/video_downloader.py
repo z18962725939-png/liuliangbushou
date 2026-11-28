@@ -413,6 +413,508 @@ def video_is_downloaded(video, save_dir) -> bool:
         return False
 
 
+# ======================================================================
+#  快手批量解析 · 统一归一化层 + 免费 SSR 首屏兜底（2026-11-25）
+# ----------------------------------------------------------------------
+#  依据 docs/design/快手批量解析优化-增量设计.md 第 3/4/6 节。
+#  四类上游 schema（① okdata 统一对象 ② 旧通道扁平 feeds
+#  ③ 免费 SSR INIT_STATE.feeds ④ media_parser 归一化 dict）统一收敛到
+#  ks_normalize_to_video_info()，下游下载层完全无感。
+#  全部为模块级纯函数（SSR 抓取函数除外），无 self、可被门禁离线喂样本断言；
+#  不新增 import（json / re / time / httpx / _deep_get / _to_int_safe 均在顶层已有）。
+# ======================================================================
+
+KS_SCHEMA_OKDATA = "okdata"     # ① 默认采集通道统一对象（okdata_client._decorate 输出）
+KS_SCHEMA_LEGACY = "legacy"     # ② 旧通道扁平 feeds（JustOneAPI）
+KS_SCHEMA_SSR = "ssr"           # ③ 免费移动端 SSR window.INIT_STATE.feeds
+KS_SCHEMA_PARSER = "parser"     # ④ media_parser.parse() 归一化 dict
+
+# 失败原因分级 → 客户能照着做的一句话文案（P0-6）。
+# ★ empty 仅允许「付费成功但 feeds 空 + 免费 SSR 也确认无作品」双重确认后上屏；
+#   config 触发后界面只说这一句，不叠加任何 Key / 余额 / 激活类字样。
+KS_FAIL_TEXT: dict[str, str] = {
+    "config":  "已自动切换到免费通道（首屏）",
+    "network": "网络没连上或超时了 —— 换条网络，或稍后再试这一条",
+    "limit":   "解析服务正在限流 —— 等一两分钟再跑剩下这些",
+    "content": "这条作品可能已被删除或设为私密",
+    "schema":  "快手页面结构变了，免费通道暂时读不到 —— 请把这条链接反馈给作者",
+    "link":    "没认出快手主页链接 —— 请复制博主主页链接或 App 里的分享链接再粘",
+    "empty":   "已确认这位作者暂无公开作品",
+}
+
+# 首屏边界提示（P0-7）：SSR 兜底生效时必现，禁用词全文为 0。
+KS_NOTE_SSR_BOUNDARY = (
+    "已展示这位作者最新的公开作品（免费通道只能拿到首屏）。"
+    "想抓更早的历史作品，请切回完整采集通道，或把单条作品链接粘贴到解析框。"
+)
+
+# 列表段 / 直链段收尾说明前缀（P0-6 四段条数，UI 层不硬编码失败文案）。
+KS_NOTE_LIST_FULL = "完整采集通道"
+KS_NOTE_LIST_SSR = "免费首屏兜底"
+
+_KS_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+)
+
+
+def ks_fail_text(category: str) -> str:
+    """失败原因分级 → 一句话文案；未知类别回落内容类，绝不返回空串。"""
+    return KS_FAIL_TEXT.get(str(category or "").strip().lower(), KS_FAIL_TEXT["content"])
+
+
+def _ks_str(value: Any) -> str:
+    """任意值 → 去空白字符串；None / 容器 → 空串（避免把 dict 塞进 VideoInfo）。"""
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return ""
+    return str(value).strip()
+
+
+def _ks_https(url: str) -> str:
+    """播放地址 http:// 统一升级 https://（快手 CDN 两种都给，https 更稳）。"""
+    return "https://" + url[len("http://"):] if url.startswith("http://") else url
+
+
+def _ks_seconds(value: Any) -> tuple[int, bool]:
+    """create_time 口径归一 → (秒级 int, 是否解析异常)。
+
+    毫秒（>= 1e12）/1000；纯秒数字原样；ISO 字符串（okdata published_at 常见
+    "2026-11-02T09:30:00Z"）按前 19 位解析；失败记 0 并置异常标记追加结构备注。
+    只复用顶层已有的 re / time，零新增 import。
+    """
+    if value in (None, "", [], {}):
+        return 0, False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        n = float(value)
+        return (int(n / 1000) if n >= 1_000_000_000_000 else int(n)), False
+    s = str(value).strip()
+    if not s:
+        return 0, False
+    if re.fullmatch(r"\d{9,}", s):
+        n = float(s)
+        return (int(n / 1000) if n >= 1_000_000_000_000 else int(n)), False
+    try:
+        core = s[:19].replace("T", " ")
+        return int(time.mktime(time.strptime(core, "%Y-%m-%d %H:%M:%S"))), False
+    except (ValueError, OverflowError):
+        return 0, True
+
+
+def _ks_photo_id_from_share(raw: dict) -> str:
+    """SSR photo.share_info 的 URL query 反解 photoId（video_id 兜底）。"""
+    photo = raw.get("photo") if isinstance(raw.get("photo"), dict) else {}
+    share_info = photo.get("share_info") or raw.get("share_info") or ""
+    url = ""
+    if isinstance(share_info, dict):
+        url = _ks_str(share_info.get("url") or share_info.get("shareUrl")
+                      or share_info.get("share_url"))
+    elif isinstance(share_info, str):
+        url = share_info
+    match = re.search(r"[?&]photoId=([A-Za-z0-9_-]+)", url)
+    return match.group(1) if match else ""
+
+
+def ks_atlas_urls(raw: dict, source: str) -> list[str]:
+    """按优先级取图集 URL 列表：imgUrls → atlas.cdn+list → photoUrls。去空、保序去重。
+
+    okdata 统一对象的原生 images 不在本函数取值范围内（它可能是视频封面，
+    只有在 ks_is_atlas() 明确判定为图集时由归一化函数补充），避免误把封面当图集。
+    """
+    if not isinstance(raw, dict):
+        return []
+    out: list[str] = []
+    photo = raw.get("photo") if isinstance(raw.get("photo"), dict) else {}
+    ext = raw.get("ext_params") if isinstance(raw.get("ext_params"), dict) else {}
+
+    # ① imgUrls（顶层 / photo 下；元素可为 str 或 {url} / {image_url}）
+    for holder in (raw, photo):
+        for item in (holder.get("imgUrls") or []):
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip())
+            elif isinstance(item, dict):
+                url = _ks_str(item.get("url") or item.get("image_url") or item.get("img_url"))
+                if url:
+                    out.append(url)
+
+    # ② atlas.cdn + atlas.list → https://{cdn0}{path}（atlas 在 photo / ext_params / 顶层三处都找）
+    atlas = photo.get("atlas") or ext.get("atlas") or raw.get("atlas") or {}
+    if isinstance(atlas, dict):
+        cdns = atlas.get("cdn") or []
+        if isinstance(cdns, str):
+            cdns = [cdns]
+        cdn0 = _ks_str(cdns[0]) if cdns and isinstance(cdns, (list, tuple)) else ""
+        paths = atlas.get("list") or []
+        if cdn0 and isinstance(paths, (list, tuple)):
+            for path in paths:
+                path = _ks_str(path)
+                if path:
+                    out.append("https://" + cdn0 + (path if path.startswith("/") else "/" + path))
+
+    # ③ photoUrls（图集语境，取每条的 url；okdata 统一对象不走这里）
+    if source in (KS_SCHEMA_LEGACY, KS_SCHEMA_SSR):
+        for holder in (photo, raw):
+            for item in (holder.get("photoUrls") or []):
+                if isinstance(item, dict):
+                    url = _ks_str(item.get("url"))
+                    if url:
+                        out.append(url)
+                elif isinstance(item, str) and item.strip():
+                    out.append(item.strip())
+
+    seen: set[str] = set()
+    return [url for url in out if not (url in seen or seen.add(url))]
+
+
+def ks_is_atlas(raw: dict, source: str) -> bool:
+    """图集判定：workType 含 ATLAS，或（有 imgUrls/atlas 且无播放地址）。
+
+    okdata 统一对象的 images 不作为图集信号（它可能是单视频封面），
+    只有明确带 workType/atlas/imgUrls 时才判为图集。
+    """
+    if not isinstance(raw, dict):
+        return False
+    photo = raw.get("photo") if isinstance(raw.get("photo"), dict) else {}
+    ext = raw.get("ext_params") if isinstance(raw.get("ext_params"), dict) else {}
+    work_type = str(raw.get("workType") or photo.get("workType") or "").upper()
+    if "ATLAS" in work_type:
+        return True
+    has_atlas = bool(
+        raw.get("imgUrls") or photo.get("imgUrls")
+        or photo.get("atlas") or ext.get("atlas") or raw.get("atlas")
+    )
+    has_play = bool(_deep_get(raw, "photoUrl", "photo.photoUrl", "playUrl",
+                              "main_mv_urls.0.url", "mainMvUrls.0.url", "urlInfo.url"))
+    return has_atlas and not has_play
+
+
+def ks_normalize_to_video_info(
+    raw: dict,
+    source: str,
+    *,
+    share_url: str = "",
+    author_fallback: str = "",
+) -> tuple[VideoInfo | None, str]:
+    """把四类上游 schema 统一成 VideoInfo；返回 (VideoInfo | None, 失败原因)。
+
+    失败原因非空 = 这条被丢弃的真实原因（结构 / 内容类），调用方逐条记账、
+    绝不静默吞掉、也不抛异常。严格按设计 4.2 四类逐字段映射表实现。
+    """
+    if not isinstance(raw, dict):
+        return None, KS_FAIL_TEXT["schema"]
+    source = str(source or KS_SCHEMA_LEGACY).strip().lower()
+    why_parts: list[str] = []
+
+    video_id = ""
+    desc = ""
+    author = ""
+    sec_uid = ""
+    create_time = 0
+    duration = 0
+    digg_count = 0
+    cover_url = ""
+    play = ""
+    image_list: list[str] = []
+    platform = "kuaishou"          # 四类固定快手；仅 parser 分支按其 platform 归一
+    final_share = _ks_str(share_url)
+
+    if source == KS_SCHEMA_OKDATA:
+        # ① 统一对象：_decorate() 保留原生 id / text / images / published_at，
+        #    并补 nickname / digg_count / create_time 等别名；刻意不含播放地址。
+        video_id = _ks_str(_deep_get(raw, "id", "video_id", "aweme_id",
+                                     "note_id", "item_id", "post_id"))
+        desc = _ks_str(_deep_get(raw, "text", "desc", "title", "content", "body"))
+        author = _ks_str(_deep_get(raw, "nickname", "user_name", "nick_name",
+                                   "author.name")) or _ks_str(author_fallback)
+        sec_uid = _ks_str(_deep_get(raw, "user_id", "sec_uid", "user.userid", "user.id"))
+        create_time, bad_ct = _ks_seconds(raw.get("create_time"))
+        if bad_ct:
+            why_parts.append("发布时间格式异常")
+        duration = _to_int_safe(raw.get("duration"))
+        digg_count = _to_int_safe(_deep_get(raw, "digg_count", "like_count"))
+        cover_url = _ks_str(_deep_get(raw, "cover_url", "cover", "images.0"))
+        play = ""                     # F6/F7：okdata Post 恒无播放地址，交第 2 段补
+        if ks_is_atlas(raw, source):
+            image_list = ks_atlas_urls(raw, source)
+            if not image_list:
+                # 明确图集时，原生 images 兜底（剔除与封面相同的首张）
+                for item in (raw.get("images") or []):
+                    url = _ks_str(item)
+                    if url and url != cover_url:
+                        image_list.append(url)
+
+    elif source == KS_SCHEMA_LEGACY:
+        # ② 旧通道扁平 feeds（现状 _to_video_info_p 快手分支口径）
+        video_id = _ks_str(_deep_get(raw, "photo_id", "photoId", "id"))
+        desc = _ks_str(_deep_get(raw, "caption", "description", "desc"))
+        author = _ks_str(_deep_get(raw, "user_name", "user.user_name", "author_name",
+                                   "author.name", "nickname"))
+        sec_uid = _ks_str(_deep_get(raw, "user_id", "user.user_id", "userId"))
+        create_time, bad_ct = _ks_seconds(_deep_get(raw, "timestamp", "createTime", "create_time"))
+        if bad_ct:
+            why_parts.append("发布时间格式异常")
+        duration = _to_int_safe(raw.get("duration"))
+        digg_count = _to_int_safe(_deep_get(raw, "like_count", "likeCount", "count.likeCount"))
+        cover_url = _ks_str(_deep_get(raw, "coverUrl", "cover_urls.0.url",
+                                      "cover_thumbnail_urls.0.url", "poster"))
+        play = _ks_str(_deep_get(raw, "main_mv_urls.0.url", "mainMvUrls.0.url",
+                                 "playUrl", "urlInfo.url"))
+        if ks_is_atlas(raw, source):
+            image_list = ks_atlas_urls(raw, source)
+
+    elif source == KS_SCHEMA_SSR:
+        # ③ 免费移动端 SSR INIT_STATE.feeds（学习材料 §4 / §9 字段名）
+        photo = raw.get("photo") if isinstance(raw.get("photo"), dict) else {}
+        video_id = (_ks_str(_deep_get(raw, "photo.id", "photoId", "id"))
+                    or _ks_photo_id_from_share(raw))
+        desc = _ks_str(_deep_get(raw, "photo.caption", "caption", "photo.desc", "photo.title"))
+        author = (_ks_str(_deep_get(raw, "photo.userName", "userName", "author.name",
+                                    "work.userName", "userEid")) or _ks_str(author_fallback))
+        sec_uid = _ks_str(_deep_get(raw, "photo.userId", "user_id"))
+        create_time, bad_ct = _ks_seconds(_deep_get(raw, "photo.timestamp", "timestamp",
+                                                    "photo.createTime"))
+        if bad_ct:
+            why_parts.append("发布时间格式异常")
+        duration = _to_int_safe(_deep_get(raw, "photo.duration", "duration"))
+        digg_count = _to_int_safe(_deep_get(raw, "photo.likeCount", "likeCount",
+                                            "photo.like_count"))
+        cover_url = _ks_str(_deep_get(raw, "photo.coverUrl", "coverUrls.0",
+                                      "photo.coverUrls.0.url", "photo.coverUrl"))
+        # CDN 直链天然无水印（学习材料 §4），优先取 photo 下
+        play = _ks_str(_deep_get(raw, "photoUrl", "photo.photoUrl", "photo.photoUrls.0.url",
+                                 "mainMvUrls.0.url", "playUrl"))
+        if ks_is_atlas(raw, source):
+            image_list = ks_atlas_urls(raw, source)
+
+    elif source == KS_SCHEMA_PARSER:
+        # ④ media_parser 归一化 dict（_normalize_data 输出）：合并场景由
+        #    ks_merge_parser_data() 处理；此处独立产出时保留其全部可下载字段。
+        video_id = _ks_str(_deep_get(raw, "video_id", "aweme_id", "work_id"))
+        desc = _ks_str(raw.get("title"))
+        author = _ks_str(raw.get("author"))
+        cover_url = _ks_str(raw.get("cover_url"))
+        play = _ks_str(raw.get("video_url"))
+        videos = raw.get("videos") if isinstance(raw.get("videos"), list) else []
+        for item in (raw.get("images") or []):
+            url = _ks_str(item.get("url") if isinstance(item, dict) else item)
+            if url:
+                image_list.append(url)
+        if not play and videos:
+            # 无主直链时把多视频的 url 也列出，不丢整条（H11）
+            for item in videos:
+                url = _ks_str(item[0] if isinstance(item, (list, tuple)) and item else item)
+                if url:
+                    image_list.append(url)
+                    if not play:
+                        play = url
+                        if len(videos) > 1:
+                            why_parts.append("一帖多视频，已取第 1 条")
+        platform = _ks_str(raw.get("platform")) or "kuaishou"
+    else:
+        return None, KS_FAIL_TEXT["schema"]
+
+    play = _ks_https(play)
+    if not video_id:
+        # 关键 key 缺失：返回具体原因，不静默 continue（P0-1 / P1-4）
+        return None, KS_FAIL_TEXT["schema"]
+
+    video = VideoInfo(
+        video_id=video_id, desc=desc, author=author, sec_uid=sec_uid,
+        create_time=create_time, duration=duration, digg_count=digg_count,
+        cover_url=cover_url, no_watermark_url=play, share_url=final_share,
+        image_list=image_list, platform=platform,
+    )
+    why = ""
+    if why_parts:
+        why = KS_FAIL_TEXT["schema"] + "（" + "、".join(why_parts) + "）"
+    return video, why
+
+
+def ks_merge_parser_data(video: VideoInfo, data: dict) -> list[str]:
+    """把 media_parser.parse() 的归一化 dict 就地合并进 VideoInfo。
+
+    更新 no_watermark_url / image_list / cover_url；返回备注（如「一帖多视频，
+    已取第 1 条」）。不新增 VideoInfo 字段、不改 dataclass、不覆盖已有非空值。
+    """
+    notes: list[str] = []
+    if not isinstance(data, dict) or not data:
+        return notes
+    new_url = _ks_https(_ks_str(data.get("video_url")))
+    videos = data.get("videos") if isinstance(data.get("videos"), list) else []
+    if not new_url and videos:
+        first = videos[0]
+        if isinstance(first, (list, tuple)) and first:
+            new_url = _ks_https(_ks_str(first[0]))
+        elif isinstance(first, str):
+            new_url = _ks_https(_ks_str(first))
+        if new_url and len(videos) > 1:
+            notes.append("一帖多视频，已取第 1 条")
+    if new_url:
+        video.no_watermark_url = new_url
+
+    images: list[str] = []
+    for item in (data.get("images") or []):
+        url = _ks_str(item.get("url") if isinstance(item, dict) else item)
+        if url:
+            images.append(url)
+    if images:
+        existing = list(getattr(video, "image_list", None) or [])
+        seen = set(existing)
+        for url in images:
+            if url not in seen:
+                existing.append(url)
+                seen.add(url)
+        video.image_list = existing
+
+    cover = _ks_str(data.get("cover_url"))
+    if cover and not getattr(video, "cover_url", ""):
+        video.cover_url = cover
+    return notes
+
+
+def ks_fetch_ssr_first_page(
+    profile_text: str,
+    timeout: float = 12.0,
+) -> tuple[list[dict], dict, str]:
+    """免费移动端 SSR 首屏兜底（免登录、免签名、不进付费闸门）。
+
+    返回 (feeds, author, reason)：reason 为空 = 成功；非空 = 降级**类别 key**
+    （network / schema / link），由调用方 ks_fail_text() 转文案上屏。
+    首屏固定 has_more=False，绝不翻页；0.4s 轻量节流；全程不抛异常。
+    """
+    time.sleep(0.4)
+    text = _ks_str(profile_text)
+    if not text:
+        return [], {}, "link"
+    url = text
+    match = re.search(r"https?://[^\s<>\"'，。；！？、【】《》]+", text)
+    if match:
+        url = match.group(0).rstrip("，。！？、,.!?;")
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True,
+                          trust_env=False, headers={"User-Agent": _KS_MOBILE_UA}) as client:
+            resp = client.get(url)
+        html = resp.text
+    except httpx.RequestError:
+        return [], {}, "network"
+    except Exception:                                   # noqa: BLE001
+        return [], {}, "network"
+
+    idx = html.find("window.INIT_STATE")
+    if idx < 0:
+        return [], {}, "schema"
+    sub = html[idx:]
+    eq = sub.find("=")
+    if eq < 0:
+        return [], {}, "schema"
+    sub = sub[eq + 1:].strip()
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(sub)
+    except (ValueError, TypeError):
+        return [], {}, "schema"
+
+    feeds: list[dict] = []
+    author: dict = {"name": "", "uid": ""}
+    try:
+        for value in (obj.values() if isinstance(obj, dict) else []):
+            if not isinstance(value, dict):
+                continue
+            if ("feeds" in value and isinstance(value["feeds"], list)
+                    and not feeds):
+                feeds = [f for f in value["feeds"] if isinstance(f, dict)]
+            if "userProfile" in value and isinstance(value["userProfile"], dict):
+                profile = value["userProfile"].get("profile") or {}
+                if isinstance(profile, dict) and profile.get("user_name"):
+                    author = {
+                        "name": str(profile.get("user_name") or ""),
+                        "uid": str(profile.get("user_id") or profile.get("eid") or ""),
+                    }
+        if feeds and not author.get("name"):
+            first_user = _ks_str(_deep_get(feeds[0], "photo.userName", "userName"))
+            if first_user:
+                author["name"] = first_user
+    except Exception:                                   # noqa: BLE001
+        return [], {}, "schema"
+
+    # feeds 为空是「内容类」成功返回（非解析失败），由调用方双重确认后判 empty
+    return feeds, author, ""
+
+
+def ks_effective_media_type(video: "VideoInfo", requested: str) -> tuple[str, str]:
+    """按条目实际内容双向决定下载类型（不新增 UI 控件、不动 media_combo 下拉）。
+
+    ★ 函数名带 `ks_` 是历史命名（2026-11-25 从快手链路起步），**对全部平台生效**：
+      函数体内不读 `video.platform`，所有 GUI 下载入口都经 `download_videos()`
+      调用本函数，抖音 / TikTok / 快手 / 小红书 / 视频号一律适用。
+      严禁日后为快手加平台守卫把它变成快手专用。
+
+    客户现网案例（v1.28.15 截图，2026-11-25 用户澄清为 **TikTok 视频**）：
+    选「图文(图集)」去下一条 TikTok 视频作品，image_list 为空 →
+    `_download_images()` 当场抛出图集内部术语，客户完全无从下手。
+    正确口径是**内容决定类型**，下拉只是偏好：
+      1. 有 image_list 且无直链（真图集）→ image，无论下拉选什么；
+      2. 无 image_list 且有直链（真视频）→ 尊重 audio/text 显式选择，否则 video；
+      3. 两者都无 → 返回 ("", 内容类具体原因)，不落回内部术语。
+    返回 (实际 media_type 或 "", 说明)：说明非空表示该文件不可下载。
+    """
+    has_imgs = bool(getattr(video, "image_list", None) or [])
+    has_url = bool((getattr(video, "no_watermark_url", "") or "").strip())
+    want = str(requested or "video").strip().lower()
+    if has_imgs and not has_url:
+        return "image", ""
+    if has_url and not has_imgs:
+        if want in ("audio", "text"):
+            return want, ""
+        return "video", ""
+    if has_imgs and has_url:
+        # 图集与直链并存：跟随下拉（image→图集，其余→视频），视频优先用现成直链
+        return ("image" if want == "image" else "video"), ""
+    return "", KS_FAIL_TEXT["content"]
+
+
+def _ks_degrade_category(resp: Any) -> str:
+    """把付费响应归入第 6 节降级信号表的类别（config / limit / network / ""）。
+
+    只认明确信号：resp.code / resp.success / HTTP 状态，不把 except 本身当理由。
+    `""` 表示无需降级（响应成功）。
+    """
+    if resp is None:
+        return "network"
+    success = bool(getattr(resp, "success", False))
+    if success:
+        return ""
+    code = getattr(resp, "code", "")
+    text = str(code).strip().lower()
+    raw = getattr(resp, "raw_json", None)
+    raw_code = str(raw.get("code") or "").strip().lower() if isinstance(raw, dict) else ""
+    code = text or raw_code
+    if code == "unsupported":
+        return "config"
+    if code in ("unauthorized", "insufficient_balance", "capability_paused",
+                "not_found", "settlement_unknown", "upstream_failed",
+                "invalid_params", "401", "402"):
+        return "config"
+    if code in ("rate_limited", "429"):
+        return "limit"
+    if code in ("transport_error", "timeout", "upstream_failed"):
+        return "network"
+    # 其它付费失败（含旧通道 301 COLLECT FAILED）：按内容类处理，由 SSR 兜底再判 empty
+    return "content"
+
+
+def _ks_parse_reason_category(reason: str) -> str:
+    """把 media_parser.parse() 的人话原因归入第 6 节类别（用于单条补全失败上屏）。"""
+    text = str(reason or "")
+    if any(k in text for k in ("限流", "429", "频繁")):
+        return "limit"
+    if any(k in text for k in ("网络", "超时", "连不上", "timeout", "connect", "Network")):
+        return "network"
+    if any(k in text for k in ("结构", "非 JSON", "无法识别")):
+        return "schema"
+    if any(k in text for k in ("删除", "私密", "204", "不存在", "不可用", "没有内容")):
+        return "content"
+    return "content"
+
+
 class VideoDownloader:
     """Download no-watermark videos from Douyin."""
 
@@ -1654,6 +2156,29 @@ class VideoDownloader:
 
 
 
+    def _local_service_resolve(self, target: str) -> tuple[VideoInfo | None, str]:
+        """本机 media-parser 引擎（可选、免费）。没部署 / 没启用 / 失败一律返回 None。
+
+        ★ 与 zacao、okdata、JustOneAPI 严格隔离：本方法只认本机的
+          http://127.0.0.1:8051 服务，不读任何付费 Key，不碰额度。
+        """
+        try:
+            from .local_media_parser import is_enabled, parse as _local_parse
+        except Exception:                                   # noqa: BLE001
+            return None, ""
+        if not is_enabled():
+            return None, ""
+        try:
+            data, reason = _local_parse(target)
+        except Exception as e:                              # noqa: BLE001
+            return None, f"本机解析引擎异常({type(e).__name__})"
+        if not data:
+            return None, reason or ""
+        video = self._media_to_video_info(data, target)
+        if video is None:
+            return None, "本机解析引擎返回了结果，但没有可用的下载地址"
+        return video, ""
+
     def _media_service_resolve(self, target: str) -> tuple[VideoInfo | None, str]:
         """把一条链接交给**服务端解析**通道，拿不到就返回 None + 原因。
 
@@ -1665,7 +2190,13 @@ class VideoDownloader:
         ★ 异常一律吞掉并返回原因：调用方是批量循环，一条抛异常会让整批中止
           （v1.22.0 的老教训 —— 免费档的占位 client 炸出「API异常(TypeError)」
           这种客户看不懂的话）。
+
+        ★ 2026-11-28：可选的本机 media-parser 引擎排在 zacao 之前；
+          它没启用或解析失败时，下面原有 zacao 链路一字不改继续跑。
         """
+        local_video, _local_reason = self._local_service_resolve(target)
+        if local_video is not None:
+            return local_video, ""
         try:
             from .media_parser import parse as _svc_parse
         except Exception:                                   # noqa: BLE001
@@ -1758,6 +2289,12 @@ class VideoDownloader:
 
         text = share_text.strip()
         reasons = []
+        # ★ 2026-11-28 本机解析引擎（可选）：真实样本验证抖音 note 链接能拿到
+        #   标题 + 图集，且不花任何额度。没部署 / 没启用 / 失败就继续下面原有的
+        #   免费 HTML → 浏览器渲染 → 接口兜底链路，一条都不跳过。
+        local_video, _lreason = self._local_service_resolve(text)
+        if local_video is not None:
+            return local_video, ""
         # ★ 必须每次重置：界面是拿这个字段判断"要不要转成拉列表"的，
         #   残留上一次的值会把一条正常作品链接也误转走。
         self._last_blogger_sec_uid = ""
@@ -2676,11 +3213,18 @@ class VideoDownloader:
                 data, _r = _svc_parse(url)
             except Exception:                           # noqa: BLE001
                 return None
-            new_url = str((data or {}).get("video_url") or "")
-            if not new_url or new_url == (video.no_watermark_url or ""):
+            if not data:
                 return None
-            # 只换地址、保留列表里带回来的标题/作者等元数据（文件名靠它们）
-            return replace(video, no_watermark_url=new_url)
+            # 保留列表里带回来的标题/作者等元数据（文件名靠它们）；图集条目
+            # 同步更新 image_list（H16），视频条目更新 no_watermark_url。
+            fresh = replace(video, image_list=list(getattr(video, "image_list", None) or []))
+            ks_merge_parser_data(fresh, data)
+            old_imgs = list(getattr(video, "image_list", None) or [])
+            changed = bool(
+                (fresh.no_watermark_url and fresh.no_watermark_url != (video.no_watermark_url or ""))
+                or (fresh.image_list and fresh.image_list != old_imgs)
+            )
+            return fresh if changed else None
         # ★ 2026-11-21：视频号直链同样会过期（finder.video.qq.com 的 token
         #   有时效）。原来会掉进下面的抖音重解析分支，拿 /sph/ 链接当抖音
         #   作品页处理，注定失败 —— 免费解析通道本来就能处理它，直接复用。
@@ -2822,57 +3366,107 @@ class VideoDownloader:
 
     def _download_once(self, url: str, headers: dict, save_path: Path,
                        on_chunk=None, trust_env: bool = False) -> tuple[bool, str]:
-        """下载一次（一条地址 + 一种网络路径）。成功返回 (True, "")。
+        """下载一次（一条地址 + 一种网络路径），成功返回 (True, "")。
 
+        ★ 2026-11-25 `.tmp` + Range 断点续传（P1-2）：先写 `<file>.tmp`，用
+          `Range: bytes=<已有字节>-` 续传（206 → ab 追加 / 200 → wb 重写），
+          成功才 `rename()` 成目标文件；仅对网络类错误（超时 / 连接中断 / EOF）
+          最多重试 3 次，HTTP 4xx / 内容类型不符 / 写盘错误一律不重试。
         trust_env=False 表示忽略系统代理直连：抖音 CDN 在国内，走代理反而
         常被拦或超时；但有些客户机器只有代理能出网，所以两种都试一遍。
         """
-        try:
-            with httpx.Client(
-                timeout=httpx.Timeout(300.0, connect=20.0),
-                follow_redirects=True,
-                headers=headers,
-                trust_env=trust_env,
-            ) as client:
-                with client.stream("GET", url) as r:
-                    r.raise_for_status()
-                    ctype = (r.headers.get("content-type") or "").lower()
-                    if ctype and not any(k in ctype for k in
-                                         ("video", "octet-stream", "mp4", "binary")):
-                        self._cleanup(save_path)
-                        return False, (f"返回的不是视频({ctype.split(';')[0]}，"
-                                       "多半是链接失效或被风控拦了，重新解析一次再下)")
-                    total = int(r.headers.get("content-length", 0))
-                    downloaded = 0
-                    with open(save_path, "wb") as f:
-                        for chunk in r.iter_bytes(chunk_size=65536):
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if on_chunk:
-                                on_chunk(downloaded, total)
-            if save_path.stat().st_size == 0:
-                save_path.unlink(missing_ok=True)
-                return False, "地址返回空内容（多为链接已过期，重新解析一次再下）"
-            return True, ""
-        except httpx.HTTPStatusError as e:
-            code = e.response.status_code
-            hint = {403: "被拒绝(403，多半是链接失效或需要登录)",
-                    404: "地址不存在(404，链接可能已过期)",
-                    410: "地址已失效(410)"}.get(code, "")
-            self._cleanup(save_path)
-            return False, f"HTTP {code} {hint}".strip()
-        except httpx.RequestError as e:
-            self._cleanup(save_path)
-            return False, f"网络错误({type(e).__name__})"
-        except OSError as e:
-            # ★ 这里以前一律报「保存目录不可写」，但 OSError 覆盖了
-            #   套接字被拦(WinError 10013)、磁盘满(112)、路径过长(206)……
-            #   客户拿着「不可写」去改目录，改了也没用。现在按错误码说实话。
-            self._cleanup(save_path)
-            return False, _oserror_reason(e, save_path)
-        except Exception as e:                              # noqa: BLE001
-            self._cleanup(save_path)
-            return False, f"下载异常({type(e).__name__})"
+        tmp_path = Path(str(save_path) + ".tmp")
+
+        def _drop_tmp() -> None:
+            """非网络错误：强制删掉 tmp（换链接后绝不能续传上一链接的残片）。"""
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        # 网络类错误白名单（其余异常一律不重试，避免把 404 / 写盘错重试 3 遍）
+        _net_cls = ("TimeoutException", "ConnectError", "ConnectTimeout", "ReadTimeout",
+                    "WriteTimeout", "PoolTimeout", "NetworkError", "ReadError",
+                    "RemoteProtocolError", "ChunkedEncodingError", "IncompleteRead")
+        last_err = ""
+        for attempt in range(3):
+            try:
+                start = (tmp_path.stat().st_size
+                         if tmp_path.exists() and tmp_path.stat().st_size > 0 else 0)
+                req_headers = dict(headers or {})
+                if start:
+                    req_headers["Range"] = f"bytes={start}-"
+                with httpx.Client(
+                    timeout=httpx.Timeout(300.0, connect=20.0),
+                    follow_redirects=True,
+                    headers=req_headers,
+                    trust_env=trust_env,
+                ) as client:
+                    with client.stream("GET", url) as r:
+                        r.raise_for_status()
+                        ctype = (r.headers.get("content-type") or "").lower()
+                        if ctype and not any(k in ctype for k in
+                                             ("video", "octet-stream", "mp4", "binary")):
+                            _drop_tmp()
+                            return False, (f"返回的不是视频({ctype.split(';')[0]}，"
+                                           "多半是链接失效或被风控拦了，重新解析一次再下)")
+                        # 206 且本地已有部分 → 追加；其余（含 200）→ 从头重写
+                        mode = "ab" if (start and r.status_code == 206) else "wb"
+                        if mode == "wb":
+                            start = 0
+                        total = int(r.headers.get("content-length", 0))
+                        downloaded = start
+                        with open(tmp_path, mode) as f:
+                            for chunk in r.iter_bytes(chunk_size=65536):
+                                if not chunk:
+                                    continue
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if on_chunk:
+                                    on_chunk(downloaded, total)
+                if tmp_path.stat().st_size == 0:
+                    _drop_tmp()
+                    return False, "地址返回空内容（多为链接已过期，重新解析一次再下）"
+                # 成功落盘才 rename；rename 失败按写盘错误处理，不重试下载
+                try:
+                    tmp_path.replace(save_path)
+                except OSError as e:
+                    return False, _oserror_reason(e, save_path)
+                return True, ""
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                # 416（Range 越界，服务端已变）→ 清掉 tmp 立即重下一轮，不算网络重试
+                if code == 416 and tmp_path.exists():
+                    _drop_tmp()
+                    if attempt < 2:
+                        continue
+                hint = {403: "被拒绝(403，多半是链接失效或需要登录)",
+                        404: "地址不存在(404，链接可能已过期)",
+                        410: "地址已失效(410)"}.get(code, "")
+                _drop_tmp()
+                return False, f"HTTP {code} {hint}".strip()
+            except httpx.RequestError as e:
+                cls = type(e).__name__
+                last_err = f"网络错误({cls})"
+                if any(k in cls for k in _net_cls) and attempt < 2:
+                    time.sleep(0.6)
+                    continue
+                # 保留 tmp：下次再下可续传；只清零字节残片
+                self._cleanup(tmp_path)
+                return False, last_err
+            except OSError as e:
+                # OSError 覆盖套接字被拦(10013)、磁盘满(112)、路径过长(206)……
+                _drop_tmp()
+                return False, _oserror_reason(e, tmp_path)
+            except Exception as e:                          # noqa: BLE001
+                last_err = f"下载异常({type(e).__name__})"
+                if any(k in type(e).__name__ for k in _net_cls) and attempt < 2:
+                    time.sleep(0.6)
+                    continue
+                _drop_tmp()
+                return False, last_err
+        _drop_tmp()
+        return False, last_err or "网络错误（重试 3 次仍失败）"
 
     @staticmethod
     def _cleanup(save_path: Path) -> None:
@@ -2914,7 +3508,11 @@ class VideoDownloader:
     def _download_images(self, video: VideoInfo, subdir: str = "") -> tuple[Path | None, str]:
         """下载图集（图文笔记）的每张图片到独立子目录。"""
         if not video.image_list:
-            return None, "该作品不是图集/无图片列表"
+            # 客户现网（TikTok 视频）：选「图文(图集)」却下一条视频作品，
+            # 旧的图集内部术语客户无从下手，已改成可操作的人话。
+            # 正常路径已由 ks_effective_media_type() 提前纠正；这里是可被
+            # 直接调用 download_video() 的老调用方兜底，文案仍须人话可操作。
+            return None, "这条是视频作品（没有图集图片）—— 请把下载类型切到「视频」再试"
         save_dir, _note = self._resolve_save_dir(subdir)
         author = _safe_filename(video.author, 30) or "unknown"
         desc = _safe_filename(video.desc, 50)
@@ -2955,6 +3553,9 @@ class VideoDownloader:
                 return None, f"第{idx}张图片{_oserror_reason(e, fpath)}"
             except Exception as e:
                 return None, f"第{idx}张图片下载失败: {type(e).__name__}"
+        # 原实现循环正常结束后没有 return → 隐式返回 None，调用方 `path, err = ...`
+        # 当场 TypeError，图集能力虽然分流到位却永远"下载失败"。最小修复：补返回值。
+        return album_dir, ""
     def _extract_audio(self, video_path: Path, video: VideoInfo, subdir: str = "") -> tuple[Path | None, str]:
         """用 ffmpeg 从已下载的视频中抽取 mp3。"""
         if not self.ffmpeg_path:
@@ -2983,8 +3584,12 @@ class VideoDownloader:
         on_chunk: Callable[[VideoInfo, int, int], None] | None = None,
         max_workers: int | None = None,
         media_type: str = "",
+        should_stop: Callable[[], bool] | None = None,
     ) -> list[tuple[VideoInfo, Path | None, str]]:
         """Download multiple videos concurrently.
+
+        should_stop：零参闭包，返回 True 时跳过尚未开始的条目（停止入口，
+        复用调用侧标志位，不引入全局单例 / 轮询）。既有调用方不传，行为不变。
 
         Args:
             videos: list of VideoInfo to download.
@@ -3018,15 +3623,31 @@ class VideoDownloader:
                 return id_locks.setdefault(key, threading.Lock())
 
         def worker(idx: int, v: VideoInfo):
+            # 停止入口：已发出的下载跑完即止，未开始的直接记「已停止」
+            if should_stop is not None and should_stop():
+                slots[idx] = (v, None, "已停止（用户点了「停止」）")
+                with lock:
+                    done[0] += 1
+                    finished = done[0]
+                if on_progress:
+                    on_progress(finished, total, v, None, "已停止")
+                return
             chunk_cb = None
             if on_chunk:
                 def chunk_cb(d, t, _v=v):
                     on_chunk(_v, d, t)
             try:
                 with _lock_for(v):
-                    path, err = self.download_video(
-                        v, subdir=subdir, on_chunk=chunk_cb, media_type=media_type,
-                    )
+                    # ★ 2026-11-25 双向分流：内容决定类型，下拉只是偏好。
+                    #   真图集强制 image（即使下拉选了 video）；真视频强制 video
+                    #   （即使下拉误选 image —— 客户截图 P0 现场）；audio/text 尊重选择。
+                    eff_media, why = ks_effective_media_type(v, media_type)
+                    if why:
+                        path, err = None, why
+                    else:
+                        path, err = self.download_video(
+                            v, subdir=subdir, on_chunk=chunk_cb, media_type=eff_media,
+                        )
             except Exception as e:                      # noqa: BLE001
                 path, err = None, f"下载异常: {type(e).__name__}: {e}"
             slots[idx] = (v, path, err)
@@ -3384,103 +4005,198 @@ class VideoDownloader:
             return num_hint, ""
         return "", "快手账号资料没查到 —— 换一条主页链接再试（或稍后再试）"
 
+    def _ks_schema(self) -> str:
+        """当前列表采集通道对应的上游 schema（okdata 默认 / 旧通道扁平 feeds）。"""
+        return (KS_SCHEMA_OKDATA
+                if getattr(self.client, "provider", "") == "okdata"
+                else KS_SCHEMA_LEGACY)
+
     def list_kuaishou_blogger_videos(self, profile_text: str, max_pages: int = 30,
                                      on_progress: Callable[[int], None] | None = None
                                      ) -> tuple[list[VideoInfo], str]:
-        """快手账号作品批量采集（两段式）。返回 (videos, error_msg)。
+        """快手账号作品批量采集（两级降级）。返回 (videos, error_msg)，契约不变。
 
-        第 1 段（JustOneAPI，数据采集端口）：解析主页 → user-published-videos-v2
-        按 pcursor 翻页拉全作品列表（每页 10 条，page 参数不翻页，别用）。
-        第 2 段（video.zacao.top，视频采集端口）：列表没带 main_mv_urls 的条目，
-        拼成 https://www.kuaishou.com/short-video/<photo_id> 逐条解析补直链。
-
-        ★ 实测已知坑：
-          · 301 COLLECT FAILED 是上游瞬时失败，重发一次；**账号一条公开作品
-            都没有时上游会一直 301**（拿忠岩主页实测 4 连 301），此时报
-            "可能没有公开作品"而不是"链接坏了"；
-          · feed_id 字段（"id"）在 feeds 里是 None，f 短码在 share_info 里 ——
-            都不用管，下载地址走 photo_id。
+        第 1 级（完整采集通道）：okdata 默认 / 用户可切回旧通道，按游标翻页。
+        第 2 级（免费移动端 SSR 首屏兜底）：仅付费明确失败信号命中时触发，
+          付费成功绝不发额外请求；首屏 has_more=False，UI 明示边界。
+        缺直链条目逐条走 video.zacao.top 补，单条失败隔离，不整批短路。
         """
         uid, reason = self._resolve_kuaishou_uid(profile_text)
         if not uid:
             return [], reason
         self._last_list_note = ""     # 别把上一轮（抖音/上次快手）的收尾说明串过来
+        schema = self._ks_schema()
+        is_okdata = schema == KS_SCHEMA_OKDATA
         videos: list[VideoInfo] = []
+        seen: set[str] = set()
         pcursor = ""
-        partial_err = ""
+        paid_count = 0
+        ssr_used = False
+        ssr_count = 0
+        ssr_empty_confirmed = False
+        degrade_cat = ""
+        paid_success_empty = False
+        schema_warns: list[str] = []
+        merge_notes: list[str] = []
+
+        # ---- 第 1 级：完整采集通道（参数透传修复 S02：两套参数名并存）
         for _page in range(max(1, max_pages)):
-            params = {"userId": int(uid), "pcursor": pcursor, "count": 20}
+            if is_okdata:
+                # okdata：userId→id；cursor 在 _PASSTHROUGH 白名单、首页空串自动丢弃；
+                # count / pcursor 一律不发（门禁 :118-119 钉死 count 应被丢弃）。
+                params: dict[str, Any] = {"userId": int(uid), "cursor": pcursor}
+            else:
+                params = {"userId": int(uid), "pcursor": pcursor, "count": 20}
             resp = self.client.request("kuaishou", "user-published-videos-v2", params)
             if not resp.success:
-                time.sleep(1.5)
+                time.sleep(1.5)       # 既有：瞬时失败重发一次（301 / 429 / 网络）
                 resp = self.client.request("kuaishou", "user-published-videos-v2", params)
+
             if not resp.success or not isinstance(resp.data, dict):
-                if not videos:
-                    return [], ("快手作品列表拉取失败 —— 该账号可能没有公开作品，"
-                                "或上游采集暂时拥堵，过几分钟再试一次")
-                partial_err = "列表没拉全（上游采集中途失败），稍后可以再拉一次补齐"
+                degrade_cat = _ks_degrade_category(resp) if not resp.success else "schema"
                 break
+
             data = resp.data
             feeds = data.get("feeds") or []
             if not isinstance(feeds, list) or not feeds:
+                if data.get("has_more") not in (True, 1, "1", "true", "True"):
+                    paid_success_empty = True
+                    degrade_cat = "content"
                 break
+
+            page_added = 0
+            page_bad = 0
             for raw in feeds:
                 if not isinstance(raw, dict):
+                    page_bad += 1
                     continue
-                v = self._to_video_info_p("kuaishou", raw)
-                if v and v.video_id:
-                    v.share_url = f"https://www.kuaishou.com/short-video/{v.video_id}"
-                    videos.append(v)
+                v, why = ks_normalize_to_video_info(raw, schema)
+                if why:
+                    schema_warns.append(why)
+                if v is None or not v.video_id:
+                    page_bad += 1
+                    continue
+                if v.video_id in seen:
+                    continue
+                seen.add(v.video_id)
+                # U2 无凭据无法实测：保留现状 short-video/<video_id> 规则 + 原始 video_id
+                v.share_url = f"https://www.kuaishou.com/short-video/{v.video_id}"
+                videos.append(v)
+                page_added += 1
+            paid_count += page_added
             if on_progress:
                 try:
                     on_progress(len(videos))
                 except Exception:                       # noqa: BLE001
                     pass
-            pcursor = str(data.get("pcursor") or "no_more")
-            if pcursor in ("no_more", "", "None"):
-                break
-            time.sleep(0.4)     # 轻微节流，别把上游打热
-        if not videos:
-            return [], partial_err or "该账号的作品列表是空的（可能没有公开作品）"
 
-        # ---- 第 2 段：缺直链的条目走 zacao.top 补（免费端口，不花接口钱）
-        missing = [v for v in videos if not v.no_watermark_url]
-        svc_unavailable = ""
-        if missing:
-            # ★ 2026-11-24：批量补全前先探活一次。站点整体挂掉时再逐条 parse
-            #   会失败 N 次（慢，而且每条吐一句客户看不懂的错），这里一次探活
-            #   失败就整批短路，只给一句统一的人话。单条解析不经过这里，
-            #   调用契约（返回 (videos, error_msg)）也完全不变。
-            try:
-                from .media_parser import health as _svc_health
-                _ok, _note = _svc_health()
-            except Exception:                           # noqa: BLE001
-                _ok, _note = False, "探活异常"
-            if not _ok:
-                svc_unavailable = "解析服务当前不可用"
+            # 归一化后全部 video_id 取不到 → schema 降级信号（P1-4 结构告警）
+            if not page_added and page_bad:
+                degrade_cat = "schema"
+
+            # ---- 分页双读：okdata 读 next_cursor/has_more；无 has_more 键回落 pcursor
+            if "has_more" in data:
+                nx = str(data.get("next_cursor") or data.get("cursor")
+                         or data.get("max_cursor") or "")
+                more = data.get("has_more") in (True, 1, "1", "true", "True")
+                if more and not nx:
+                    break               # has_more=True 但无有效游标 → 防死循环
+                pcursor = nx
+                if not more:
+                    break
             else:
-                try:
-                    from .media_parser import parse as _svc_parse
-                except Exception:                           # noqa: BLE001
-                    _svc_parse = None
-                for i, v in enumerate(missing):
-                    if _svc_parse is not None:
-                        try:
-                            data, _r = _svc_parse(v.share_url)
-                        except Exception:                   # noqa: BLE001
-                            data = None
-                        if data and data.get("video_url"):
-                            v.no_watermark_url = str(data["video_url"])
-                    if i < len(missing) - 1:
-                        time.sleep(0.6)     # 对齐批量导入节流节奏，别触发服务端 429
+                pcursor = str(data.get("pcursor") or "no_more")
+                if pcursor in ("no_more", "", "None"):
+                    break
+            time.sleep(0.4)             # 翻页节流，30 页上限由 range 保证
+
+        # ---- 第 2 级：免费 SSR 首屏兜底（仅明确降级信号 + 本通道 0 条时才触发）
+        if degrade_cat and not videos:
+            ssr_feeds, ssr_author, ssr_reason = ks_fetch_ssr_first_page(profile_text)
+            if ssr_reason:
+                if ssr_reason in KS_FAIL_TEXT:
+                    degrade_cat = ssr_reason
+            else:
+                ssr_used = True
+                for feed in ssr_feeds:
+                    v, why = ks_normalize_to_video_info(
+                        feed, KS_SCHEMA_SSR, author_fallback=ssr_author.get("name", ""))
+                    if why:
+                        schema_warns.append(why)
+                    if v is None or not v.video_id:
+                        continue
+                    if v.video_id in seen:
+                        continue
+                    seen.add(v.video_id)
+                    if not v.share_url:
+                        v.share_url = f"https://www.kuaishou.com/short-video/{v.video_id}"
+                    videos.append(v)
+                    ssr_count += 1
+                ssr_empty_confirmed = not ssr_feeds
+
+        if not videos:
+            # empty 文案仅「付费明确成功且 feeds 空 + SSR 也确认无作品」双重确认后出现
+            if ssr_empty_confirmed and paid_success_empty:
+                return [], KS_FAIL_TEXT["empty"]
+            return [], (ks_fail_text(degrade_cat) if degrade_cat
+                        else "快手作品列表拉取失败 —— 请换一条主页链接再试（或稍后再试）")
+
+        # ---- 第 2 段：缺直链条目逐条补全（S06：探活失败不整批短路 + 单条失败隔离）
+        missing = [v for v in videos if not v.no_watermark_url]
+        svc_note = ""
+        fail_reasons: list[str] = []
+        # ★ S06（2026-11-25）：旧版这里探活失败就置「解析服务当前不可用」并整批
+        #   短路，客户看不懂还拖垮整批；新逻辑只记原因类别、继续逐条补全，
+        #   单条失败各自带具体原因（该旧话术已废弃上屏，仅留字面量作变更锚点）。
+        try:
+            from .media_parser import health as _svc_health
+            _h_ok, _h_note = _svc_health()
+            if not _h_ok:
+                svc_note = _ks_parse_reason_category(_h_note)   # 只记原因，继续逐条
+        except Exception:                                   # noqa: BLE001
+            svc_note = "network"
+        try:
+            from .media_parser import parse as _svc_parse
+        except Exception:                                   # noqa: BLE001
+            _svc_parse = None
+
+        for i, v in enumerate(missing):
+            if _svc_parse is None:
+                fail_reasons.append(ks_fail_text("network"))
+                continue
+            try:
+                pdata, preason = _svc_parse(v.share_url)
+            except Exception:                               # noqa: BLE001
+                pdata, preason = None, "network"
+            if pdata:
+                merge_notes.extend(ks_merge_parser_data(v, pdata))
+            else:
+                fail_reasons.append(ks_fail_text(_ks_parse_reason_category(preason)))
+            if i < len(missing) - 1:
+                time.sleep(0.6)         # 逐条节流，别触发服务端 429
+
+        # ---- 收尾说明：四段条数 + 降级原因 + 通道 + 首屏边界（S07）
         ok = sum(1 for v in videos if v.no_watermark_url)
-        note = f"快手作品 {len(videos)} 条"
-        if svc_unavailable:
-            note += f"，{svc_unavailable}，{len(missing)} 条暂缺下载地址（稍后再试）"
-        elif ok < len(videos):
-            note += f"，{len(videos) - ok} 条暂缺下载地址（可重新解析）"
-        self._last_list_note = note
-        return videos, partial_err
+        parts = [f"列表：{KS_NOTE_LIST_FULL} {paid_count} 条"]
+        if ssr_used:
+            parts[0] += f"，{KS_NOTE_LIST_SSR} {ssr_count} 条"
+        seg = f"直链：{ok} 条已就绪、{len(videos) - ok} 条待重试"
+        if fail_reasons:
+            seg += f"（{fail_reasons[0]}"
+            if len(fail_reasons) > 1:
+                seg += f" 等 {len(fail_reasons)} 条"
+            seg += "）"
+        elif svc_note:
+            seg += f"（{ks_fail_text(svc_note)}）"
+        parts.append(seg)
+        if schema_warns:
+            parts.append(f"结构告警 {len(schema_warns)} 条：{ks_fail_text('schema')}")
+        if merge_notes:
+            parts.append("备注：" + "；".join(merge_notes[:2]))
+        if ssr_used:
+            parts.append(KS_NOTE_SSR_BOUNDARY)
+        self._last_list_note = "；".join(parts)
+        return videos, ""
 
     def _resolve_share_link_with_reason_p(self, platform: str, share_text: str
                                           ) -> tuple[VideoInfo | None, str]:

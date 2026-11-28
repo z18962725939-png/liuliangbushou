@@ -571,6 +571,7 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
         print( "  0a. 断电文件检测 + 发卡工具功能位指纹预检（始终执行）")
         print(f"  0. GUI 冒烟 + 编译检查 + 功能位同步/门禁检查"
               f"（{'跳过' if args.skip_smoke else '执行'}）")
+        print( "  0b. 解析 Key 注入（源码不含明文，构建时生成 _builtin_key.py）")
         print(f"  1. 版本号 {old_ver} → {new_ver}（先按字节备份两个源文件）")
         print( "  2. 清空 dist")
         print( "  3. PyInstaller 打包 → Inno Setup 生成安装包")
@@ -578,7 +579,8 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
         print( "  5. 同步下载页（版本号 + 微信 UA 可访问性自检）")
         print( "  6. 端到端匿名验证（SHA256 + 文件头）")
         print( "  7. 复制到桌面")
-        print( "  7b. GitHub 提交 / push / Release")
+        print( "  7b. GitHub 提交 / push / Release"
+               + ("（跳过 --skip-github）" if getattr(args, "skip_github", False) else ""))
         if getattr(args, "with_extras", False):
             print( "  7c. 四件套：免费版 → EdgeOne → 镜像站 → 发卡工具")
         print( "  8. 输出摘要 + 客户通知文案")
@@ -601,6 +603,15 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
         print("!" * 58)
     else:
         print(f"   [OK] {why}")
+
+    # ── 0b) 解析 Key 注入（源码不保存明文，构建时生成 _builtin_key.py）──
+    #   ★ 2026-11-25：公开仓里不再保存解析 Key 字面量。打包前必须把 Key
+    #     注入成 justoneapi_collector/_builtin_key.py（已 gitignore），
+    #     否则装出来的包会提示「未配置解析 Key」。
+    code, _ = run([PY, str(ROOT / "tools" / "_inject_media_key.py")], "解析 Key 注入")
+    if code != 0:
+        print("[中止] 解析 Key 注入失败：设置 TRAFFIC_MEDIA_KEY 或写 ~/.trafficcatcher/secrets.env")
+        return 1
 
     # ── 0) 自检 ──
     if not args.skip_smoke:
@@ -986,6 +997,59 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
             print("[中止] 小红书笔记退化（接口映射错 / 正文走错链路 / 清单漏登记），先修好再发版。")
             return 1
 
+        # ★ 2026-11-24 UI 布局评审 P0 补的两条门禁：额度写「16:00」而不是
+        #   「0 点」、GEO 引导条传了官网产品名、选题页把「未连接」写死成
+        #   「去激活」、免费版「直播监控」被启动手风琴压掉 —— 全是「不报错、
+        #   不崩溃、编译和冒烟都抓不到」的话术漂移／工程债，只能靠静态断言钉住，
+        #   防止后续改动又悄悄把口径改回去、把入口藏回去。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_ui_copy.py")],
+                      "UI 文案一致性（额度时间点 / 教程键 / 未连接诊断）")
+        if code != 0:
+            print("[中止] UI 文案漂移（额度时间写错 / 教程键失效 / 又写死去激活），先修好再发版。")
+            return 1
+
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_free_nav.py")],
+                      "免费版导航可见性（三组常驻 / 不参与折叠 / 完整版行为不变）")
+        if code != 0:
+            print("[中止] 免费版入口退化（直播监控又被折叠藏起来了），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-25 快手批量解析两级降级：免费兜底文案边界 / 四类 schema 归一化 /
+        #   双向分流 / Worker 铁律 / 三链路边界。全程离线、不联网、不扣费。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_ks_batch.py")],
+                      "快手批量（免费兜底文案 / 归一化四类 / 双向分流 / Worker 铁律 / 三链路边界）")
+        if code != 0:
+            print("[中止] 快手批量链路退化（免费兜底越界 / 归一化漏字段 / 双向分流失效 / Worker 铁律被破），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-25 红果短剧免费直连配置：部署常量 / 榜单映射 / 播放解析 / CENC 解密 /
+        #   ffmpeg 模板 / 分页去重 / 签名层边界与合规声明。纯离线、不发请求。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_hongguo_config.py")],
+                      "红果免费直连配置（部署常量 / CENC 解密 / ffmpeg / 签名边界 / 合规）")
+        if code != 0:
+            print("[中止] 红果配置模块漂移（常量错 / 解密失效 / 签名边界被破 / 合规声明丢失），先修好再发版。")
+            return 1
+
+        # ★ 2026-11-28 SocialDataX 红果专用通道：七端点 / 凭证隔离 / 不内置支付 /
+        #   用户限制上屏 / CENC 同档解密 / 三通道降级 / Worker 铁律。纯离线、不发请求。
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_socialdatax.py")],
+                      "SocialDataX 短剧通道（七端点 / 凭证隔离 / 只给充值链接 / 限制上屏 / Worker 铁律）")
+        if code != 0:
+            print("[中止] SocialDataX 短剧通道退化（端点漂移 / 混入其它 Key / 内置支付 / 限制文案丢失 / Worker 漏启动），先修好再发版。")
+            return 1
+
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_local_parser.py")],
+                      "本机 media-parser 解析引擎（协议 / 四套凭证隔离 / 回退链 / Worker 铁律）")
+        if code != 0:
+            print("[中止] 本机解析引擎退化（地址漂移 / 混入付费 Key / 切断 zacao 回退 / Worker 漏启动），先修好再发版。")
+            return 1
+
+        code, _ = run([PY, str(ROOT / "tools" / "_validate_contact_qr.py")],
+                      "作者个人微信二维码（与收款码分区 / 相对路径 / 体积门禁 / 排版契约）")
+        if code != 0:
+            print("[中止] 微信二维码链路退化（收款码被换成好友码 / 分区标题丢失 / 图片被忽略 / 内联撑爆体积），先修好再发版。")
+            return 1
+
     # ── 1) 升版本号 ──
     if not args.no_pack:
         print(f"\n{'─' * 58}\n▶ 升版本号 {old_ver} → {new_ver}\n{'─' * 58}")
@@ -1109,10 +1173,14 @@ def _pipeline(args, old_ver: str, new_ver: str) -> int:
     # ── 7b) GitHub 同步 ──
     #   公开仓 z18962725939-png/liuliangbushou：发版提交 + push + Release。
     #   放在摘要之前、线上发布之后：同步失败不影响本次发布，只提醒补跑。
-    try:
-        sync_github(new_ver, args.notes)
-    except Exception as _e:                                    # noqa: BLE001
-        print(f"\n[提醒] GitHub 同步未完成（线上发布不受影响）：{_e}")
+    #   ★ 2026-11-25：新增 --skip-github，用户要求本次只发线上、暂不上传 GitHub。
+    if getattr(args, "skip_github", False):
+        print("\n[跳过] GitHub 同步（--skip-github）：不提交 / 不 push / 不建 Release")
+    else:
+        try:
+            sync_github(new_ver, args.notes)
+        except Exception as _e:                                # noqa: BLE001
+            print(f"\n[提醒] GitHub 同步未完成（线上发布不受影响）：{_e}")
 
     # ── 7c) 四件套（--with-extras 才跑，把原来四个手工命令收进一条）──
     if getattr(args, "with_extras", False):
@@ -1166,6 +1234,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="只打印步骤，不真的执行、不写状态")
     ap.add_argument("--with-extras", action="store_true",
                     help="发版后自动补跑四件套：免费版 / EdgeOne / 镜像 / 发卡工具")
+    ap.add_argument("--skip-github", action="store_true",
+                    help="跳过 GitHub 提交 / push / Release（用户要求暂不上传公开仓）")
     args = ap.parse_args()
 
     st = load_state()

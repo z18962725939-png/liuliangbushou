@@ -163,7 +163,15 @@ with tempfile.TemporaryDirectory(prefix="wx-gate-") as td:
     src = read("gui_qt/pages/wechat_chat_page.py")
     check("页面 require_feature 在主动作第一行",
           "require_feature(self, \"wechat_chat\"" in src)
-    check("按钮用 lambda *_ 接信号", "clicked.connect(lambda *_:" in src)
+    # ★ 2026-11-28：按钮接线按铁律统一升级为 connect_guarded(sig, lambda *_: ...)，
+    #   不再有裸 clicked.connect。断言改成「每个按钮都 guarded + 槽都用 lambda *_ 兜带参信号」
+    #   —— 防「点了报错/没反应」的不变量不变，且比旧断言更严（多验了 guarded）。
+    _btn_guarded = src.count("connect_guarded(")
+    _btn_lambda = src.count("lambda *_:")
+    check("按钮全走 connect_guarded 且槽用 lambda *_ 兜带参信号",
+          _btn_guarded >= 6 and _btn_lambda >= 6
+          and ".clicked.connect(" not in src,
+          f"guarded {_btn_guarded} / lambda {_btn_lambda}")
     check("status 用 setText（不是 set）", "self.status.setText(" in src and ".status.set(" not in src)
     check("列宽走 _tune_tables",
           "def _tune_tables" in src and "self._tune_tables()" in src

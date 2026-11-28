@@ -122,7 +122,7 @@ quota.limit = orig_limit                                     # 还原
 #  C. _free_html_resolve 零成本通道
 # ======================================================================
 print("\n=== C. 免费页面解析通道 ===")
-from justoneapi_collector.video_downloader import VideoDownloader  # noqa: E402
+from justoneapi_collector.video_downloader import VideoDownloader, VideoInfo  # noqa: E402
 
 
 class _Resp:
@@ -156,10 +156,27 @@ GOOD_HTML = (
 )
 HOME_HTML = "<html><body>推荐流</body></html>"
 
-# C1 正常解析
+# ★ 产品现状：SSR 抽取器（_extract_video_from_html / _fast_extract_from_html）
+#   是空实现壳，真实作品页解析已交棒给浏览器渲染通道（_douyin_resolve_impl Step 2.5）。
+#   本段钉的是 _free_html_resolve 的编排：有数据就返回作品/无原因、跳首页判失效、
+#   异常兜住、连续未命中自动停用。用假抽取器模拟"页面里有数据"，不谎称 SSR 提取可用。
+_PAGE_VID = "7166170264458382606"
+
+
+def _fake_html_extract(self, html):
+    if _PAGE_VID not in html:
+        return None
+    return VideoInfo(video_id=_PAGE_VID, desc="测试作品", author="作者",
+                     no_watermark_url="https://api.douyinvod.com/a.mp4",
+                     platform="douyin")
+
+
+dl._extract_video_from_html = types.MethodType(_fake_html_extract, dl)
+
+# C1 正常解析（页面数据 → 命中抽取 → 返回作品）
 dl._redirect_client = _FakeHttp(_Resp(200, GOOD_HTML, "https://www.douyin.com/video/7166170264458382606"))
 v, vid, note = dl._free_html_resolve("https://www.douyin.com/video/7166170264458382606")
-check("HTML 能解析出作品", v is not None and v.no_watermark_url.endswith(".mp4"),
+check("页面通道命中时返回作品", v is not None and v.no_watermark_url.endswith(".mp4"),
       f"url={getattr(v, 'no_watermark_url', '')[:40]}")
 check("解析成功时不带失败原因", note == "", f"note={note}")
 check("能抠出作品 ID", vid == "7166170264458382606", f"vid={vid}")
@@ -236,36 +253,66 @@ class _CountingClient(_FakeClient):
         return _api_ok()
 
 
-# D1 视频页 + HTML 成功 → 一次接口都不该打
+# ★ 产品当前主免费通道是浏览器渲染（SSR 抽取器为空壳）。把它替换成确定性假通道：
+#   命中给播放地址、未命中给明确原因，全程不启动真浏览器、不吃接口额度。
+def _browser_hit(self, url):
+    return VideoInfo(video_id=VID, desc="来自浏览器渲染",
+                     no_watermark_url="https://api.douyinvod.com/api.mp4",
+                     platform="douyin"), ""
+
+
+def _browser_miss(self, url):
+    return None, "浏览器渲染没取到数据（作品可能已删除）"
+
+
+def _use_browser(downloader, hit=True):
+    downloader._browser_render_resolve = types.MethodType(
+        _browser_hit if hit else _browser_miss, downloader)
+
+
+check("付费接口兜底默认关闭（解析零成本）",
+      VideoDownloader.PAID_FALLBACK_ENABLED is False,
+      f"={VideoDownloader.PAID_FALLBACK_ENABLED}")
+
+# D1 视频页 + 免费通道命中 → 一次接口都不该打
 c1 = _CountingClient()
 dl2 = VideoDownloader(c1, save_dir=_SAVE)
 dl2._redirect_client = _FakeHttp(_Resp(200, GOOD_HTML, PAGE_URL))
+_use_browser(dl2)                      # 浏览器渲染命中
 got, reason = dl2._douyin_resolve_impl(PAGE_URL)
 check("视频页走免费通道解析成功", got is not None and got.no_watermark_url.endswith(".mp4"),
       f"reason={reason[:40]}")
 check("★ 免费通道命中时零 API 调用", c1.calls == 0, f"calls={c1.calls}")
 
-# D2 视频页 + HTML 失败 → 必须回落到接口
+# D2 视频页 + 两条免费通道都失败 → 当前契约是「不花接口钱」，并把失败原因说清
 c2 = _CountingClient()
 dl3 = VideoDownloader(c2, save_dir=_SAVE)
 dl3._redirect_client = _FakeHttp(_Resp(500, "", PAGE_URL))
+_use_browser(dl3, hit=False)
 got2, reason2 = dl3._douyin_resolve_impl(PAGE_URL)
-check("HTML 失败时回落到接口", got2 is not None and c2.calls >= 1,
-      f"calls={c2.calls}, reason={reason2[:40]}")
+check("免费通道失败也不花接口钱（付费兜底默认关闭）",
+      got2 is None and c2.calls == 0, f"calls={c2.calls}")
+check("免费通道失败原因可被客户看懂",
+      "没有登录态" in reason2 and "平台登录" in reason2, f"reason={reason2[:60]}")
 
 # D3 纯作品 ID 也先走免费通道
 c3 = _CountingClient()
 dl4 = VideoDownloader(c3, save_dir=_SAVE)
 dl4._redirect_client = _FakeHttp(_Resp(200, GOOD_HTML, PAGE_URL))
+_use_browser(dl4)                      # 浏览器渲染命中
 got3, _r3 = dl4._douyin_resolve_impl(VID)
 check("纯 ID 输入也先走免费通道", got3 is not None and c3.calls == 0, f"calls={c3.calls}")
 
-# D4 免费通道失效（跳首页）→ 仍要回落接口，行为与旧版一致
+# D4 免费通道失效（跳首页）→ 直接判链接失效，不再花钱试接口
 c4 = _CountingClient()
 dl5 = VideoDownloader(c4, save_dir=_SAVE)
+dl5.cookie = "stub-cookie"             # 有登录态才走「链接失效」分支，而不是泛化的扫码提示
 dl5._redirect_client = _FakeHttp(_Resp(200, HOME_HTML, "https://www.douyin.com/"))
-got4, _r4 = dl5._douyin_resolve_impl(PAGE_URL)
-check("跳首页后仍回落接口兜底", c4.calls >= 1, f"calls={c4.calls}")
+_use_browser(dl5, hit=False)
+got4, reason4 = dl5._douyin_resolve_impl(PAGE_URL)
+check("跳首页直接判失效、不花接口钱",
+      got4 is None and c4.calls == 0 and "重新复制" in reason4,
+      f"calls={c4.calls}, reason={reason4[:60]}")
 
 # D5 短链：本地跟随后拿到落地页，同样先走免费通道
 def _fake_short(self, url):
@@ -276,6 +323,7 @@ dl6_client = _CountingClient()
 dl6 = VideoDownloader(dl6_client, save_dir=_SAVE)
 dl6._redirect_client = _FakeHttp(_Resp(200, GOOD_HTML, PAGE_URL))
 dl6.resolve_short_link = types.MethodType(_fake_short, dl6)   # type: ignore[assignment]
+_use_browser(dl6)                      # 浏览器渲染命中
 got5, _r5 = dl6._douyin_resolve_impl("https://v.douyin.com/AbCdEf/")
 check("短链解析走免费通道", got5 is not None and dl6_client.calls == 0,
       f"calls={dl6_client.calls}")
@@ -292,7 +340,7 @@ print("\n=== E. 批量导入额度预检已拆除 / 失败原因透明化 ===")
 import inspect                                                   # noqa: E402
 
 from gui_qt.pages.video_download_page import VideoDownloadPage    # noqa: E402
-from justoneapi_collector.video_downloader import VideoDownloader  # noqa: E402
+from justoneapi_collector.video_downloader import VideoDownloader, VideoInfo  # noqa: E402
 from justoneapi_collector.video_link_import import resolve_links  # noqa: E402
 
 
@@ -316,7 +364,12 @@ check("批量导入改为事后算账（记 _import_quota_before）",
 # —— E3 结果里给交代：花了多少额度 + 引导登录 ——
 _src_done = inspect.getsource(VideoDownloadPage._on_batch_resolved)
 check("失败弹窗引导去「平台登录」", "平台登录" in _src_done)
-check("付费档结果里算接口兜底消耗", "接口兜底消耗" in _src_done)
+# v1.24.0 起解析彻底不调付费接口，算账文案会误导客户，契约改为恒返回空串。
+# 这里测真实返回值，而不是去源码里搜一句已经注释掉的字符串。
+_cost_note = VideoDownloadPage._import_cost_note(object())
+check("解析零成本：结果不再假报接口兜底消耗",
+      _cost_note == "" and "_import_cost_note()" in _src_done,
+      f"note={_cost_note!r}")
 
 # —— E4 接口失败原因透明化（功能测试：假 client 返各种业务码）——
 class _CodeClient:
@@ -337,9 +390,19 @@ class _CodeClient:
                                      "data": self.data if ok else None})
 
 
+def _paid_ok(downloader):
+    """测试失败原因翻译时显式打开付费兜底（产品默认关闭）。
+
+    只给门禁里的假对象开，不改产品默认值：这样既能测到接口业务码翻译，
+    又不会掩盖「正常解析不花钱」这条契约（D 段已单独钉死）。
+    """
+    downloader.PAID_FALLBACK_ENABLED = True
+    downloader._free_tier_blocked = lambda: False
+
+
 c601 = _CodeClient(601, "INSUFFICIENT BALANCE")
 dl601 = VideoDownloader(c601, save_dir=_SAVE)
-dl601._free_tier_blocked = lambda: False               # 模拟付费档
+_paid_ok(dl601)                                        # 模拟付费档
 check("接口欠费时取不到详情", dl601.get_video_detail("7695449147242974527") is None)
 check("欠费原因说人话（余额不足 + 联系作者）",
       "余额不足" in dl601._last_detail_reason
@@ -349,21 +412,21 @@ check("欠费后不再把 5 个参数变体全跑一遍", c601.calls == 1, f"cal
 
 cq = _CodeClient(-9001, "今日调用额度已用完")
 dlq = VideoDownloader(cq, save_dir=_SAVE)
-dlq._free_tier_blocked = lambda: False
+_paid_ok(dlq)
 dlq.get_video_detail("7695449147242974527")
 check("额度用完的原因说人话（0 点重置）",
       "0 点" in dlq._last_detail_reason, dlq._last_detail_reason)
 
 c400 = _CodeClient(400, "param [videoId] can not be empty")
 dl400 = VideoDownloader(c400, save_dir=_SAVE)
-dl400._free_tier_blocked = lambda: False
+_paid_ok(dl400)
 dl400.get_video_detail("7695449147242974527")
 check("参数错误仍要把变体试完（换个名字也许能救）", c400.calls == 5,
       f"calls={c400.calls}")
 
 cempty = _CodeClient(0, "", data={"code": 0})
 dle = VideoDownloader(cempty, save_dir=_SAVE)
-dle._free_tier_blocked = lambda: False
+_paid_ok(dle)
 dle.get_video_detail("7695449147242974527")
 check("接口通了但没数据 → 说明可能已删除",
       "已删除" in dle._last_detail_reason, dle._last_detail_reason)

@@ -146,7 +146,7 @@ class SettingsPage(QWidget):
         al.addLayout(form_row("最大并发", self.concurrency_edit))
         al.addWidget(self.cache_chk)
         save_btn = QPushButton("保存设置"); save_btn.setObjectName("Primary")
-        save_btn.clicked.connect(self._save)
+        connect_guarded(save_btn.clicked, lambda *_: self._save(), on_error=lambda msg: self.fb_status.setText(msg), label="save")
         h = QHBoxLayout(); h.setSpacing(8); h.addWidget(save_btn); h.addStretch()
         al.addLayout(h)
         info = QLabel(
@@ -188,7 +188,7 @@ class SettingsPage(QWidget):
             if disabled:
                 btn.setEnabled(False)
             else:
-                btn.clicked.connect(lambda _c=False, p=plat: self._start_login(p))
+                connect_guarded(btn.clicked, lambda *_: self._start_login(p), on_error=lambda msg: self.fb_status.setText(msg), label="start login")
             row.addWidget(btn)
             self._login_btns[plat] = btn
             st = QLabel("未登录" if not disabled else "国内禁用")
@@ -200,7 +200,7 @@ class SettingsPage(QWidget):
             out.setObjectName("PlatformChip")
             out.setCursor(Qt.CursorShape.PointingHandCursor)
             out.setVisible(False)          # 仅在已登录时出现
-            out.clicked.connect(lambda _c=False, p=plat: self._logout(p))
+            connect_guarded(out.clicked, lambda *_: self._logout(p), on_error=lambda msg: self.fb_status.setText(msg), label="logout")
             self._logout_btns[plat] = out
             row.addWidget(out)
             row.addStretch()
@@ -270,7 +270,7 @@ class SettingsPage(QWidget):
         self.machine_label = QLabel(licensing.machine_id())
         self.machine_label.setStyleSheet("font-family:Consolas;font-weight:700;color:#c62828;")
         mrow.addWidget(self.machine_label)
-        copy_btn = QPushButton("复制机器码"); copy_btn.clicked.connect(self._copy_machine)
+        copy_btn = QPushButton("复制机器码"); connect_guarded(copy_btn.clicked, lambda *_: self._copy_machine(), on_error=lambda msg: self.fb_status.setText(msg), label="copy machine")
         mrow.addWidget(copy_btn)
         mrow.addStretch()
         dev_l.addLayout(mrow)
@@ -280,10 +280,10 @@ class SettingsPage(QWidget):
         dev_l.addWidget(self.lic_input)
         brow = QHBoxLayout()
         act = QPushButton("✔ 立即激活"); act.setObjectName("Primary")
-        act.clicked.connect(self._activate)
-        imp = QPushButton("📂 从 .lic 导入"); imp.clicked.connect(self._import_lic)
-        ref = QPushButton("刷新状态"); ref.clicked.connect(self._refresh_license)
-        clr = QPushButton("清除激活"); clr.clicked.connect(self._clear_lic)
+        connect_guarded(act.clicked, lambda *_: self._activate(), on_error=lambda msg: self.fb_status.setText(msg), label="activate")
+        imp = QPushButton("📂 从 .lic 导入"); connect_guarded(imp.clicked, lambda *_: self._import_lic(), on_error=lambda msg: self.fb_status.setText(msg), label="import lic")
+        ref = QPushButton("刷新状态"); connect_guarded(ref.clicked, lambda *_: self._refresh_license(), on_error=lambda msg: self.fb_status.setText(msg), label="refresh license")
+        clr = QPushButton("清除激活"); connect_guarded(clr.clicked, lambda *_: self._clear_lic(), on_error=lambda msg: self.fb_status.setText(msg), label="clear lic")
         brow.addWidget(act); brow.addWidget(imp); brow.addWidget(ref); brow.addWidget(clr)
         brow.addStretch()
         dev_l.addLayout(brow)
@@ -310,7 +310,7 @@ class SettingsPage(QWidget):
         urow.addWidget(QLabel("更新地址："))
         self.update_url = QLineEdit(self.ctx.get_setting("update_feed_url", branding.UPDATE_FEED_URL or ""))
         urow.addWidget(self.update_url, 1)
-        save_url = QPushButton("保存地址"); save_url.clicked.connect(self._save_update_url)
+        save_url = QPushButton("保存地址"); connect_guarded(save_url.clicked, lambda *_: self._save_update_url(), on_error=lambda msg: self.fb_status.setText(msg), label="save update url")
         urow.addWidget(save_url)
         up_l.addLayout(urow)
         self.update_auto = QCheckBox("启动时自动检查更新")
@@ -318,10 +318,9 @@ class SettingsPage(QWidget):
         self.update_auto.toggled.connect(lambda _v: self._save_update_cfg())
         up_l.addWidget(self.update_auto)
         brow2 = QHBoxLayout()
-        chk = QPushButton("🔍 立即检查更新"); chk.clicked.connect(self._check_update)
-        reset_btn = QPushButton("重置更新提示"); reset_btn.clicked.connect(self._reset_update_prompt)
-        open_dir = QPushButton("打开下载目录"); open_dir.clicked.connect(
-            lambda: updater.open_containing_folder(updater.update_cache_dir()))
+        chk = QPushButton("🔍 立即检查更新"); connect_guarded(chk.clicked, lambda *_: self._check_update(), on_error=lambda msg: self.fb_status.setText(msg), label="check update")
+        reset_btn = QPushButton("重置更新提示"); connect_guarded(reset_btn.clicked, lambda *_: self._reset_update_prompt(), on_error=lambda msg: self.fb_status.setText(msg), label="reset update prompt")
+        open_dir = QPushButton("打开下载目录"); connect_guarded(open_dir.clicked, lambda *_: updater.open_containing_folder(updater.update_cache_dir()), on_error=lambda msg: self.fb_status.setText(msg), label="open containing folder")
         brow2.addWidget(chk); brow2.addWidget(reset_btn); brow2.addWidget(open_dir)
         brow2.addStretch()
         up_l.addLayout(brow2)
@@ -346,9 +345,9 @@ class SettingsPage(QWidget):
         fb_l.addWidget(self.fb_text)
         brow3 = QHBoxLayout()
         submit = QPushButton("📮 提交反馈"); submit.setObjectName("Primary")
-        submit.clicked.connect(self._submit_feedback)
-        send_logs = QPushButton("📋 一键发日志"); send_logs.clicked.connect(self._send_logs)
-        open_logs = QPushButton("📂 打开日志目录"); open_logs.clicked.connect(self._open_logs)
+        connect_guarded(submit.clicked, lambda *_: self._submit_feedback(), on_error=lambda msg: self.fb_status.setText(msg), label="submit feedback")
+        send_logs = QPushButton("📋 一键发日志"); connect_guarded(send_logs.clicked, lambda *_: self._send_logs(), on_error=lambda msg: self.fb_status.setText(msg), label="send logs")
+        open_logs = QPushButton("📂 打开日志目录"); connect_guarded(open_logs.clicked, lambda *_: self._open_logs(), on_error=lambda msg: self.fb_status.setText(msg), label="open logs")
         brow3.addWidget(submit); brow3.addWidget(send_logs); brow3.addWidget(open_logs)
         brow3.addStretch()
         fb_l.addLayout(brow3)
@@ -392,6 +391,49 @@ class SettingsPage(QWidget):
         drow.addStretch()
         dg_l.addLayout(drow)
         self._lays["system"].addWidget(dg)
+
+        # ---------- 本机解析引擎（可选、免费；完整版 / 免费版都可见） ----------
+        st = self.ctx.settings
+        lp_card, lp_l = vertical_card("本机解析引擎（免费、可选）", self)
+        lp_info = QLabel(
+            "点「一键部署」即可：软件自带运行环境，不用装 Python、不用联网、不花采集额度；"
+            "解析优先走本机，没部署或失败时自动退回原有通道。\n"
+            "仅处理自有或已获授权内容；小红书等平台触发风控时需先配置对应 Cookie。"
+        )
+        lp_info.setWordWrap(True)
+        lp_info.setObjectName("Caption")
+        lp_l.addWidget(lp_info)
+        self.local_enable_chk = QCheckBox("启用本机解析引擎（默认关闭）")
+        self.local_enable_chk.setChecked(bool(st.get("local_parser_enabled", False)))
+        lp_l.addWidget(self.local_enable_chk)
+        self.local_url_edit = QLineEdit(
+            str(st.get("local_parser_base_url") or "http://127.0.0.1:8051"))
+        self.local_dir_edit = QLineEdit(str(st.get("local_parser_dir") or ""))
+        self.local_dir_edit.setPlaceholderText("留空 = 软件同级的 media-parser 目录")
+        lp_l.addLayout(form_row("服务地址", self.local_url_edit))
+        lp_l.addLayout(form_row("服务目录", self.local_dir_edit))
+        self.local_key_edit = QLineEdit(str(st.get("local_parser_api_key") or ""))
+        self.local_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.local_key_edit.setPlaceholderText("仅自建 SaaS 模式才需要；本机微服务模式免填")
+        lp_l.addLayout(form_row("服务 Key（可选）", self.local_key_edit))
+        self.local_status = QLabel("")
+        self.local_status.setWordWrap(True)
+        self.local_status.setObjectName("Caption")
+        lp_l.addWidget(self.local_status)
+        lrow = QHBoxLayout()
+        for text, slot, label in (
+                ("检查服务", lambda *_: self._local_check(), "检查本机解析服务"),
+                ("一键部署", lambda *_: self._local_deploy(), "部署本机解析服务"),
+                ("启动服务", lambda *_: self._local_start(), "启动本机解析服务"),
+                ("停止服务", lambda *_: self._local_stop(), "停止本机解析服务")):
+            btn = QPushButton(text)
+            connect_guarded(btn.clicked, slot,
+                            on_error=lambda m: self.local_status.setText(m),
+                            label=label)
+            lrow.addWidget(btn)
+        lrow.addStretch()
+        lp_l.addLayout(lrow)
+        self._lays["system"].addWidget(lp_card)
 
         # ★ 2026-10-27：每档末尾必须垫一根弹簧。分档后单档内容常常比窗口矮，
         #   QVBoxLayout 会把多出来的高度分给「可以被拉长」的那一项 —— 实测
@@ -444,7 +486,7 @@ class SettingsPage(QWidget):
             again.setObjectName("EmptyAction")
             again.setCursor(Qt.CursorShape.PointingHandCursor)
             again.setFixedHeight(28)
-            again.clicked.connect(self._reset_pref)
+            connect_guarded(again.clicked, lambda *_: self._reset_pref(), on_error=lambda msg: self.fb_status.setText(msg), label="reset pref")
             row.addWidget(again)
             self._pref_v.addLayout(row)
             return
@@ -509,7 +551,7 @@ class SettingsPage(QWidget):
             f"留空就用默认目录：{fallback_save_dirs()[0]}")
         row.addWidget(self.free_dir_edit, 1)
         pick = QPushButton("浏览...")
-        pick.clicked.connect(self._pick_free_dir)
+        connect_guarded(pick.clicked, lambda *_: self._pick_free_dir(), on_error=lambda msg: self.fb_status.setText(msg), label="pick free dir")
         row.addWidget(pick)
         lay.addLayout(row)
 
@@ -519,7 +561,7 @@ class SettingsPage(QWidget):
 
         save = QPushButton("保存并检查这个目录")
         save.setObjectName("Primary")
-        save.clicked.connect(self._save_free_dir)
+        connect_guarded(save.clicked, lambda *_: self._save_free_dir(), on_error=lambda msg: self.fb_status.setText(msg), label="save free dir")
         lay.addWidget(save)
         return card_w
 
@@ -602,6 +644,11 @@ class SettingsPage(QWidget):
         except ValueError:
             pass
         s["cache_enabled"] = self.cache_chk.isChecked()
+        # 本机解析引擎：和采集通道完全隔离，只写自己的四个键
+        s["local_parser_enabled"] = self.local_enable_chk.isChecked()
+        s["local_parser_base_url"] = self.local_url_edit.text().strip() or "http://127.0.0.1:8051"
+        s["local_parser_api_key"] = self.local_key_edit.text().strip()
+        s["local_parser_dir"] = self.local_dir_edit.text().strip()
 
         # 落盘到本机 config.json —— 否则重启后 Token 丢失（旧版行为，必须保留）
         self.ctx.save_settings()
@@ -626,6 +673,74 @@ class SettingsPage(QWidget):
                 "设置已保存；还没填 okdata Key，付费采集暂不可用。"
                 "请到 okdata.online 注册后把 okd_ 开头的 Key 填到上面。"
                 "（视频解析与下载仍可正常使用）")
+
+    # ----------------------------------------------------------- 本机解析引擎
+    def _local_check(self):
+        self._local_run("check")
+
+    def _local_deploy(self):
+        self._local_run("deploy")
+
+    def _local_start(self):
+        self._local_run("start")
+
+    def _local_stop(self):
+        self._local_run("stop")
+
+    def _local_run(self, action: str):
+        """部署 / 探活 / 启停都丢 Worker：pip 与端口等待都会卡住主线程。"""
+        from justoneapi_collector import local_media_parser as lmp
+
+        url = self.local_url_edit.text().strip() or lmp.DEFAULT_BASE_URL
+        directory = self.local_dir_edit.text().strip()
+        self._local_action = action
+        self.local_status.setText("正在处理，请稍候…")
+
+        def run(worker):
+            if action == "check":
+                return lmp.health(url)
+            if action == "start":
+                if directory:
+                    lmp.save_config(service_dir=directory)
+                return lmp.start_service(url, directory)
+            if action == "stop":
+                return lmp.stop_service()
+            # deploy：进度实时上屏，失败给人话，不弹英文 traceback
+            def progress(pct, msg):
+                worker.emit_progress(float(pct), str(msg))
+            ok, msg = lmp.ensure_deployed(directory, progress=progress)
+            if ok:
+                lmp.save_config(service_dir=str(lmp.service_dir() if not directory else directory))
+            return ok, msg
+
+        w = Worker(run)
+        connect_guarded(w.progress, self._on_local_progress,
+                        on_error=lambda m: None, label="部署进度")
+        connect_guarded(w.done, self._on_local_done,
+                        on_error=lambda m: self.local_status.setText(m),
+                        label="本机解析引擎")
+        connect_guarded(w.error, lambda m: self.local_status.setText(f"失败：{m}"),
+                        on_error=lambda m: None, label="本机解析引擎失败")
+        w.start()
+
+    def _on_local_progress(self, pct, msg):
+        self.local_status.setText(f"{int(float(pct))}%  {msg}")
+
+    def _on_local_done(self, result):
+        ok, msg = result if isinstance(result, tuple) else (bool(result), str(result))
+        action = getattr(self, "_local_action", "")
+        if action == "check":
+            self.local_status.setText(("服务正常：" if ok else "未就绪：") + msg)
+            return
+        self.local_status.setText(("完成：" if ok else "失败：") + msg)
+        if action == "deploy" and ok:
+            try:
+                from justoneapi_collector import local_media_parser as lmp
+                path = self.local_dir_edit.text().strip() or str(lmp.service_dir())
+                self.local_dir_edit.setText(path)
+                self.local_status.setText("部署完成，点「启动服务」后勾上「启用本机解析引擎」即可")
+            except Exception:                               # noqa: BLE001
+                pass
 
     # ----------------------------------------------------------- 平台登录
     def _start_login(self, platform):
